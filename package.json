@@ -1,0 +1,24 @@
+{
+  "name": "cadence",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "CADENCE — planificateur d'étude piloté par les examens (répétition espacée au niveau chapitre)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "lucide-react": "^0.456.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8"
+  }
+}

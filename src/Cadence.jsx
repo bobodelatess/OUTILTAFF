@@ -1,0 +1,1391 @@
+/*
+ * CADENCE — planificateur d'étude piloté par les examens.
+ *
+ * Répétition espacée au niveau CHAPITRE (pas carte), avec une couche
+ * examens + calendrier + interleaving. Outil quotidien privé.
+ *
+ * Idée centrale : priorité = urgence_de_péremption × pression_d'examen.
+ * La pression d'examen MULTIPLIE (un chapitre faible dont l'examen approche
+ * explose ; un chapitre solide ne monte qu'un peu).
+ *
+ * Un seul fichier. Le moteur de priorité est exporté (fonctions pures) pour
+ * être testé ; le composant par défaut est l'application.
+ *
+ * Modèle de données
+ *   Subject  = { id, name, color, type: 'core' | 'parallel', weeklyFloor? }
+ *   Chapter  = { id, subjectId, name, mastery: 0..100, lastReviewed: ISODate|null }
+ *   Exam     = { id, subjectId, name, date: ISODate, chapterIds: string[] }
+ *   Settings = { minInterval, maxInterval, maxExamPressure, pressureHorizon,
+ *                examModeThreshold, blocksPerDay }
+ *   State    = { subjects, chapters, exams, settings, parallelLog }
+ *   parallelLog : { [lundiISO]: { [subjectId]: nbSéances } }
+ */
+
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Activity, CalendarDays, Layers, Settings as SettingsIcon,
+  Plus, Trash2, ChevronDown, ChevronRight, ChevronLeft, Check,
+  Download, Upload, RotateCcw, AlertTriangle, Shuffle, Lock,
+  BookOpen, Dumbbell, FlaskConical, Target, Flame, Pencil,
+} from 'lucide-react';
+
+/* ------------------------------------------------------------------ *
+ *  Constantes
+ * ------------------------------------------------------------------ */
+
+const STORAGE_KEY = 'cadence.v1';
+
+export const DEFAULT_SETTINGS = {
+  minInterval: 2,
+  maxInterval: 30,
+  maxExamPressure: 5,
+  pressureHorizon: 35,
+  examModeThreshold: 21,
+  blocksPerDay: 5,
+};
+
+const C = {
+  bg: '#0a0e14',
+  panel: '#111824',
+  panel2: '#0d1320',
+  inset: '#0a0f18',
+  line: '#1e2735',
+  line2: '#2b3645',
+  text: '#cdd8e6',
+  dim: '#7c8a9e',
+  faint: '#54616f',
+  accent: '#5ea9ff',
+  good: '#34d399',
+  warn: '#fbbf24',
+  bad: '#f87171',
+};
+
+const MONO = "'JetBrains Mono','SFMono-Regular',ui-monospace,Menlo,Consolas,monospace";
+const SANS = "system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+
+// Rampe thermique : froid (calme/maîtrisé) -> ambre -> rouge (urgent).
+const RAMP = [
+  [0.0, [56, 189, 248]],
+  [0.3, [45, 212, 191]],
+  [0.55, [250, 204, 21]],
+  [0.8, [251, 146, 60]],
+  [1.0, [239, 68, 68]],
+];
+
+/* ------------------------------------------------------------------ *
+ *  Utilitaires
+ * ------------------------------------------------------------------ */
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+const uid = () =>
+  typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : 'id-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+
+function isoOf(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+function parseISO(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+export function todayISO() {
+  return isoOf(new Date());
+}
+export function daysBetween(aISO, bISO) {
+  return Math.round((parseISO(bISO) - parseISO(aISO)) / 86400000);
+}
+export function addDays(iso, n) {
+  const d = parseISO(iso);
+  d.setDate(d.getDate() + n);
+  return isoOf(d);
+}
+export function mondayOf(iso) {
+  const d = parseISO(iso);
+  const offset = (d.getDay() + 6) % 7; // lundi = 0 … dimanche = 6
+  d.setDate(d.getDate() - offset);
+  return isoOf(d);
+}
+
+const round1 = (x) => Math.round(x * 10) / 10;
+const round2 = (x) => Math.round(x * 100) / 100;
+const f2 = (x) => x.toFixed(2);
+
+function fmtLongDate(iso) {
+  return parseISO(iso).toLocaleDateString('fr-FR', {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+  });
+}
+function fmtShortDate(iso) {
+  return parseISO(iso).toLocaleDateString('fr-FR', {
+    weekday: 'short', day: '2-digit', month: 'short',
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ *  Moteur de priorité (fonctions pures, testées)
+ * ------------------------------------------------------------------ */
+
+// 1. Intervalle cible : interpolation géométrique selon la maîtrise.
+export function targetInterval(mastery, s) {
+  const m = clamp(mastery, 0, 100);
+  return s.minInterval * Math.pow(s.maxInterval / s.minInterval, m / 100);
+}
+
+// 2. Urgence de péremption (>= 1 ⇒ en retard ; jamais révisé ⇒ urgent).
+export function baseUrgency(chapter, s, today) {
+  const ti = targetInterval(chapter.mastery, s);
+  const days = chapter.lastReviewed ? daysBetween(chapter.lastReviewed, today) : ti * 2.2;
+  return Math.max(0, days) / ti;
+}
+
+// 3. Multiplicateur d'examen (≈1 quand loin, monte au carré jusqu'au jour J).
+export function examMultiplier(j, s) {
+  if (j < 0 || j > s.pressureHorizon) return 1;
+  const x = (s.pressureHorizon - j) / s.pressureHorizon;
+  return 1 + (s.maxExamPressure - 1) * x * x;
+}
+
+// 4. Facteur d'examen d'un chapitre : max du multiplicateur sur toutes les
+//    épreuves FUTURES qui couvrent ce chapitre. Vaut 1 si aucune.
+export function chapterExamFactor(chapter, exams, s, today) {
+  let factor = 1, exam = null, examDays = null;
+  for (const ex of exams) {
+    if (!ex.chapterIds || !ex.chapterIds.includes(chapter.id)) continue;
+    const j = daysBetween(today, ex.date);
+    if (j < 0) continue; // épreuve passée
+    const mult = examMultiplier(j, s);
+    if (mult > factor) { factor = mult; exam = ex; examDays = j; }
+  }
+  return { factor, exam, examDays };
+}
+
+// 5. Priorité finale + décomposition transparente.
+export function chapterMetrics(chapter, exams, s, today) {
+  const ti = targetInterval(chapter.mastery, s);
+  const urgency = baseUrgency(chapter, s, today);
+  const { factor, exam, examDays } = chapterExamFactor(chapter, exams, s, today);
+  const since = chapter.lastReviewed ? daysBetween(chapter.lastReviewed, today) : null;
+  return { ti, urgency, factor, exam, examDays, since, priority: urgency * factor };
+}
+
+// Prochaine épreuve future d'une matière.
+export function nextFutureExam(subjectId, exams, today) {
+  let best = null;
+  for (const ex of exams) {
+    if (ex.subjectId !== subjectId) continue;
+    const j = daysBetween(today, ex.date);
+    if (j < 0) continue;
+    if (!best || j < best.days) best = { exam: ex, days: j };
+  }
+  return best;
+}
+
+// Mode annales d'une matière : si la prochaine épreuve est à <= examModeThreshold.
+export function annalesModeFor(subjectId, exams, s, today) {
+  const n = nextFutureExam(subjectId, exams, today);
+  return n && n.days <= s.examModeThreshold ? n : null;
+}
+
+// Action recommandée + livrable concret (règle dure : aucun bloc sans production).
+export function recommendedAction(mastery, inAnnales) {
+  if (inAnnales)
+    return { key: 'annales', label: 'Annales', deliverable: '1 annale chronométrée puis fiche d’erreurs' };
+  if (mastery < 40)
+    return { key: 'cours', label: 'Cours', deliverable: 'survole le chapitre + 1 exemple type, pas de détails fins' };
+  if (mastery < 75)
+    return { key: 'exercices', label: 'Exercices', deliverable: '3–4 exos panachés, corrigés, 1 ligne d’erreur' };
+  return { key: 'consolidation', label: 'Consolidation', deliverable: '2 exos variés sans regarder le cours, vérifie la vitesse' };
+}
+
+// Rotation des matières : file gloutonne évitant deux blocs consécutifs de la
+// même matière quand une alternative existe.
+export function buildQueue(ranked, blocksPerDay) {
+  const pool = ranked.slice();
+  const queue = [];
+  let prev = null;
+  while (queue.length < blocksPerDay && pool.length) {
+    let idx = pool.findIndex((c) => c.subjectId !== prev);
+    if (idx === -1) idx = 0; // pas d'alternative : on prend la plus haute priorité
+    const [picked] = pool.splice(idx, 1);
+    queue.push(picked);
+    prev = picked.subjectId;
+  }
+  return queue;
+}
+
+const isPanache = (actionKey) => actionKey === 'exercices' || actionKey === 'annales';
+
+/* ------------------------------------------------------------------ *
+ *  Rampe thermique
+ * ------------------------------------------------------------------ */
+
+function thermal(priority) {
+  const t = clamp(priority / 4, 0, 1);
+  let i = 0;
+  while (i < RAMP.length - 1 && t > RAMP[i + 1][0]) i++;
+  const [t0, c0] = RAMP[i];
+  const [t1, c1] = RAMP[Math.min(i + 1, RAMP.length - 1)];
+  const f = t1 === t0 ? 0 : (t - t0) / (t1 - t0);
+  const rgb = c0.map((c, k) => Math.round(c + (c1[k] - c) * f));
+  return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Persistance (window.storage -> localStorage -> mémoire)
+ * ------------------------------------------------------------------ */
+
+function makeStore() {
+  try {
+    if (typeof window !== 'undefined' && window.storage &&
+        typeof window.storage.getItem === 'function') {
+      return window.storage;
+    }
+  } catch (e) { /* ignore */ }
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const k = '__cadence_probe__';
+      localStorage.setItem(k, '1');
+      localStorage.removeItem(k);
+      return localStorage;
+    }
+  } catch (e) { /* ignore */ }
+  // Repli gracieux en mémoire : l'app fonctionne sans stockage.
+  const mem = {};
+  return {
+    getItem: (k) => (k in mem ? mem[k] : null),
+    setItem: (k, v) => { mem[k] = String(v); },
+    removeItem: (k) => { delete mem[k]; },
+  };
+}
+
+function normalize(s) {
+  return {
+    subjects: Array.isArray(s?.subjects) ? s.subjects : [],
+    chapters: Array.isArray(s?.chapters) ? s.chapters : [],
+    exams: Array.isArray(s?.exams) ? s.exams : [],
+    settings: { ...DEFAULT_SETTINGS, ...(s?.settings || {}) },
+    parallelLog: s?.parallelLog && typeof s.parallelLog === 'object' ? s.parallelLog : {},
+  };
+}
+
+// Données de départ : seulement les matières (aucun chapitre, aucune épreuve).
+export function seedState() {
+  const core = [
+    ['Algèbre linéaire 2', '#7c9cf5'],
+    ['Outils Mathématiques 2', '#a78bfa'],
+    ['Optique ondulatoire', '#38bdf8'],
+    ['Mécanique du solide', '#fbbf24'],
+    ['Électromagnétisme 1', '#f472b6'],
+    ['Atomistique 2', '#34d399'],
+  ].map(([name, color]) => ({ id: uid(), name, color, type: 'core' }));
+  const parallel = [
+    { id: uid(), name: 'Anglais / TOEIC', color: '#5eead4', type: 'parallel', weeklyFloor: 4 },
+    { id: uid(), name: 'Anki', color: '#fca5a5', type: 'parallel', weeklyFloor: 6 },
+  ];
+  return {
+    subjects: [...core, ...parallel],
+    chapters: [],
+    exams: [],
+    settings: { ...DEFAULT_SETTINGS },
+    parallelLog: {},
+  };
+}
+
+function stripChapterIds(exams, ids) {
+  const set = new Set(ids);
+  return exams.map((e) => ({
+    ...e,
+    chapterIds: (e.chapterIds || []).filter((cid) => !set.has(cid)),
+  }));
+}
+
+/* ------------------------------------------------------------------ *
+ *  Petits composants de présentation
+ * ------------------------------------------------------------------ */
+
+const Mono = ({ children, style, color }) => (
+  <span style={{ fontFamily: MONO, color, ...style }}>{children}</span>
+);
+
+const Pastille = ({ color, size = 10 }) => (
+  <span style={{
+    width: size, height: size, borderRadius: '50%', background: color,
+    display: 'inline-block', flex: '0 0 auto', boxShadow: `0 0 0 1px rgba(0,0,0,.35)`,
+  }} />
+);
+
+function MasteryBar({ value, color }) {
+  return (
+    <div title={`maîtrise ${Math.round(value)} / 100`} style={{
+      height: 5, background: C.inset, borderRadius: 3, overflow: 'hidden',
+      border: `1px solid ${C.line}`,
+    }}>
+      <div style={{
+        width: `${clamp(value, 0, 100)}%`, height: '100%',
+        background: color, opacity: 0.55, borderRadius: 3,
+      }} />
+    </div>
+  );
+}
+
+function Chip({ children, color = C.dim, bg, title, style }) {
+  return (
+    <span title={title} style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5,
+      fontFamily: SANS, fontSize: 11, color, padding: '2px 7px',
+      borderRadius: 999, background: bg || 'transparent',
+      border: `1px solid ${bg ? 'transparent' : C.line2}`, whiteSpace: 'nowrap', ...style,
+    }}>{children}</span>
+  );
+}
+
+function Btn({ children, onClick, variant = 'ghost', title, disabled, style, type }) {
+  const base = {
+    display: 'inline-flex', alignItems: 'center', gap: 6, cursor: disabled ? 'not-allowed' : 'pointer',
+    fontFamily: SANS, fontSize: 13, padding: '7px 12px', borderRadius: 8,
+    border: `1px solid ${C.line2}`, background: 'transparent', color: C.text,
+    opacity: disabled ? 0.45 : 1, transition: 'background .12s, border-color .12s',
+  };
+  const variants = {
+    primary: { background: 'rgba(94,169,255,.14)', borderColor: 'rgba(94,169,255,.5)', color: '#dbeafe' },
+    danger: { borderColor: 'rgba(248,113,113,.4)', color: C.bad },
+    ghost: {},
+    bare: { border: '1px solid transparent', padding: '6px 8px' },
+  };
+  return (
+    <button type={type || 'button'} onClick={onClick} title={title} disabled={disabled}
+      style={{ ...base, ...(variants[variant] || {}), ...style }}>
+      {children}
+    </button>
+  );
+}
+
+function IconBtn({ icon: Icon, onClick, title, danger, size = 15 }) {
+  return (
+    <button type="button" onClick={onClick} title={title} aria-label={title} style={{
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      width: 30, height: 30, borderRadius: 7, cursor: 'pointer',
+      border: `1px solid ${C.line}`, background: 'transparent',
+      color: danger ? C.bad : C.dim,
+    }}>
+      <Icon size={size} />
+    </button>
+  );
+}
+
+function Range({ value, min, max, step = 1, onChange, ariaLabel }) {
+  return (
+    <input type="range" aria-label={ariaLabel} value={value} min={min} max={max} step={step}
+      onChange={(e) => onChange(Number(e.target.value))} style={{ width: '100%' }} />
+  );
+}
+
+function TextInput({ value, onChange, placeholder, type = 'text', style, ariaLabel, onKeyDown }) {
+  return (
+    <input type={type} value={value} placeholder={placeholder} aria-label={ariaLabel}
+      onChange={(e) => onChange(e.target.value)} onKeyDown={onKeyDown}
+      style={{
+        fontFamily: type === 'date' ? MONO : SANS, fontSize: 13, color: C.text,
+        background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 7,
+        padding: '7px 9px', width: '100%', boxSizing: 'border-box', ...style,
+      }} />
+  );
+}
+
+const ACTION_ICON = { cours: BookOpen, exercices: Dumbbell, annales: FlaskConical, consolidation: Target };
+
+function ActionBadge({ action }) {
+  const Icon = ACTION_ICON[action.key] || BookOpen;
+  return (
+    <Chip color={C.text} bg="rgba(255,255,255,.05)" style={{ fontWeight: 600 }}>
+      <Icon size={12} /> {action.label}
+    </Chip>
+  );
+}
+
+// Lecteur de priorité transparent : valeur + urgence × mult + épreuve/jours.
+function PriorityReader({ m, compact }) {
+  const col = thermal(m.priority);
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: compact ? 8 : 10, flexWrap: 'wrap',
+      fontFamily: MONO, fontSize: compact ? 11 : 12,
+    }}>
+      <span title="priorité = urgence × multiplicateur d'examen" style={{
+        color: col, fontWeight: 700, fontSize: compact ? 13 : 15,
+      }}>
+        ▲ {f2(m.priority)}
+      </span>
+      <span style={{ color: C.dim }}>
+        {f2(m.urgency)}<span style={{ color: C.faint }}> urg</span>
+        {' × '}
+        {f2(m.factor)}<span style={{ color: C.faint }}> mult</span>
+      </span>
+      {m.exam ? (
+        <span style={{ color: C.warn }} title={`épreuve : ${m.exam.name}`}>
+          ⟶ {m.exam.name} · J−{m.examDays}
+        </span>
+      ) : (
+        <span style={{ color: C.faint }}>aucune épreuve proche</span>
+      )}
+    </div>
+  );
+}
+
+// Carte de la file du jour.
+function QueueCard({ idx, ch, subject, today, onWorked, onMastery }) {
+  const [flash, setFlash] = useState(false);
+  const tcol = thermal(ch.priority);
+  const sinceLabel = ch.since == null ? 'jamais révisé'
+    : ch.since === 0 ? 'révisé aujourd’hui' : `il y a ${ch.since} j`;
+  const panache = isPanache(ch.action.key);
+
+  return (
+    <div style={{
+      background: C.panel, border: `1px solid ${C.line}`, borderLeft: `3px solid ${tcol}`,
+      borderRadius: 10, padding: 13, display: 'flex', flexDirection: 'column', gap: 10,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <Mono style={{ color: C.faint, fontSize: 12, marginTop: 2, width: 18 }}>{idx + 1}</Mono>
+        <Pastille color={subject.color} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontFamily: SANS, fontSize: 15, color: C.text, fontWeight: 600 }}>{ch.name}</span>
+            <span style={{ fontFamily: SANS, fontSize: 11, color: C.dim }}>{subject.name}</span>
+          </div>
+        </div>
+        <ActionBadge action={ch.action} />
+      </div>
+
+      <div style={{ fontFamily: SANS, fontSize: 12.5, color: C.dim, paddingLeft: 28 }}>
+        <span style={{ color: C.text }}>Livrable</span> · {ch.action.deliverable}
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, paddingLeft: 28, flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 150px', minWidth: 120 }}>
+          <MasteryBar value={ch.mastery} color={subject.color} />
+        </div>
+        <Mono style={{ color: C.dim, fontSize: 11 }}>{Math.round(ch.mastery)}/100</Mono>
+        <Mono style={{ color: C.faint, fontSize: 11 }}>· {sinceLabel} · cible {round1(ch.ti)} j</Mono>
+        {panache && (
+          <Chip color={C.warn} title="Ne pas enchaîner 10 exos du même type (Rohrer/Taylor)">
+            <Shuffle size={11} /> panache les types
+          </Chip>
+        )}
+      </div>
+
+      <div style={{ paddingLeft: 28 }}>
+        <PriorityReader m={ch} />
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, paddingLeft: 28, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: '1 1 220px' }}>
+          <Pencil size={12} color={C.faint} />
+          <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>maîtrise</span>
+          <div style={{ flex: 1, minWidth: 90 }}>
+            <Range value={ch.mastery} min={0} max={100} ariaLabel={`maîtrise ${ch.name}`}
+              onChange={(v) => onMastery(ch.id, v)} />
+          </div>
+        </div>
+        <Btn variant={flash ? 'ghost' : 'primary'}
+          onClick={() => { onWorked(ch.id); setFlash(true); setTimeout(() => setFlash(false), 1200); }}>
+          {flash ? <><Check size={14} /> enregistré</> : <><Check size={14} /> J’ai travaillé</>}
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+// Ligne compacte pour « voir toute la file ».
+function RankRow({ idx, ch, subject }) {
+  const tcol = thermal(ch.priority);
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px',
+      borderLeft: `3px solid ${tcol}`, background: C.panel2, border: `1px solid ${C.line}`,
+      borderLeftWidth: 3, borderRadius: 7,
+    }}>
+      <Mono style={{ color: C.faint, fontSize: 11, width: 18 }}>{idx + 1}</Mono>
+      <Pastille color={subject.color} size={8} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontFamily: SANS, fontSize: 13, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {ch.name} <span style={{ color: C.faint, fontSize: 11 }}>· {subject.name}</span>
+        </div>
+        <PriorityReader m={ch} compact />
+      </div>
+      <Chip color={C.dim}>{ch.action.label}</Chip>
+    </div>
+  );
+}
+
+function SectionTitle({ icon: Icon, children, right }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+      {Icon && <Icon size={15} color={C.dim} />}
+      <h2 style={{ margin: 0, fontFamily: SANS, fontSize: 13, fontWeight: 600, letterSpacing: '.04em', textTransform: 'uppercase', color: C.dim }}>
+        {children}
+      </h2>
+      <div style={{ flex: 1, height: 1, background: C.line }} />
+      {right}
+    </div>
+  );
+}
+
+function Empty({ children }) {
+  return (
+    <div style={{
+      fontFamily: SANS, fontSize: 13, color: C.dim, padding: '18px 16px',
+      border: `1px dashed ${C.line2}`, borderRadius: 9, background: C.panel2, lineHeight: 1.5,
+    }}>{children}</div>
+  );
+}
+
+// Petit ajout texte (nom) avec bouton +.
+function AddRow({ placeholder, onAdd, cta = 'Ajouter' }) {
+  const [v, setV] = useState('');
+  const add = () => { const t = v.trim(); if (!t) return; onAdd(t); setV(''); };
+  return (
+    <div style={{ display: 'flex', gap: 8 }}>
+      <TextInput value={v} onChange={setV} placeholder={placeholder} ariaLabel={placeholder}
+        onKeyDown={(e) => { if (e.key === 'Enter') add(); }} />
+      <Btn variant="primary" onClick={add}><Plus size={14} /> {cta}</Btn>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ *  Styles globaux (injectés une fois — composant auto-suffisant)
+ * ------------------------------------------------------------------ */
+
+const GLOBAL_CSS = `
+  .cadence * { box-sizing: border-box; }
+  .cadence input[type=range] {
+    -webkit-appearance: none; appearance: none; height: 4px;
+    background: ${C.line}; border-radius: 2px; outline: none; cursor: pointer;
+  }
+  .cadence input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 14px; height: 14px;
+    border-radius: 50%; background: ${C.accent}; border: 2px solid ${C.bg}; cursor: pointer;
+  }
+  .cadence input[type=range]::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 50%; background: ${C.accent};
+    border: 2px solid ${C.bg}; cursor: pointer;
+  }
+  .cadence *:focus-visible { outline: 2px solid ${C.accent}; outline-offset: 2px; border-radius: 4px; }
+  .cadence button { font: inherit; }
+  .cadence ::-webkit-scrollbar { width: 10px; height: 10px; }
+  .cadence ::-webkit-scrollbar-thumb { background: #26303d; border-radius: 5px; }
+  .cadence ::-webkit-scrollbar-track { background: transparent; }
+  .cadence input::placeholder { color: ${C.faint}; }
+`;
+
+/* ------------------------------------------------------------------ *
+ *  Application
+ * ------------------------------------------------------------------ */
+
+const TABS = [
+  { id: 'today', label: 'Aujourd’hui', icon: Activity },
+  { id: 'calendar', label: 'Calendrier', icon: CalendarDays },
+  { id: 'subjects', label: 'Matières', icon: Layers },
+  { id: 'settings', label: 'Réglages', icon: SettingsIcon },
+];
+
+export default function Cadence() {
+  const store = useMemo(() => makeStore(), []);
+  const [state, setState] = useState(() => {
+    try {
+      const raw = store.getItem(STORAGE_KEY);
+      if (raw) return normalize(JSON.parse(raw));
+    } catch (e) { /* ignore */ }
+    return seedState();
+  });
+
+  // Sauvegarde à chaque mutation.
+  useEffect(() => {
+    try { store.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
+  }, [state, store]);
+
+  const [tab, setTab] = useState('today');
+  const today = todayISO();
+  const { subjects, chapters, exams, settings, parallelLog } = state;
+
+  /* ----- Mutations ----- */
+  const patch = (fn) => setState((prev) => fn(prev));
+
+  const addSubject = (name) => patch((p) => ({
+    ...p, subjects: [...p.subjects, { id: uid(), name, color: '#7c9cf5', type: 'core' }],
+  }));
+  const updateSubject = (id, up) => patch((p) => ({
+    ...p, subjects: p.subjects.map((s) => (s.id === id ? { ...s, ...up } : s)),
+  }));
+  const deleteSubject = (id) => patch((p) => {
+    const chapIds = p.chapters.filter((c) => c.subjectId === id).map((c) => c.id);
+    return {
+      ...p,
+      subjects: p.subjects.filter((s) => s.id !== id),
+      chapters: p.chapters.filter((c) => c.subjectId !== id),
+      exams: stripChapterIds(p.exams.filter((e) => e.subjectId !== id), chapIds),
+    };
+  });
+
+  const addChapter = (subjectId, name) => patch((p) => ({
+    ...p, chapters: [...p.chapters, { id: uid(), subjectId, name, mastery: 50, lastReviewed: null }],
+  }));
+  const updateChapter = (id, up) => patch((p) => ({
+    ...p, chapters: p.chapters.map((c) => (c.id === id ? { ...c, ...up } : c)),
+  }));
+  const deleteChapter = (id) => patch((p) => ({
+    ...p,
+    chapters: p.chapters.filter((c) => c.id !== id),
+    exams: stripChapterIds(p.exams, [id]),
+  }));
+  const markWorked = (id) => updateChapter(id, { lastReviewed: today });
+  const setMastery = (id, v) => updateChapter(id, { mastery: clamp(Math.round(v), 0, 100) });
+
+  const addExam = (subjectId, exam) => patch((p) => ({
+    ...p, exams: [...p.exams, { id: uid(), subjectId, name: exam.name, date: exam.date, chapterIds: exam.chapterIds || [] }],
+  }));
+  const updateExam = (id, up) => patch((p) => ({
+    ...p, exams: p.exams.map((e) => (e.id === id ? { ...e, ...up } : e)),
+  }));
+  const deleteExam = (id) => patch((p) => ({ ...p, exams: p.exams.filter((e) => e.id !== id) }));
+  const toggleExamChapter = (examId, chapterId) => patch((p) => ({
+    ...p,
+    exams: p.exams.map((e) => {
+      if (e.id !== examId) return e;
+      const has = (e.chapterIds || []).includes(chapterId);
+      return { ...e, chapterIds: has ? e.chapterIds.filter((x) => x !== chapterId) : [...(e.chapterIds || []), chapterId] };
+    }),
+  }));
+
+  const updateSetting = (key, value) => patch((p) => ({ ...p, settings: { ...p.settings, [key]: value } }));
+
+  const adjustParallel = (subjectId, delta) => patch((p) => {
+    const wk = mondayOf(today);
+    const log = { ...(p.parallelLog || {}) };
+    const week = { ...(log[wk] || {}) };
+    week[subjectId] = Math.max(0, (week[subjectId] || 0) + delta);
+    log[wk] = week;
+    return { ...p, parallelLog: log };
+  });
+
+  const importState = (obj) => setState(normalize(obj));
+  const resetAll = () => { if (confirm('Réinitialiser CADENCE ? Tes chapitres, épreuves et réglages seront effacés.')) setState(seedState()); };
+
+  /* ----- Données dérivées ----- */
+  const subjectById = useMemo(
+    () => Object.fromEntries(subjects.map((s) => [s.id, s])), [subjects]);
+  const coreSubjects = useMemo(() => subjects.filter((s) => s.type === 'core'), [subjects]);
+  const parallelSubjects = useMemo(() => subjects.filter((s) => s.type === 'parallel'), [subjects]);
+
+  const ranked = useMemo(() => chapters
+    .map((ch) => {
+      const inAnnales = !!annalesModeFor(ch.subjectId, exams, settings, today);
+      const m = chapterMetrics(ch, exams, settings, today);
+      return { ...ch, ...m, inAnnales, action: recommendedAction(ch.mastery, inAnnales) };
+    })
+    .sort((a, b) => b.priority - a.priority), [chapters, exams, settings, today]);
+
+  const overdue = ranked.filter((c) => c.urgency >= 1).length;
+  const queue = useMemo(() => buildQueue(ranked, settings.blocksPerDay), [ranked, settings.blocksPerDay]);
+
+  const annalesBanners = useMemo(() => coreSubjects
+    .map((s) => ({ subject: s, info: annalesModeFor(s.id, exams, settings, today) }))
+    .filter((x) => x.info), [coreSubjects, exams, settings, today]);
+
+  const upcomingExams = useMemo(() => exams
+    .map((e) => ({ ...e, days: daysBetween(today, e.date) }))
+    .filter((e) => e.days >= 0)
+    .sort((a, b) => a.days - b.days), [exams, today]);
+  const nextExam = upcomingExams[0] || null;
+
+  return (
+    <div className="cadence" style={{
+      minHeight: '100%', background: C.bg, color: C.text, fontFamily: SANS,
+      WebkitFontSmoothing: 'antialiased',
+    }}>
+      <style>{GLOBAL_CSS}</style>
+
+      {/* Barre supérieure */}
+      <header style={{
+        position: 'sticky', top: 0, zIndex: 10, background: 'rgba(10,14,20,.86)',
+        backdropFilter: 'blur(8px)', borderBottom: `1px solid ${C.line}`,
+      }}>
+        <div style={{ maxWidth: 980, margin: '0 auto', padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+            <Flame size={18} color={C.accent} />
+            <span style={{ fontFamily: MONO, fontWeight: 700, letterSpacing: '.22em', fontSize: 16 }}>CADENCE</span>
+          </div>
+          <nav style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginLeft: 'auto' }}>
+            {TABS.map((t) => {
+              const active = tab === t.id;
+              return (
+                <button key={t.id} onClick={() => setTab(t.id)} style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer',
+                  fontFamily: SANS, fontSize: 13, padding: '7px 12px', borderRadius: 8,
+                  border: `1px solid ${active ? 'rgba(94,169,255,.5)' : 'transparent'}`,
+                  background: active ? 'rgba(94,169,255,.14)' : 'transparent',
+                  color: active ? '#dbeafe' : C.dim,
+                }}>
+                  <t.icon size={15} /> {t.label}
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+      </header>
+
+      <main style={{ maxWidth: 980, margin: '0 auto', padding: '18px 16px 64px' }}>
+        {tab === 'today' && (
+          <TodayView
+            today={today} overdue={overdue} nextExam={nextExam} subjectById={subjectById}
+            annalesBanners={annalesBanners} queue={queue} ranked={ranked}
+            parallelSubjects={parallelSubjects} parallelLog={parallelLog} settings={settings}
+            onWorked={markWorked} onMastery={setMastery} onAdjustParallel={adjustParallel}
+            onGoSubjects={() => setTab('subjects')}
+          />
+        )}
+        {tab === 'calendar' && (
+          <CalendarView today={today} exams={exams} subjectById={subjectById}
+            settings={settings} upcomingExams={upcomingExams} onGoSubjects={() => setTab('subjects')} />
+        )}
+        {tab === 'subjects' && (
+          <SubjectsView
+            subjects={subjects} chapters={chapters} exams={exams} settings={settings} today={today}
+            onAddSubject={addSubject} onUpdateSubject={updateSubject} onDeleteSubject={deleteSubject}
+            onAddChapter={addChapter} onUpdateChapter={updateChapter} onDeleteChapter={deleteChapter}
+            onAddExam={addExam} onUpdateExam={updateExam} onDeleteExam={deleteExam}
+            onToggleExamChapter={toggleExamChapter}
+          />
+        )}
+        {tab === 'settings' && (
+          <SettingsView settings={settings} state={state} store={store}
+            onUpdate={updateSetting} onImport={importState} onReset={resetAll} today={today} />
+        )}
+      </main>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ *  Vue 1 — Aujourd'hui
+ * ------------------------------------------------------------------ */
+
+function TodayView({
+  today, overdue, nextExam, subjectById, annalesBanners, queue, ranked,
+  parallelSubjects, parallelLog, settings, onWorked, onMastery, onAdjustParallel, onGoSubjects,
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const wk = mondayOf(today);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      {/* En-tête : date + métriques */}
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 16, flexWrap: 'wrap' }}>
+        <div>
+          <Mono style={{ fontSize: 22, color: C.text, textTransform: 'capitalize' }}>{fmtLongDate(today)}</Mono>
+          <div style={{ fontFamily: SANS, fontSize: 12, color: C.faint, marginTop: 2 }}>
+            File interleavée du soir · coche ce qui est fait
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 10, marginLeft: 'auto', flexWrap: 'wrap' }}>
+          <Stat label="en retard" value={overdue} unit="chap." tone={overdue ? C.warn : C.good} />
+          {nextExam ? (
+            <Stat label="prochaine épreuve" value={`J−${nextExam.days}`} unit={nextExam.name} tone={C.accent} />
+          ) : (
+            <Stat label="prochaine épreuve" value="—" unit="aucune" tone={C.faint} />
+          )}
+        </div>
+      </div>
+
+      {/* Bannières mode annales */}
+      {annalesBanners.map(({ subject, info }) => (
+        <div key={subject.id} style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '10px 13px', borderRadius: 9,
+          background: 'rgba(251,191,36,.08)', border: `1px solid rgba(251,191,36,.32)`,
+        }}>
+          <FlaskConical size={16} color={C.warn} />
+          <Pastille color={subject.color} />
+          <span style={{ fontFamily: SANS, fontSize: 13.5 }}>
+            <b>Mode annales — {subject.name}</b> · arrête le cours, teste-toi
+          </span>
+          <Mono style={{ marginLeft: 'auto', color: C.warn, fontSize: 12 }}>
+            {info.exam.name} · J−{info.days}
+          </Mono>
+        </div>
+      ))}
+
+      {/* File du jour */}
+      <div>
+        <SectionTitle icon={Activity} right={
+          ranked.length > 0 ? (
+            <Btn variant="bare" onClick={() => setShowAll((v) => !v)} style={{ color: C.dim, fontSize: 12 }}>
+              {showAll ? 'voir la file du jour' : 'voir toute la file'}
+              {showAll ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            </Btn>
+          ) : null
+        }>
+          File du jour
+          <Chip color={C.faint} style={{ marginLeft: 8 }} title="Rotation des matières : jamais deux blocs d'affilée de la même UE quand une alternative existe">
+            <Shuffle size={11} /> interleavé
+          </Chip>
+        </SectionTitle>
+
+        {ranked.length === 0 ? (
+          <Empty>
+            Rien à réviser pour l’instant. <b>Onglet Matières → déplie une UE → ajoute tes chapitres</b>,
+            puis crée une épreuve avec sa date.
+            <div style={{ marginTop: 10 }}>
+              <Btn variant="primary" onClick={onGoSubjects}><Layers size={14} /> Onglet Matières</Btn>
+            </div>
+          </Empty>
+        ) : (
+          <>
+            <ThermalLegend />
+            {!showAll ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {queue.map((ch, i) => (
+                  <QueueCard key={ch.id} idx={i} ch={ch} subject={subjectById[ch.subjectId]}
+                    today={today} onWorked={onWorked} onMastery={onMastery} />
+                ))}
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {ranked.map((ch, i) => (
+                  <RankRow key={ch.id} idx={i} ch={ch} subject={subjectById[ch.subjectId]} />
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Bande des planchers (matières parallèles — minimums protégés) */}
+      {parallelSubjects.length > 0 && (
+        <div>
+          <SectionTitle icon={Lock}>Planchers de la semaine</SectionTitle>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            {parallelSubjects.map((s) => {
+              const done = parallelLog?.[wk]?.[s.id] || 0;
+              const floor = s.weeklyFloor || 0;
+              const below = done < floor;
+              return (
+                <div key={s.id} style={{
+                  flex: '1 1 220px', minWidth: 200, background: C.panel, borderRadius: 10,
+                  border: `1px solid ${below ? 'rgba(251,191,36,.4)' : C.line}`, padding: 12,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Pastille color={s.color} />
+                    <span style={{ fontFamily: SANS, fontSize: 13.5, fontWeight: 600 }}>{s.name}</span>
+                    <Mono style={{ marginLeft: 'auto', fontSize: 14, color: below ? C.warn : C.good }}>
+                      {done}/{floor}
+                    </Mono>
+                  </div>
+                  <div style={{ height: 5, background: C.inset, borderRadius: 3, margin: '9px 0', overflow: 'hidden', border: `1px solid ${C.line}` }}>
+                    <div style={{ width: `${floor ? clamp((done / floor) * 100, 0, 100) : 0}%`, height: '100%', background: below ? C.warn : C.good, opacity: .7 }} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <IconBtn icon={ChevronLeft} title="−1" onClick={() => onAdjustParallel(s.id, -1)} />
+                    <IconBtn icon={Plus} title="+1 séance" onClick={() => onAdjustParallel(s.id, +1)} />
+                    {below ? (
+                      <Chip color={C.warn} style={{ marginLeft: 'auto' }}><AlertTriangle size={11} /> sous le plancher</Chip>
+                    ) : (
+                      <Chip color={C.good} style={{ marginLeft: 'auto' }}><Check size={11} /> protégé</Chip>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, marginTop: 8 }}>
+            Ces minimums sont protégés, pas du résidu : assure-les même les semaines chargées.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Stat({ label, value, unit, tone }) {
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 9, padding: '8px 13px', minWidth: 110 }}>
+      <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, textTransform: 'uppercase', letterSpacing: '.06em' }}>{label}</div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+        <Mono style={{ fontSize: 19, color: tone || C.text }}>{value}</Mono>
+        {unit != null && <span style={{ fontFamily: SANS, fontSize: 11, color: C.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 130 }}>{unit}</span>}
+      </div>
+    </div>
+  );
+}
+
+function ThermalLegend() {
+  const grad = `linear-gradient(90deg, ${thermal(0)}, ${thermal(1.2)}, ${thermal(2.2)}, ${thermal(4)})`;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '2px 0 12px' }}>
+      <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>calme</span>
+      <div style={{ flex: '0 1 180px', height: 5, borderRadius: 3, background: grad, border: `1px solid ${C.line}` }} />
+      <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>urgent</span>
+      <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, marginLeft: 6 }}>
+        — la couleur encode la priorité
+      </span>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ *  Vue 2 — Calendrier
+ * ------------------------------------------------------------------ */
+
+function monthMatrix(year, month) {
+  const first = new Date(year, month, 1);
+  const startDay = (first.getDay() + 6) % 7;
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < startDay; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(year, month, d));
+  while (cells.length % 7 !== 0) cells.push(null);
+  return cells;
+}
+
+const WEEKDAYS = ['lun', 'mar', 'mer', 'jeu', 'ven', 'sam', 'dim'];
+
+function CalendarView({ today, exams, subjectById, settings, upcomingExams, onGoSubjects }) {
+  const t = parseISO(today);
+  const [cursor, setCursor] = useState({ y: t.getFullYear(), m: t.getMonth() });
+  const cells = monthMatrix(cursor.y, cursor.m);
+  const monthLabel = new Date(cursor.y, cursor.m, 1)
+    .toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+
+  const examsByDay = useMemo(() => {
+    const map = {};
+    for (const e of exams) (map[e.date] ||= []).push(e);
+    return map;
+  }, [exams]);
+
+  // Une date est en fenêtre annales si une épreuve la couvre dans [date−seuil, date].
+  function annalesShade(iso) {
+    let best = null;
+    for (const e of exams) {
+      const d = daysBetween(iso, e.date);
+      if (d >= 0 && d <= settings.examModeThreshold) {
+        const sub = subjectById[e.subjectId];
+        if (sub && (!best || d < best.d)) best = { color: sub.color, d };
+      }
+    }
+    return best;
+  }
+
+  const move = (delta) => setCursor((c) => {
+    const d = new Date(c.y, c.m + delta, 1);
+    return { y: d.getFullYear(), m: d.getMonth() };
+  });
+
+  return (
+    <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+      <div style={{ flex: '1 1 360px', minWidth: 300 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+          <IconBtn icon={ChevronLeft} title="Mois précédent" onClick={() => move(-1)} />
+          <Mono style={{ fontSize: 16, textTransform: 'capitalize', minWidth: 150, textAlign: 'center' }}>{monthLabel}</Mono>
+          <IconBtn icon={ChevronRight} title="Mois suivant" onClick={() => move(1)} />
+          <Btn variant="bare" style={{ marginLeft: 'auto', color: C.dim, fontSize: 12 }}
+            onClick={() => setCursor({ y: t.getFullYear(), m: t.getMonth() })}>aujourd’hui</Btn>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 4 }}>
+          {WEEKDAYS.map((d) => (
+            <div key={d} style={{ textAlign: 'center', fontFamily: SANS, fontSize: 10.5, color: C.faint, padding: '2px 0' }}>{d}</div>
+          ))}
+          {cells.map((cell, i) => {
+            if (!cell) return <div key={i} />;
+            const iso = isoOf(cell);
+            const isToday = iso === today;
+            const dayExams = examsByDay[iso] || [];
+            const shade = annalesShade(iso);
+            return (
+              <div key={i} title={dayExams.map((e) => `${e.name} (${(e.chapterIds || []).length} chap.)`).join('\n')}
+                style={{
+                  aspectRatio: '1 / 1', borderRadius: 7, padding: 5,
+                  background: shade ? `${shade.color}1f` : C.panel2,
+                  border: `1px solid ${isToday ? C.accent : C.line}`,
+                  display: 'flex', flexDirection: 'column', gap: 3, position: 'relative', overflow: 'hidden',
+                }}>
+                <Mono style={{
+                  fontSize: 11, color: isToday ? C.accent : C.dim, alignSelf: 'flex-end',
+                  fontWeight: isToday ? 700 : 400,
+                }}>{cell.getDate()}</Mono>
+                <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginTop: 'auto' }}>
+                  {dayExams.map((e) => (
+                    <span key={e.id} style={{
+                      height: 6, minWidth: 6, flex: dayExams.length > 1 ? '1 1 auto' : '0 0 auto',
+                      borderRadius: 3, background: subjectById[e.subjectId]?.color || C.dim,
+                    }} />
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginTop: 10, fontFamily: SANS, fontSize: 11, color: C.faint, flexWrap: 'wrap' }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 18, height: 10, borderRadius: 3, background: '#fbbf241f', border: `1px solid ${C.line}` }} /> fenêtre mode annales
+          </span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 3, border: `1px solid ${C.accent}` }} /> aujourd’hui
+          </span>
+        </div>
+      </div>
+
+      {/* Liste latérale */}
+      <div style={{ flex: '1 1 240px', minWidth: 240 }}>
+        <SectionTitle icon={CalendarDays}>Épreuves à venir</SectionTitle>
+        {upcomingExams.length === 0 ? (
+          <Empty>Aucune épreuve. <b>Onglet Matières → ajoute une épreuve à une UE</b> (nom, date, chapitres couverts).</Empty>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {upcomingExams.map((e) => {
+              const sub = subjectById[e.subjectId];
+              const annales = e.days <= settings.examModeThreshold;
+              return (
+                <div key={e.id} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 9, padding: 11 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Pastille color={sub?.color || C.dim} />
+                    <span style={{ fontFamily: SANS, fontSize: 13.5, fontWeight: 600 }}>{e.name}</span>
+                    <Mono style={{ marginLeft: 'auto', fontSize: 14, color: annales ? C.warn : C.accent }}>J−{e.days}</Mono>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 7, flexWrap: 'wrap' }}>
+                    <Mono style={{ fontSize: 11, color: C.dim }}>{fmtShortDate(e.date)}</Mono>
+                    <Chip color={C.dim}>{(e.chapterIds || []).length} chap.</Chip>
+                    {annales && <Chip color={C.warn}><FlaskConical size={11} /> mode annales</Chip>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ *  Vue 3 — Matières
+ * ------------------------------------------------------------------ */
+
+const PALETTE = ['#7c9cf5', '#a78bfa', '#38bdf8', '#fbbf24', '#f472b6', '#34d399', '#5eead4', '#fca5a5', '#f59e0b', '#22d3ee'];
+
+function SubjectsView({
+  subjects, chapters, exams, settings, today,
+  onAddSubject, onUpdateSubject, onDeleteSubject,
+  onAddChapter, onUpdateChapter, onDeleteChapter,
+  onAddExam, onUpdateExam, onDeleteExam, onToggleExamChapter,
+}) {
+  const [open, setOpen] = useState({});
+  const toggle = (id) => setOpen((o) => ({ ...o, [id]: !o[id] }));
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <SectionTitle icon={Layers}>Matières (UE)</SectionTitle>
+
+      {subjects.map((s) => {
+        const isCore = s.type === 'core';
+        const subChapters = chapters.filter((c) => c.subjectId === s.id);
+        const subExams = exams.filter((e) => e.subjectId === s.id);
+        const expanded = !!open[s.id];
+        return (
+          <div key={s.id} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 12 }}>
+              {isCore ? (
+                <button onClick={() => toggle(s.id)} aria-label="déplier" style={{
+                  background: 'transparent', border: 'none', cursor: 'pointer', color: C.dim, display: 'flex', padding: 2,
+                }}>
+                  {expanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                </button>
+              ) : <span style={{ width: 22 }} />}
+
+              <input type="color" value={s.color} aria-label="couleur"
+                onChange={(e) => onUpdateSubject(s.id, { color: e.target.value })}
+                style={{ width: 26, height: 26, padding: 0, border: 'none', background: 'transparent', cursor: 'pointer' }} />
+
+              <TextInput value={s.name} onChange={(v) => onUpdateSubject(s.id, { name: v })} ariaLabel="nom de la matière" style={{ maxWidth: 280 }} />
+
+              <Chip color={isCore ? C.accent : C.good} title="type de matière">
+                {isCore ? 'core' : 'parallèle'}
+              </Chip>
+
+              <button onClick={() => onUpdateSubject(s.id, { type: isCore ? 'parallel' : 'core', weeklyFloor: isCore ? 4 : undefined })}
+                style={{ background: 'transparent', border: `1px solid ${C.line}`, color: C.faint, borderRadius: 7, fontSize: 11, padding: '4px 7px', cursor: 'pointer', fontFamily: SANS }}>
+                ↔ {isCore ? 'parallèle' : 'core'}
+              </button>
+
+              {!isCore && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>plancher</span>
+                  <input type="number" min={0} max={20} value={s.weeklyFloor ?? 0}
+                    onChange={(e) => onUpdateSubject(s.id, { weeklyFloor: Math.max(0, Number(e.target.value) || 0) })}
+                    aria-label="plancher hebdo"
+                    style={{ width: 52, fontFamily: MONO, fontSize: 13, color: C.text, background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 6, padding: '5px 6px' }} />
+                  <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>/sem</span>
+                </div>
+              )}
+
+              <div style={{ marginLeft: 'auto' }}>
+                <IconBtn icon={Trash2} danger title="Supprimer la matière"
+                  onClick={() => { if (confirm(`Supprimer « ${s.name} » et tout son contenu ?`)) onDeleteSubject(s.id); }} />
+              </div>
+            </div>
+
+            {isCore && expanded && (
+              <div style={{ borderTop: `1px solid ${C.line}`, padding: 12, display: 'flex', flexDirection: 'column', gap: 16 }}>
+                {/* Chapitres */}
+                <div>
+                  <SectionTitle icon={BookOpen}>Chapitres</SectionTitle>
+                  {subChapters.length === 0 && (
+                    <Empty>Aucun chapitre. Ajoute-les ci-dessous, puis règle la maîtrise au curseur.</Empty>
+                  )}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
+                    {subChapters.map((c) => {
+                      const m = chapterMetrics(c, exams, settings, today);
+                      const tcol = thermal(m.priority);
+                      const since = c.lastReviewed ? `il y a ${m.since} j` : 'jamais révisé';
+                      return (
+                        <div key={c.id} style={{ display: 'flex', flexDirection: 'column', gap: 7, padding: 10, background: C.panel2, border: `1px solid ${C.line}`, borderLeft: `3px solid ${tcol}`, borderRadius: 8 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <TextInput value={c.name} onChange={(v) => onUpdateChapter(c.id, { name: v })} ariaLabel="nom du chapitre" />
+                            <IconBtn icon={Trash2} danger title="Supprimer le chapitre" onClick={() => onDeleteChapter(c.id)} />
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>maîtrise</span>
+                            <div style={{ flex: '1 1 140px', minWidth: 120 }}>
+                              <Range value={c.mastery} min={0} max={100} ariaLabel={`maîtrise ${c.name}`} onChange={(v) => onUpdateChapter(c.id, { mastery: Math.round(v) })} />
+                            </div>
+                            <Mono style={{ fontSize: 12, color: C.dim }}>{Math.round(c.mastery)}/100</Mono>
+                            <Mono style={{ fontSize: 11, color: C.faint }}>· {since} · cible {round1(m.ti)} j</Mono>
+                            <Btn variant="bare" style={{ fontSize: 11, color: C.dim }} onClick={() => onUpdateChapter(c.id, { lastReviewed: today })}>
+                              <Check size={12} /> révisé aujourd’hui
+                            </Btn>
+                          </div>
+                          <PriorityReader m={m} compact />
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <AddRow placeholder="Nouveau chapitre (ex. Réduction des endomorphismes)" cta="Chapitre" onAdd={(name) => onAddChapter(s.id, name)} />
+                </div>
+
+                {/* Épreuves */}
+                <div>
+                  <SectionTitle icon={FlaskConical}>Épreuves</SectionTitle>
+                  {subChapters.length === 0 ? (
+                    <Empty>Ajoute d’abord des chapitres : une épreuve couvre une sélection de chapitres.</Empty>
+                  ) : (
+                    <>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
+                        {subExams.map((e) => {
+                          const days = daysBetween(today, e.date);
+                          return (
+                            <div key={e.id} style={{ padding: 10, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                <TextInput value={e.name} onChange={(v) => onUpdateExam(e.id, { name: v })} ariaLabel="nom de l'épreuve" style={{ maxWidth: 220 }} />
+                                <TextInput type="date" value={e.date} onChange={(v) => onUpdateExam(e.id, { date: v })} ariaLabel="date de l'épreuve" style={{ maxWidth: 160 }} />
+                                <Mono style={{ fontSize: 12, color: days < 0 ? C.faint : (days <= settings.examModeThreshold ? C.warn : C.accent) }}>
+                                  {days < 0 ? 'passée' : `J−${days}`}
+                                </Mono>
+                                <div style={{ marginLeft: 'auto' }}>
+                                  <IconBtn icon={Trash2} danger title="Supprimer l'épreuve" onClick={() => onDeleteExam(e.id)} />
+                                </div>
+                              </div>
+                              <div>
+                                <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint, marginBottom: 5 }}>
+                                  Chapitres couverts ({(e.chapterIds || []).length})
+                                </div>
+                                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                  {subChapters.map((c) => {
+                                    const on = (e.chapterIds || []).includes(c.id);
+                                    return (
+                                      <button key={c.id} onClick={() => onToggleExamChapter(e.id, c.id)} style={{
+                                        display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer',
+                                        fontFamily: SANS, fontSize: 12, padding: '4px 9px', borderRadius: 999,
+                                        border: `1px solid ${on ? 'rgba(94,169,255,.5)' : C.line2}`,
+                                        background: on ? 'rgba(94,169,255,.14)' : 'transparent',
+                                        color: on ? '#dbeafe' : C.dim,
+                                      }}>
+                                        {on ? <Check size={12} /> : <Plus size={12} />} {c.name}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <AddExam subjectId={s.id} today={today} onAdd={onAddExam} />
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      <div style={{ marginTop: 4 }}>
+        <AddRow placeholder="Nouvelle matière (ex. Thermodynamique)" cta="Matière" onAdd={onAddSubject} />
+      </div>
+    </div>
+  );
+}
+
+function AddExam({ subjectId, today, onAdd }) {
+  const [name, setName] = useState('');
+  const [date, setDate] = useState(addDays(today, 14));
+  const add = () => {
+    const n = name.trim();
+    if (!n) return;
+    onAdd(subjectId, { name: n, date, chapterIds: [] });
+    setName('');
+    setDate(addDays(today, 14));
+  };
+  return (
+    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+      <TextInput value={name} onChange={setName} placeholder="Nouvelle épreuve (ex. CC1, partiel)" style={{ maxWidth: 240 }}
+        onKeyDown={(e) => { if (e.key === 'Enter') add(); }} />
+      <TextInput type="date" value={date} onChange={setDate} style={{ maxWidth: 160 }} />
+      <Btn variant="primary" onClick={add}><Plus size={14} /> Épreuve</Btn>
+      <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>tu choisiras les chapitres couverts ensuite</span>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ *  Vue 4 — Réglages
+ * ------------------------------------------------------------------ */
+
+const SLIDERS = [
+  { key: 'minInterval', label: 'Intervalle min', min: 1, max: 7, step: 1, unit: 'j', help: 'cible à maîtrise 0' },
+  { key: 'maxInterval', label: 'Intervalle max', min: 7, max: 60, step: 1, unit: 'j', help: 'cible à maîtrise 100' },
+  { key: 'maxExamPressure', label: 'Pression d’examen max', min: 1, max: 10, step: 0.5, unit: '×', help: 'multiplicateur au jour J' },
+  { key: 'pressureHorizon', label: 'Horizon de pression', min: 7, max: 90, step: 1, unit: 'j', help: 'au-delà, l’examen n’influe pas' },
+  { key: 'examModeThreshold', label: 'Seuil mode annales', min: 3, max: 45, step: 1, unit: 'j', help: 'bascule en « teste-toi »' },
+  { key: 'blocksPerDay', label: 'Blocs par jour', min: 1, max: 10, step: 1, unit: '', help: 'taille de la file du jour' },
+];
+
+function SettingsView({ settings, state, store, onUpdate, onImport, onReset, today }) {
+  const fileRef = useRef(null);
+
+  const exportJSON = () => {
+    try {
+      const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `cadence-${today}.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) { alert('Export impossible dans cet environnement.'); }
+  };
+  const onFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try { onImport(JSON.parse(String(reader.result))); }
+      catch (err) { alert('Import impossible : JSON invalide.'); }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  // Aperçu live de la courbe du multiplicateur.
+  const N = 24;
+  const bars = Array.from({ length: N + 1 }, (_, i) => {
+    const j = Math.round((settings.pressureHorizon * i) / N);
+    return { j, mult: examMultiplier(j, settings) };
+  });
+  const ti = (m) => round1(targetInterval(m, settings));
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      <SectionTitle icon={SettingsIcon}>Réglages du moteur</SectionTitle>
+
+      <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+        <div style={{ flex: '1 1 320px', minWidth: 280, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {SLIDERS.map((sl) => (
+            <div key={sl.key}>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 4 }}>
+                <span style={{ fontFamily: SANS, fontSize: 13, color: C.text }}>{sl.label}</span>
+                <Mono style={{ marginLeft: 'auto', fontSize: 14, color: C.accent }}>
+                  {settings[sl.key]}{sl.unit}
+                </Mono>
+              </div>
+              <Range value={settings[sl.key]} min={sl.min} max={sl.max} step={sl.step}
+                ariaLabel={sl.label}
+                onChange={(v) => onUpdate(sl.key, v)} />
+              <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint, marginTop: 3 }}>{sl.help}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Aperçu courbe + intervalle cible */}
+        <div style={{ flex: '1 1 320px', minWidth: 280 }}>
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 14 }}>
+            <div style={{ fontFamily: SANS, fontSize: 12, color: C.dim, marginBottom: 10 }}>
+              Multiplicateur d’examen selon les jours restants
+            </div>
+            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 120 }}>
+              {bars.map((b, i) => {
+                const denom = Math.max(0.0001, settings.maxExamPressure - 1);
+                const h = clamp((b.mult - 1) / denom, 0, 1);
+                return (
+                  <div key={i} title={`J−${b.j} → ×${f2(b.mult)}`} style={{
+                    flex: 1, height: `${6 + h * 94}%`, background: thermal(b.mult),
+                    borderRadius: '2px 2px 0 0', opacity: .9,
+                  }} />
+                );
+              })}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontFamily: MONO, fontSize: 10.5, color: C.faint }}>
+              <span>J−{settings.pressureHorizon}</span>
+              <span>J−{Math.round(settings.pressureHorizon / 2)}</span>
+              <span>jour J</span>
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8, fontFamily: MONO, fontSize: 11, color: C.dim, flexWrap: 'wrap' }}>
+              <span>×{f2(examMultiplier(settings.pressureHorizon, settings))}</span>
+              <span>→ ×{f2(examMultiplier(Math.round(settings.pressureHorizon / 2), settings))}</span>
+              <span>→ ×{f2(examMultiplier(0, settings))} au jour J</span>
+            </div>
+          </div>
+
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 14, marginTop: 12 }}>
+            <div style={{ fontFamily: SANS, fontSize: 12, color: C.dim, marginBottom: 8 }}>Intervalle cible selon la maîtrise</div>
+            <div style={{ display: 'flex', gap: 16, fontFamily: MONO, fontSize: 13 }}>
+              <span>m0 <b style={{ color: C.text }}>{ti(0)} j</b></span>
+              <span>m50 <b style={{ color: C.text }}>{ti(50)} j</b></span>
+              <span>m100 <b style={{ color: C.text }}>{ti(100)} j</b></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Sauvegarde / données */}
+      <div>
+        <SectionTitle icon={Download}>Données &amp; sauvegarde</SectionTitle>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <Btn onClick={exportJSON}><Download size={14} /> Exporter (JSON)</Btn>
+          <Btn onClick={() => fileRef.current?.click()}><Upload size={14} /> Importer (JSON)</Btn>
+          <input ref={fileRef} type="file" accept="application/json,.json" onChange={onFile} style={{ display: 'none' }} />
+          <Btn variant="danger" onClick={onReset}><RotateCcw size={14} /> Réinitialiser</Btn>
+        </div>
+        <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, marginTop: 10, lineHeight: 1.5, maxWidth: 620 }}>
+          Tout est stocké localement sur cet appareil (une seule clé <Mono color={C.dim}>{STORAGE_KEY}</Mono>),
+          avec repli en mémoire si le stockage est indisponible — rien n’est envoyé sur un serveur.
+          Exporte de temps en temps : c’est ta seule sauvegarde.
+        </div>
+      </div>
+    </div>
+  );
+}
