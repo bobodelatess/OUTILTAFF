@@ -42,6 +42,7 @@ export const DEFAULT_SETTINGS = {
   pressureHorizon: 35,
   examModeThreshold: 21,
   blocksPerDay: 5,
+  simpleMode: true, // cartes du soir épurées (chiffres derrière « détails »)
 };
 
 const C = {
@@ -200,6 +201,23 @@ export function recommendedAction(mastery, inAnnales) {
   if (mastery < 75)
     return { key: 'exercices', label: 'Exercices', deliverable: '3–4 exos panachés, corrigés, 1 ligne d’erreur' };
   return { key: 'consolidation', label: 'Consolidation', deliverable: '2 exos variés sans regarder le cours, vérifie la vitesse' };
+}
+
+// Raison en langage clair (pas de formule) : pourquoi ce chapitre, là, maintenant.
+// Renvoie { text, tone } avec tone ∈ 'exam' | 'late' | 'calm'.
+export function reasonPhrase(m) {
+  if (m.exam && m.examDays != null) {
+    const d = m.examDays;
+    const when = d <= 0 ? 'aujourd’hui' : d === 1 ? 'demain' : `dans ${d} j`;
+    return { text: `Examen ${m.exam.name} ${when}`, tone: 'exam' };
+  }
+  if (m.urgency >= 1) {
+    if (m.since == null) return { text: 'Jamais révisé', tone: 'late' };
+    const over = Math.round(m.since - m.ti);
+    return { text: over <= 0 ? 'À revoir maintenant' : `En retard de ${over} j`, tone: 'late' };
+  }
+  const inDays = Math.max(0, Math.round(m.ti - (m.since ?? 0)));
+  return { text: inDays <= 1 ? 'Pas urgent' : `Pas urgent · à revoir dans ~${inDays} j`, tone: 'calm' };
 }
 
 // Rotation des matières : file gloutonne évitant deux blocs consécutifs de la
@@ -437,9 +455,45 @@ function PriorityReader({ m, compact }) {
   );
 }
 
-// Carte de la file du jour.
-function QueueCard({ idx, ch, subject, today, onWorked, onMastery }) {
+// Raison en langage clair, colorée par la rampe thermique.
+const REASON_ICON = { exam: CalendarDays, late: AlertTriangle, calm: Check };
+function ReasonLine({ m, size = 13.5 }) {
+  const r = reasonPhrase(m);
+  const col = thermal(m.priority);
+  const Icon = REASON_ICON[r.tone] || Check;
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+      <Icon size={14} color={col} />
+      <span style={{ fontFamily: SANS, fontSize: size, color: col, fontWeight: 600 }}>{r.text}</span>
+    </span>
+  );
+}
+
+// Bascule à deux états (Simple / Détaillé, etc.).
+function Segmented({ value, options, onChange, ariaLabel }) {
+  return (
+    <div role="group" aria-label={ariaLabel} style={{
+      display: 'inline-flex', border: `1px solid ${C.line2}`, borderRadius: 8, overflow: 'hidden',
+    }}>
+      {options.map((o) => {
+        const active = o.value === value;
+        return (
+          <button key={o.value} type="button" onClick={() => onChange(o.value)} style={{
+            fontFamily: SANS, fontSize: 12, padding: '5px 11px', cursor: 'pointer', border: 'none',
+            background: active ? 'rgba(94,169,255,.16)' : 'transparent',
+            color: active ? '#dbeafe' : C.dim,
+          }}>{o.label}</button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Carte de la file du jour. En mode simple : l'essentiel + « détails » repliable.
+function QueueCard({ idx, ch, subject, simpleMode, onWorked, onMastery }) {
   const [flash, setFlash] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const open = !simpleMode || expanded;
   const tcol = thermal(ch.priority);
   const sinceLabel = ch.since == null ? 'jamais révisé'
     : ch.since === 0 ? 'révisé aujourd’hui' : `il y a ${ch.since} j`;
@@ -448,54 +502,69 @@ function QueueCard({ idx, ch, subject, today, onWorked, onMastery }) {
   return (
     <div style={{
       background: C.panel, border: `1px solid ${C.line}`, borderLeft: `3px solid ${tcol}`,
-      borderRadius: 10, padding: 13, display: 'flex', flexDirection: 'column', gap: 10,
+      borderRadius: 10, padding: 13, display: 'flex', flexDirection: 'column', gap: 9,
     }}>
+      {/* Quoi : chapitre + matière + action recommandée */}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
         <Mono style={{ color: C.faint, fontSize: 12, marginTop: 2, width: 18 }}>{idx + 1}</Mono>
         <Pastille color={subject.color} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-            <span style={{ fontFamily: SANS, fontSize: 15, color: C.text, fontWeight: 600 }}>{ch.name}</span>
+            <span style={{ fontFamily: SANS, fontSize: 15.5, color: C.text, fontWeight: 600 }}>{ch.name}</span>
             <span style={{ fontFamily: SANS, fontSize: 11, color: C.dim }}>{subject.name}</span>
           </div>
         </div>
         <ActionBadge action={ch.action} />
       </div>
 
-      <div style={{ fontFamily: SANS, fontSize: 12.5, color: C.dim, paddingLeft: 28 }}>
-        <span style={{ color: C.text }}>Livrable</span> · {ch.action.deliverable}
-      </div>
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, paddingLeft: 28, flexWrap: 'wrap' }}>
-        <div style={{ flex: '1 1 150px', minWidth: 120 }}>
-          <MasteryBar value={ch.mastery} color={subject.color} />
-        </div>
-        <Mono style={{ color: C.dim, fontSize: 11 }}>{Math.round(ch.mastery)}/100</Mono>
-        <Mono style={{ color: C.faint, fontSize: 11 }}>· {sinceLabel} · cible {round1(ch.ti)} j</Mono>
+      {/* Pourquoi : une phrase claire (au lieu de la formule) */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 28, flexWrap: 'wrap' }}>
+        <ReasonLine m={ch} />
         {panache && (
-          <Chip color={C.warn} title="Ne pas enchaîner 10 exos du même type (Rohrer/Taylor)">
-            <Shuffle size={11} /> panache les types
+          <Chip color={C.warn} title="Ne fais pas 10 fois le même type d’exercice à la suite.">
+            <Shuffle size={11} /> varie les exos
           </Chip>
         )}
       </div>
 
-      <div style={{ paddingLeft: 28 }}>
-        <PriorityReader m={ch} />
+      {/* Comment : la production concrète attendue */}
+      <div style={{ fontFamily: SANS, fontSize: 12.5, color: C.dim, paddingLeft: 28 }}>
+        <span style={{ color: C.text }}>À faire</span> · {ch.action.deliverable}
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, paddingLeft: 28, flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: '1 1 220px' }}>
-          <Pencil size={12} color={C.faint} />
-          <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>maîtrise</span>
-          <div style={{ flex: 1, minWidth: 90 }}>
-            <Range value={ch.mastery} min={0} max={100} ariaLabel={`maîtrise ${ch.name}`}
-              onChange={(v) => onMastery(ch.id, v)} />
+      {/* Détails (repliés en mode simple) : maîtrise + chiffres transparents */}
+      {open && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingLeft: 28, paddingTop: 2 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <div style={{ flex: '1 1 150px', minWidth: 120 }}>
+              <MasteryBar value={ch.mastery} color={subject.color} />
+            </div>
+            <Mono style={{ color: C.dim, fontSize: 11 }}>{Math.round(ch.mastery)}/100</Mono>
+            <Mono style={{ color: C.faint, fontSize: 11 }}>· {sinceLabel} · à revoir ~tous les {Math.round(ch.ti)} j</Mono>
           </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Pencil size={12} color={C.faint} />
+            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>ajuster la maîtrise</span>
+            <div style={{ flex: 1, minWidth: 90 }}>
+              <Range value={ch.mastery} min={0} max={100} ariaLabel={`maîtrise ${ch.name}`}
+                onChange={(v) => onMastery(ch.id, v)} />
+            </div>
+          </div>
+          <PriorityReader m={ch} compact />
         </div>
+      )}
+
+      {/* Action : valider + (en mode simple) ouvrir les détails */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 28 }}>
         <Btn variant={flash ? 'ghost' : 'primary'}
           onClick={() => { onWorked(ch.id); setFlash(true); setTimeout(() => setFlash(false), 1200); }}>
           {flash ? <><Check size={14} /> enregistré</> : <><Check size={14} /> J’ai travaillé</>}
         </Btn>
+        {simpleMode && (
+          <Btn variant="bare" onClick={() => setExpanded((v) => !v)} style={{ marginLeft: 'auto', color: C.faint, fontSize: 12 }}>
+            détails {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </Btn>
+        )}
       </div>
     </div>
   );
@@ -748,6 +817,7 @@ export default function Cadence() {
             parallelSubjects={parallelSubjects} parallelLog={parallelLog} settings={settings}
             onWorked={markWorked} onMastery={setMastery} onAdjustParallel={adjustParallel}
             onGoSubjects={() => setTab('subjects')}
+            onSetSimpleMode={(v) => updateSetting('simpleMode', v)}
           />
         )}
         {tab === 'calendar' && (
@@ -779,6 +849,7 @@ export default function Cadence() {
 function TodayView({
   today, overdue, nextExam, subjectById, annalesBanners, queue, ranked,
   parallelSubjects, parallelLog, settings, onWorked, onMastery, onAdjustParallel, onGoSubjects,
+  onSetSimpleMode,
 }) {
   const [showAll, setShowAll] = useState(false);
   const wk = mondayOf(today);
@@ -790,7 +861,7 @@ function TodayView({
         <div>
           <Mono style={{ fontSize: 22, color: C.text, textTransform: 'capitalize' }}>{fmtLongDate(today)}</Mono>
           <div style={{ fontFamily: SANS, fontSize: 12, color: C.faint, marginTop: 2 }}>
-            File interleavée du soir · coche ce qui est fait
+            Ta liste du soir · coche ce qui est fait
           </div>
         </div>
         <div style={{ display: 'flex', gap: 10, marginLeft: 'auto', flexWrap: 'wrap' }}>
@@ -830,9 +901,9 @@ function TodayView({
             </Btn>
           ) : null
         }>
-          File du jour
-          <Chip color={C.faint} style={{ marginLeft: 8 }} title="Rotation des matières : jamais deux blocs d'affilée de la même UE quand une alternative existe">
-            <Shuffle size={11} /> interleavé
+          Ta liste du soir
+          <Chip color={C.faint} style={{ marginLeft: 8 }} title="Les matières sont alternées : jamais deux blocs de la même UE à la suite quand c'est possible.">
+            <Shuffle size={11} /> matières alternées
           </Chip>
         </SectionTitle>
 
@@ -846,12 +917,19 @@ function TodayView({
           </Empty>
         ) : (
           <>
-            <ThermalLegend />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 12px', flexWrap: 'wrap' }}>
+              <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>affichage</span>
+              <Segmented value={settings.simpleMode ? 'simple' : 'full'} ariaLabel="Affichage des cartes"
+                onChange={(v) => onSetSimpleMode(v === 'simple')}
+                options={[{ value: 'simple', label: 'Simple' }, { value: 'full', label: 'Détaillé' }]} />
+              <div style={{ flex: 1 }} />
+              <ThermalLegend />
+            </div>
             {!showAll ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 {queue.map((ch, i) => (
                   <QueueCard key={ch.id} idx={i} ch={ch} subject={subjectById[ch.subjectId]}
-                    today={today} onWorked={onWorked} onMastery={onMastery} />
+                    simpleMode={settings.simpleMode} onWorked={onWorked} onMastery={onMastery} />
                 ))}
               </div>
             ) : (
@@ -865,10 +943,10 @@ function TodayView({
         )}
       </div>
 
-      {/* Bande des planchers (matières parallèles — minimums protégés) */}
+      {/* Minimums hebdo (matières en parallèle — à tenir quoi qu'il arrive) */}
       {parallelSubjects.length > 0 && (
         <div>
-          <SectionTitle icon={Lock}>Planchers de la semaine</SectionTitle>
+          <SectionTitle icon={Lock}>À tenir cette semaine</SectionTitle>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             {parallelSubjects.map((s) => {
               const done = parallelLog?.[wk]?.[s.id] || 0;
@@ -893,9 +971,9 @@ function TodayView({
                     <IconBtn icon={ChevronLeft} title="−1" onClick={() => onAdjustParallel(s.id, -1)} />
                     <IconBtn icon={Plus} title="+1 séance" onClick={() => onAdjustParallel(s.id, +1)} />
                     {below ? (
-                      <Chip color={C.warn} style={{ marginLeft: 'auto' }}><AlertTriangle size={11} /> sous le plancher</Chip>
+                      <Chip color={C.warn} style={{ marginLeft: 'auto' }}><AlertTriangle size={11} /> il en manque</Chip>
                     ) : (
-                      <Chip color={C.good} style={{ marginLeft: 'auto' }}><Check size={11} /> protégé</Chip>
+                      <Chip color={C.good} style={{ marginLeft: 'auto' }}><Check size={11} /> c’est bon</Chip>
                     )}
                   </div>
                 </div>
@@ -903,7 +981,7 @@ function TodayView({
             })}
           </div>
           <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, marginTop: 8 }}>
-            Ces minimums sont protégés, pas du résidu : assure-les même les semaines chargées.
+            À faire chaque semaine quoi qu’il arrive — même les semaines chargées.
           </div>
         </div>
       )}
@@ -931,7 +1009,7 @@ function ThermalLegend() {
       <div style={{ flex: '0 1 180px', height: 5, borderRadius: 3, background: grad, border: `1px solid ${C.line}` }} />
       <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>urgent</span>
       <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, marginLeft: 6 }}>
-        — la couleur encode la priorité
+        — la couleur = l’urgence
       </span>
     </div>
   );
@@ -1124,7 +1202,7 @@ function SubjectsView({
 
               {!isCore && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>plancher</span>
+                  <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>minimum</span>
                   <input type="number" min={0} max={20} value={s.weeklyFloor ?? 0}
                     onChange={(e) => onUpdateSubject(s.id, { weeklyFloor: Math.max(0, Number(e.target.value) || 0) })}
                     aria-label="plancher hebdo"
@@ -1310,6 +1388,19 @@ function SettingsView({ settings, state, store, onUpdate, onImport, onReset, tod
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      <div>
+        <SectionTitle icon={Activity}>Affichage</SectionTitle>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <span style={{ fontFamily: SANS, fontSize: 13, color: C.text }}>Cartes du soir</span>
+          <Segmented value={settings.simpleMode ? 'simple' : 'full'} ariaLabel="Affichage des cartes"
+            onChange={(v) => onUpdate('simpleMode', v === 'simple')}
+            options={[{ value: 'simple', label: 'Simple' }, { value: 'full', label: 'Détaillé' }]} />
+          <span style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, flex: '1 1 240px' }}>
+            Simple = juste quoi faire + « J’ai travaillé ». Détaillé = chiffres et maîtrise toujours visibles.
+          </span>
+        </div>
+      </div>
+
       <SectionTitle icon={SettingsIcon}>Réglages du moteur</SectionTitle>
 
       <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', alignItems: 'flex-start' }}>

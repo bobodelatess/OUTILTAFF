@@ -7,6 +7,7 @@ import {
   buildQueue,
   recommendedAction,
   annalesModeFor,
+  reasonPhrase,
 } from './Cadence.jsx';
 
 const S = DEFAULT_SETTINGS;
@@ -143,6 +144,43 @@ describe('recommendedAction', () => {
       expect(recommendedAction(m, false).deliverable.length).toBeGreaterThan(0);
     }
     expect(recommendedAction(50, true).deliverable.length).toBeGreaterThan(0);
+  });
+});
+
+describe('reasonPhrase — langage clair, pas de formule', () => {
+  it('épreuve proche : « Examen … dans N j »', () => {
+    const ch = { id: 'c1', subjectId: 's1', name: 'x', mastery: 30, lastReviewed: FIVE_AGO };
+    const exams = [{ id: 'e1', subjectId: 's1', name: 'CC1', date: EXAM_NEAR, chapterIds: ['c1'] }];
+    const m = chapterMetrics(ch, exams, S, TODAY);
+    const r = reasonPhrase(m);
+    expect(r.tone).toBe('exam');
+    expect(r.text).toBe('Examen CC1 dans 7 j');
+  });
+
+  it('en retard : « En retard de N j » (ou « À revoir maintenant »)', () => {
+    // m=0 -> ti=2 j ; révisé il y a 5 j -> en retard d'environ 3 j
+    const ch = { id: 'c', subjectId: 's', name: 'x', mastery: 0, lastReviewed: FIVE_AGO };
+    const r = reasonPhrase(chapterMetrics(ch, [], S, TODAY));
+    expect(r.tone).toBe('late');
+    expect(r.text).toBe('En retard de 3 j');
+  });
+
+  it('jamais révisé', () => {
+    const ch = { id: 'c', subjectId: 's', name: 'x', mastery: 50, lastReviewed: null };
+    expect(reasonPhrase(chapterMetrics(ch, [], S, TODAY)).text).toBe('Jamais révisé');
+  });
+
+  it('pas urgent quand récent et sans épreuve', () => {
+    const ch = { id: 'c', subjectId: 's', name: 'x', mastery: 90, lastReviewed: FIVE_AGO };
+    const r = reasonPhrase(chapterMetrics(ch, [], S, TODAY));
+    expect(r.tone).toBe('calm');
+    expect(r.text.startsWith('Pas urgent')).toBe(true);
+  });
+});
+
+describe('simpleMode activé par défaut', () => {
+  it('DEFAULT_SETTINGS.simpleMode === true', () => {
+    expect(DEFAULT_SETTINGS.simpleMode).toBe(true);
   });
 });
 

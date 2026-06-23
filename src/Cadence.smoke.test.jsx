@@ -10,9 +10,9 @@ describe('Cadence — rendu', () => {
     const html = renderToStaticMarkup(React.createElement(Cadence));
     expect(html).toContain('CADENCE');
     expect(html).toContain('Aujourd’hui');
-    // bande des planchers issue du seed (matières parallèles)
+    // bande des minimums hebdo issue du seed (matières parallèles)
     expect(html).toContain('Anglais / TOEIC');
-    expect(html).toContain('Planchers de la semaine');
+    expect(html).toContain('À tenir cette semaine');
     // état vide invitant à agir
     expect(html).toContain('ajoute tes chapitres');
   });
