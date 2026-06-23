@@ -1,5 +1,9 @@
 # Publie CADENCE sur GitHub Pages à chaque push.
-# Côté GitHub : Settings → Pages → Source = "GitHub Actions" (une seule fois).
+#
+# ⚠️ UNE SEULE FOIS, à faire à la main (le token Actions n'a pas le droit
+# d'administrer Pages ici) :
+#   Repo → Settings → Pages → Build and deployment → Source = "GitHub Actions"
+# Sans ça, Pages sert la source brute du dépôt (écran noir) au lieu du build.
 name: Deploy to GitHub Pages
 
 on:
@@ -25,10 +29,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Active Pages automatiquement au 1er run (source = GitHub Actions).
-      - uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - uses: actions/setup-node@v4
         with:
           node-version: 20
