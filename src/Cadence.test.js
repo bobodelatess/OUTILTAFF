@@ -5,7 +5,6 @@ import {
   examMultiplier,
   chapterMetrics,
   buildQueue,
-  recommendedAction,
   annalesModeFor,
   reasonPhrase,
 } from './Cadence.jsx';
@@ -127,23 +126,6 @@ describe('buildQueue — rotation des matières', () => {
     ];
     const q = buildQueue(ranked, 3);
     expect(q.map((x) => x.id)).toEqual(['a1', 'a2']);
-  });
-});
-
-describe('recommendedAction', () => {
-  it('mode annales l’emporte sur la maîtrise', () => {
-    expect(recommendedAction(95, true).key).toBe('annales');
-  });
-  it('seuils de maîtrise', () => {
-    expect(recommendedAction(20, false).key).toBe('cours');
-    expect(recommendedAction(60, false).key).toBe('exercices');
-    expect(recommendedAction(85, false).key).toBe('consolidation');
-  });
-  it('chaque action porte un livrable concret', () => {
-    for (const m of [10, 50, 80]) {
-      expect(recommendedAction(m, false).deliverable.length).toBeGreaterThan(0);
-    }
-    expect(recommendedAction(50, true).deliverable.length).toBeGreaterThan(0);
   });
 });
 

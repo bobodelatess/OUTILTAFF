@@ -26,7 +26,7 @@ import {
   Activity, CalendarDays, Layers, Settings as SettingsIcon,
   Plus, Trash2, ChevronDown, ChevronRight, ChevronLeft, Check,
   Download, Upload, RotateCcw, AlertTriangle, Shuffle, Lock,
-  BookOpen, Dumbbell, FlaskConical, Target, Flame, Pencil,
+  BookOpen, FlaskConical, Flame, Pencil,
 } from 'lucide-react';
 
 /* ------------------------------------------------------------------ *
@@ -192,17 +192,6 @@ export function annalesModeFor(subjectId, exams, s, today) {
   return n && n.days <= s.examModeThreshold ? n : null;
 }
 
-// Action recommandée + livrable concret (règle dure : aucun bloc sans production).
-export function recommendedAction(mastery, inAnnales) {
-  if (inAnnales)
-    return { key: 'annales', label: 'Annales', deliverable: '1 annale chronométrée puis fiche d’erreurs' };
-  if (mastery < 40)
-    return { key: 'cours', label: 'Cours', deliverable: 'survole le chapitre + 1 exemple type, pas de détails fins' };
-  if (mastery < 75)
-    return { key: 'exercices', label: 'Exercices', deliverable: '3–4 exos panachés, corrigés, 1 ligne d’erreur' };
-  return { key: 'consolidation', label: 'Consolidation', deliverable: '2 exos variés sans regarder le cours, vérifie la vitesse' };
-}
-
 // Raison en langage clair (pas de formule) : pourquoi ce chapitre, là, maintenant.
 // Renvoie { text, tone } avec tone ∈ 'exam' | 'late' | 'calm'.
 export function reasonPhrase(m) {
@@ -235,8 +224,6 @@ export function buildQueue(ranked, blocksPerDay) {
   }
   return queue;
 }
-
-const isPanache = (actionKey) => actionKey === 'exercices' || actionKey === 'annales';
 
 /* ------------------------------------------------------------------ *
  *  Rampe thermique
@@ -415,17 +402,6 @@ function TextInput({ value, onChange, placeholder, type = 'text', style, ariaLab
   );
 }
 
-const ACTION_ICON = { cours: BookOpen, exercices: Dumbbell, annales: FlaskConical, consolidation: Target };
-
-function ActionBadge({ action }) {
-  const Icon = ACTION_ICON[action.key] || BookOpen;
-  return (
-    <Chip color={C.text} bg="rgba(255,255,255,.05)" style={{ fontWeight: 600 }}>
-      <Icon size={12} /> {action.label}
-    </Chip>
-  );
-}
-
 // Lecteur de priorité transparent : valeur + urgence × mult + épreuve/jours.
 function PriorityReader({ m, compact }) {
   const col = thermal(m.priority);
@@ -497,14 +473,13 @@ function QueueCard({ idx, ch, subject, simpleMode, onWorked, onMastery }) {
   const tcol = thermal(ch.priority);
   const sinceLabel = ch.since == null ? 'jamais révisé'
     : ch.since === 0 ? 'révisé aujourd’hui' : `il y a ${ch.since} j`;
-  const panache = isPanache(ch.action.key);
 
   return (
     <div style={{
       background: C.panel, border: `1px solid ${C.line}`, borderLeft: `3px solid ${tcol}`,
       borderRadius: 10, padding: 13, display: 'flex', flexDirection: 'column', gap: 9,
     }}>
-      {/* Quoi : chapitre + matière + action recommandée */}
+      {/* Quel chapitre */}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
         <Mono style={{ color: C.faint, fontSize: 12, marginTop: 2, width: 18 }}>{idx + 1}</Mono>
         <Pastille color={subject.color} />
@@ -514,22 +489,11 @@ function QueueCard({ idx, ch, subject, simpleMode, onWorked, onMastery }) {
             <span style={{ fontFamily: SANS, fontSize: 11, color: C.dim }}>{subject.name}</span>
           </div>
         </div>
-        <ActionBadge action={ch.action} />
       </div>
 
-      {/* Pourquoi : une phrase claire (au lieu de la formule) */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 28, flexWrap: 'wrap' }}>
+      {/* Pourquoi : une phrase claire (tu décides quoi faire) */}
+      <div style={{ paddingLeft: 28 }}>
         <ReasonLine m={ch} />
-        {panache && (
-          <Chip color={C.warn} title="Ne fais pas 10 fois le même type d’exercice à la suite.">
-            <Shuffle size={11} /> varie les exos
-          </Chip>
-        )}
-      </div>
-
-      {/* Comment : la production concrète attendue */}
-      <div style={{ fontFamily: SANS, fontSize: 12.5, color: C.dim, paddingLeft: 28 }}>
-        <span style={{ color: C.text }}>À faire</span> · {ch.action.deliverable}
       </div>
 
       {/* Détails (repliés en mode simple) : maîtrise + chiffres transparents */}
@@ -587,7 +551,6 @@ function RankRow({ idx, ch, subject }) {
         </div>
         <PriorityReader m={ch} compact />
       </div>
-      <Chip color={C.dim}>{ch.action.label}</Chip>
     </div>
   );
 }
@@ -753,11 +716,7 @@ export default function Cadence() {
   const parallelSubjects = useMemo(() => subjects.filter((s) => s.type === 'parallel'), [subjects]);
 
   const ranked = useMemo(() => chapters
-    .map((ch) => {
-      const inAnnales = !!annalesModeFor(ch.subjectId, exams, settings, today);
-      const m = chapterMetrics(ch, exams, settings, today);
-      return { ...ch, ...m, inAnnales, action: recommendedAction(ch.mastery, inAnnales) };
-    })
+    .map((ch) => ({ ...ch, ...chapterMetrics(ch, exams, settings, today) }))
     .sort((a, b) => b.priority - a.priority), [chapters, exams, settings, today]);
 
   const overdue = ranked.filter((c) => c.urgency >= 1).length;
@@ -874,16 +833,16 @@ function TodayView({
         </div>
       </div>
 
-      {/* Bannières mode annales */}
+      {/* Bannières « examen proche » (simple alerte, pas de consigne) */}
       {annalesBanners.map(({ subject, info }) => (
         <div key={subject.id} style={{
           display: 'flex', alignItems: 'center', gap: 10, padding: '10px 13px', borderRadius: 9,
           background: 'rgba(251,191,36,.08)', border: `1px solid rgba(251,191,36,.32)`,
         }}>
-          <FlaskConical size={16} color={C.warn} />
+          <CalendarDays size={16} color={C.warn} />
           <Pastille color={subject.color} />
           <span style={{ fontFamily: SANS, fontSize: 13.5 }}>
-            <b>Mode annales — {subject.name}</b> · arrête le cours, teste-toi
+            <b>{subject.name}</b> · examen proche
           </span>
           <Mono style={{ marginLeft: 'auto', color: C.warn, fontSize: 12 }}>
             {info.exam.name} · J−{info.days}
@@ -1110,7 +1069,7 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, onGo
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginTop: 10, fontFamily: SANS, fontSize: 11, color: C.faint, flexWrap: 'wrap' }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            <span style={{ width: 18, height: 10, borderRadius: 3, background: '#fbbf241f', border: `1px solid ${C.line}` }} /> fenêtre mode annales
+            <span style={{ width: 18, height: 10, borderRadius: 3, background: '#fbbf241f', border: `1px solid ${C.line}` }} /> fenêtre « examen proche »
           </span>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <span style={{ width: 10, height: 10, borderRadius: 3, border: `1px solid ${C.accent}` }} /> aujourd’hui
@@ -1138,7 +1097,7 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, onGo
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 7, flexWrap: 'wrap' }}>
                     <Mono style={{ fontSize: 11, color: C.dim }}>{fmtShortDate(e.date)}</Mono>
                     <Chip color={C.dim}>{(e.chapterIds || []).length} chap.</Chip>
-                    {annales && <Chip color={C.warn}><FlaskConical size={11} /> mode annales</Chip>}
+                    {annales && <Chip color={C.warn}><CalendarDays size={11} /> examen proche</Chip>}
                   </div>
                 </div>
               );
@@ -1349,7 +1308,7 @@ const SLIDERS = [
   { key: 'maxInterval', label: 'Intervalle max', min: 7, max: 60, step: 1, unit: 'j', help: 'cible à maîtrise 100' },
   { key: 'maxExamPressure', label: 'Pression d’examen max', min: 1, max: 10, step: 0.5, unit: '×', help: 'multiplicateur au jour J' },
   { key: 'pressureHorizon', label: 'Horizon de pression', min: 7, max: 90, step: 1, unit: 'j', help: 'au-delà, l’examen n’influe pas' },
-  { key: 'examModeThreshold', label: 'Seuil mode annales', min: 3, max: 45, step: 1, unit: 'j', help: 'bascule en « teste-toi »' },
+  { key: 'examModeThreshold', label: 'Seuil « examen proche »', min: 3, max: 45, step: 1, unit: 'j', help: 'à partir de combien de jours une UE est signalée' },
   { key: 'blocksPerDay', label: 'Blocs par jour', min: 1, max: 10, step: 1, unit: '', help: 'taille de la file du jour' },
 ];
 
