@@ -4,9 +4,12 @@ import {
   targetInterval,
   examMultiplier,
   chapterMetrics,
-  buildQueue,
+  planDay,
   annalesModeFor,
   reasonPhrase,
+  retrievability,
+  optimalInterval,
+  nextStability,
 } from './Cadence.jsx';
 
 const S = DEFAULT_SETTINGS;
@@ -100,32 +103,75 @@ describe('chapterMetrics — décomposition transparente', () => {
   });
 });
 
-describe('buildQueue — rotation des matières', () => {
-  it('évite deux blocs consécutifs de la même matière quand une alternative existe', () => {
-    const ranked = [
-      { id: 'a1', subjectId: 'A', priority: 9 },
-      { id: 'a2', subjectId: 'A', priority: 8 },
-      { id: 'b1', subjectId: 'B', priority: 7 },
-      { id: 'a3', subjectId: 'A', priority: 6 },
-      { id: 'b2', subjectId: 'B', priority: 5 },
-    ];
-    const q = buildQueue(ranked, 5);
-    for (let i = 1; i < q.length; i++) {
-      // si à l'étape i il restait une autre matière, on ne répète pas
-      expect(q[i].subjectId === q[i - 1].subjectId && q.slice(i).every(x => x.subjectId === q[i - 1].subjectId)).toBeDefined();
-    }
-    // début : A (9) puis B (7) — pas A,A
-    expect(q[0].id).toBe('a1');
-    expect(q[1].subjectId).toBe('B');
+describe('courbe d’oubli (loi de puissance)', () => {
+  it('R(0)=1, R(stabilité)=0.9, décroissante', () => {
+    expect(retrievability(0, 10)).toBeCloseTo(1, 5);
+    expect(retrievability(10, 10)).toBeCloseTo(0.9, 4);
+    expect(retrievability(40, 10)).toBeLessThan(retrievability(10, 10));
+  });
+  it('intervalle optimal : à 90 % il vaut la stabilité ; plus exigeant = plus court', () => {
+    expect(optimalInterval(10, 0.9)).toBeCloseTo(10, 4);
+    expect(optimalInterval(10, 0.95)).toBeLessThan(10);
+    expect(optimalInterval(10, 0.85)).toBeGreaterThan(10);
+  });
+});
+
+describe('nextStability — intervalles expansifs + effet d’espacement', () => {
+  it('réviser fait toujours grandir la stabilité', () => {
+    const s = nextStability(10, 60, 0.9, S);
+    expect(s).toBeGreaterThan(10);
+  });
+  it('réviser tard (R bas) consolide plus que réviser tôt (R haut)', () => {
+    const late = nextStability(10, 60, 0.7, S); // révisé bien après le seuil
+    const early = nextStability(10, 60, 0.98, S); // révisé trop tôt (bachotage)
+    expect(late).toBeGreaterThan(early);
+  });
+  it('une maîtrise plus haute consolide plus vite', () => {
+    expect(nextStability(10, 90, 0.9, S)).toBeGreaterThan(nextStability(10, 20, 0.9, S));
+  });
+});
+
+describe('chapterMetrics — rétro-compatibilité (défauts = ancien modèle)', () => {
+  it('sans stabilité ni rétention custom, l’intervalle = targetInterval(maîtrise)', () => {
+    const ch = { id: 'c', subjectId: 's', name: 'x', mastery: 30, lastReviewed: FIVE_AGO };
+    const m = chapterMetrics(ch, [], S, TODAY);
+    expect(m.ti).toBeCloseTo(targetInterval(30, S), 5);
+  });
+  it('expose la rétrievabilité courante', () => {
+    const ch = { id: 'c', subjectId: 's', name: 'x', mastery: 50, lastReviewed: FIVE_AGO };
+    const m = chapterMetrics(ch, [], S, TODAY);
+    expect(m.R).toBeGreaterThan(0);
+    expect(m.R).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('planDay — capacité : N matières/jour, chapitres prioritaires', () => {
+  const subjects = [
+    { id: 'A', name: 'A', type: 'core' }, { id: 'B', name: 'B', type: 'core' },
+    { id: 'C', name: 'C', type: 'core' }, { id: 'D', name: 'D', type: 'core' },
+    { id: 'P', name: 'Anki', type: 'parallel' },
+  ];
+  const ranked = [
+    { id: 'a1', subjectId: 'A', priority: 9 }, { id: 'a2', subjectId: 'A', priority: 8 }, { id: 'a3', subjectId: 'A', priority: 1 },
+    { id: 'b1', subjectId: 'B', priority: 7 },
+    { id: 'c1', subjectId: 'C', priority: 6 },
+    { id: 'd1', subjectId: 'D', priority: 5 },
+    { id: 'p1', subjectId: 'P', priority: 99 }, // parallèle : exclu du plan
+  ];
+
+  it('retient les 3 matières les plus sous pression, parallèles exclues', () => {
+    const sessions = planDay(ranked, subjects, 3, 4);
+    expect(sessions.length).toBe(3);
+    expect(sessions.map((s) => s.subject.id)).toEqual(['A', 'B', 'C']);
+    expect(sessions.every((s) => s.subject.type === 'core')).toBe(true);
   });
 
-  it('retombe sur la plus haute priorité si pas d’alternative', () => {
-    const ranked = [
-      { id: 'a1', subjectId: 'A', priority: 9 },
-      { id: 'a2', subjectId: 'A', priority: 8 },
-    ];
-    const q = buildQueue(ranked, 3);
-    expect(q.map((x) => x.id)).toEqual(['a1', 'a2']);
+  it('limite chaque séance à chaptersPerSession et compte le reste', () => {
+    const sessions = planDay(ranked, subjects, 3, 2);
+    const a = sessions.find((s) => s.subject.id === 'A');
+    expect(a.chapters.length).toBe(2);          // 2 sur 3
+    expect(a.total).toBe(3);
+    expect(a.chapters.map((c) => c.id)).toEqual(['a1', 'a2']); // les plus prioritaires
   });
 });
 

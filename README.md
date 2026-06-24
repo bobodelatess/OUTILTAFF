@@ -22,18 +22,42 @@ chapitre **déjà solide** ne monte qu'un peu. La priorité est toujours affich�
 façon transparente (`valeur = urgence × multiplicateur`, plus quelle épreuve la
 déclenche et dans combien de jours) — jamais de boîte noire.
 
+## Espacement (fondé sur la recherche)
+
+- **Courbe d'oubli en loi de puissance** `R(t) = (1 + FACTOR·t/S)^DECAY`
+  (Wixted ; FSRS) — meilleur ajustement que l'exponentielle.
+- **Stabilité de mémoire `S`** par chapitre, qui **grandit à chaque révision**
+  (intervalles expansifs ; Landauer & Bjork, SM‑2, FSRS).
+- **Effet d'espacement** : le gain de stabilité est maximal quand on révise
+  **près du seuil d'oubli** (R bas), minimal quand on bachote (Cepeda et al. ;
+  Bjork, *desirable difficulties*).
+- **Rétention cible** : on planifie la révision quand `R` retombe au niveau visé
+  (90 % par défaut) — `intervalle = optimalInterval(S, rétention)`.
+- La **maîtrise** (auto‑évaluée) joue le rôle de *facilité* : elle module la
+  vitesse de consolidation et fixe la stabilité de départ.
+
+> Avec une rétention de 90 % et sans historique, le modèle se réduit exactement
+> à l'ancien (intervalle = `targetInterval(maîtrise)`) — d'où la continuité.
+
+## Capacité (plan du jour)
+
+CADENCE planifie **`subjectsPerDay` matières par jour** (3 par défaut), chacune
+sur une **séance de `sessionHours` h** (2 h). Les matières les plus sous pression
+passent en premier ; les autres montent d'elles‑mêmes en priorité les jours
+suivants. Le nombre de chapitres par séance est estimé via `minutesPerChapter`.
+
 ## Les quatre vues
 
-1. **Aujourd'hui** — file interleavée du jour (rotation des matières), action
-   recommandée + livrable concret par bloc, lecteur de priorité transparent,
-   bouton « J'ai travaillé », bannières mode annales, bande des planchers
-   hebdomadaires (minimums protégés).
+1. **Aujourd'hui** — plan du jour en **séances par matière** (chapitre + raison
+   en clair + « J'ai travaillé »), détails repliables (maîtrise, mémoire,
+   intervalle), bannières « examen proche », minimums hebdo.
 2. **Calendrier** — grille mensuelle, épreuves en marqueurs couleur, fenêtres
-   mode annales ombrées, liste des épreuves à venir.
+   « examen proche » ombrées, liste des épreuves à venir.
 3. **Matières** — CRUD des UE, chapitres (curseur de maîtrise) et épreuves
    (date + sélection des chapitres couverts).
-4. **Réglages** — six curseurs avec aperçu live de la courbe du multiplicateur
-   d'examen ; export / import JSON ; réinitialisation.
+4. **Réglages** — curseurs (rétention cible, capacité, intervalles, pression
+   d'examen) avec aperçu live de la **courbe d'oubli** et du **multiplicateur
+   d'examen** ; export / import JSON ; réinitialisation.
 
 ## Lancer
 
@@ -59,11 +83,14 @@ npm test         # tests d'acceptation du moteur de priorité
 
 | Étape | Formule |
 | --- | --- |
-| Intervalle cible | `minInterval × (maxInterval / minInterval)^(m/100)` |
-| Urgence | `joursDepuis / targetInterval(m)` (jamais révisé ⇒ `targetInterval × 2.2`) |
+| Stabilité de départ | `minInterval × (maxInterval / minInterval)^(m/100)` |
+| Courbe d'oubli | `R(t) = (1 + FACTOR·t/S)^DECAY`, calée pour `R(S) = 90 %` |
+| Intervalle visé | `optimalInterval(S, rétention)` (= `S` à 90 %) |
+| Urgence | `joursDepuis / intervalle` (jamais révisé ⇒ `× 2.2`) |
+| Gain de stabilité | `S × (1 + facilité(m) · espacement(R))` à chaque révision |
 | Multiplicateur d'examen | `1 + (maxExamPressure − 1) × ((horizon − j)/horizon)²` |
-| Facteur d'examen | max du multiplicateur sur les épreuves futures couvrant le chapitre |
-| Priorité | `urgence × facteur` |
+| Priorité | `urgence × facteur d'examen` |
 
-Réglages par défaut : `minInterval=2`, `maxInterval=30`, `maxExamPressure=5`,
-`pressureHorizon=35`, `examModeThreshold=21`, `blocksPerDay=5`.
+Réglages par défaut : `requestRetention=0.90`, `subjectsPerDay=3`,
+`sessionHours=2`, `minutesPerChapter=30`, `minInterval=2`, `maxInterval=30`,
+`maxExamPressure=5`, `pressureHorizon=35`, `examModeThreshold=21`.

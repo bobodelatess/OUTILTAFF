@@ -13,19 +13,26 @@
  *
  * Modèle de données
  *   Subject  = { id, name, color, type: 'core' | 'parallel', weeklyFloor? }
- *   Chapter  = { id, subjectId, name, mastery: 0..100, lastReviewed: ISODate|null }
+ *   Chapter  = { id, subjectId, name, mastery: 0..100, lastReviewed: ISODate|null,
+ *                stability?: number }   // stabilité de mémoire (jours), grandit aux révisions
  *   Exam     = { id, subjectId, name, date: ISODate, chapterIds: string[] }
  *   Settings = { minInterval, maxInterval, maxExamPressure, pressureHorizon,
- *                examModeThreshold, blocksPerDay }
+ *                examModeThreshold, requestRetention, subjectsPerDay,
+ *                sessionHours, minutesPerChapter, simpleMode }
  *   State    = { subjects, chapters, exams, settings, parallelLog }
  *   parallelLog : { [lundiISO]: { [subjectId]: nbSéances } }
+ *
+ * Espacement (science) : courbe d'oubli en loi de puissance + stabilité de
+ * mémoire qui grandit à chaque révision (intervalles expansifs), gain modulé
+ * par l'effet d'espacement (réviser près du seuil d'oubli) et la maîtrise.
+ * Plan du jour borné par la capacité (N matières × H heures).
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, CalendarDays, Layers, Settings as SettingsIcon,
   Plus, Trash2, ChevronDown, ChevronRight, ChevronLeft, Check,
-  Download, Upload, RotateCcw, AlertTriangle, Shuffle, Lock,
+  Download, Upload, RotateCcw, AlertTriangle, Lock,
   BookOpen, FlaskConical, Flame, Pencil,
 } from 'lucide-react';
 
@@ -41,8 +48,11 @@ export const DEFAULT_SETTINGS = {
   maxExamPressure: 5,
   pressureHorizon: 35,
   examModeThreshold: 21,
-  blocksPerDay: 5,
-  simpleMode: true, // cartes du soir épurées (chiffres derrière « détails »)
+  requestRetention: 0.9, // rétention cible : on revoit quand R retombe à ce niveau
+  subjectsPerDay: 3,     // capacité : nombre de matières par jour
+  sessionHours: 2,       // durée d'une séance par matière
+  minutesPerChapter: 30, // estimation -> nb de chapitres par séance
+  simpleMode: true,      // cartes du soir épurées (chiffres derrière « détails »)
 };
 
 const C = {
@@ -131,17 +141,54 @@ function fmtShortDate(iso) {
  *  Moteur de priorité (fonctions pures, testées)
  * ------------------------------------------------------------------ */
 
-// 1. Intervalle cible : interpolation géométrique selon la maîtrise.
+// 1. Stabilité de mémoire initiale (jours) selon la maîtrise auto-évaluée :
+//    interpolation géométrique. Point de départ ; la stabilité grandit ensuite
+//    à chaque révision réussie (intervalles expansifs).
 export function targetInterval(mastery, s) {
   const m = clamp(mastery, 0, 100);
   return s.minInterval * Math.pow(s.maxInterval / s.minInterval, m / 100);
 }
 
-// 2. Urgence de péremption (>= 1 ⇒ en retard ; jamais révisé ⇒ urgent).
+// Courbe d'oubli en loi de puissance (Wixted ; FSRS) — meilleur ajustement que
+// l'exponentielle. R(t) = (1 + FACTOR·t/S)^DECAY, calée pour que R(S) = 90 %.
+const DECAY = -0.5;
+const FACTOR = 0.9 ** (1 / DECAY) - 1; // ≈ 0.2345
+
+// Rétrievabilité : probabilité de te rappeler le chapitre après t jours.
+export function retrievability(daysSince, stability) {
+  if (stability <= 0) return 0;
+  return Math.pow(1 + FACTOR * Math.max(0, daysSince) / stability, DECAY);
+}
+
+// Intervalle optimal pour viser une rétention cible (ex. 90 %).
+// R(I) = RT  ⇒  I = S·(RT^(1/DECAY) − 1)/FACTOR. À 90 %, I = S.
+export function optimalInterval(stability, requestRetention) {
+  const rt = clamp(requestRetention ?? 0.9, 0.5, 0.99);
+  return stability * (Math.pow(rt, 1 / DECAY) - 1) / FACTOR;
+}
+
+// Stabilité courante (mémorisée si dispo, sinon dérivée de la maîtrise).
+export function chapterStability(chapter, s) {
+  return chapter.stability != null ? chapter.stability : targetInterval(chapter.mastery, s);
+}
+
+// Mise à jour de la stabilité après une révision réussie (« J'ai travaillé »).
+// Effet d'espacement : gain maximal quand on révise près du seuil d'oubli
+// (R bas) ; minimal quand on révise trop tôt (R haut). La maîtrise (≈ facilité)
+// module la vitesse de consolidation. Intervalles expansifs garantis.
+export function nextStability(stability, mastery, rOld, s) {
+  const rt = clamp(s.requestRetention ?? 0.9, 0.5, 0.99);
+  const ease = 0.3 + 1.5 * clamp(mastery, 0, 100) / 100;     // 0.3 … 1.8
+  const spacing = clamp((1 - rOld) / (1 - rt), 0.25, 2.5);   // effet d'espacement
+  return clamp(stability * (1 + ease * spacing), s.minInterval, 365);
+}
+
+// 2. Urgence de péremption (>= 1 ⇒ il te reste moins que la rétention cible ;
+//    jamais révisé ⇒ urgent).
 export function baseUrgency(chapter, s, today) {
-  const ti = targetInterval(chapter.mastery, s);
-  const days = chapter.lastReviewed ? daysBetween(chapter.lastReviewed, today) : ti * 2.2;
-  return Math.max(0, days) / ti;
+  const due = optimalInterval(chapterStability(chapter, s), s.requestRetention);
+  const days = chapter.lastReviewed ? daysBetween(chapter.lastReviewed, today) : due * 2.2;
+  return Math.max(0, days) / due;
 }
 
 // 3. Multiplicateur d'examen (≈1 quand loin, monte au carré jusqu'au jour J).
@@ -167,11 +214,14 @@ export function chapterExamFactor(chapter, exams, s, today) {
 
 // 5. Priorité finale + décomposition transparente.
 export function chapterMetrics(chapter, exams, s, today) {
-  const ti = targetInterval(chapter.mastery, s);
-  const urgency = baseUrgency(chapter, s, today);
-  const { factor, exam, examDays } = chapterExamFactor(chapter, exams, s, today);
+  const stability = chapterStability(chapter, s);
+  const ti = optimalInterval(stability, s.requestRetention); // intervalle de révision visé
   const since = chapter.lastReviewed ? daysBetween(chapter.lastReviewed, today) : null;
-  return { ti, urgency, factor, exam, examDays, since, priority: urgency * factor };
+  const days = since != null ? since : ti * 2.2;
+  const urgency = Math.max(0, days) / ti;
+  const R = since != null ? retrievability(since, stability) : null;
+  const { factor, exam, examDays } = chapterExamFactor(chapter, exams, s, today);
+  return { ti, stability, since, R, urgency, factor, exam, examDays, priority: urgency * factor };
 }
 
 // Prochaine épreuve future d'une matière.
@@ -209,20 +259,26 @@ export function reasonPhrase(m) {
   return { text: inDays <= 1 ? 'Pas urgent' : `Pas urgent · à revoir dans ~${inDays} j`, tone: 'calm' };
 }
 
-// Rotation des matières : file gloutonne évitant deux blocs consécutifs de la
-// même matière quand une alternative existe.
-export function buildQueue(ranked, blocksPerDay) {
-  const pool = ranked.slice();
-  const queue = [];
-  let prev = null;
-  while (queue.length < blocksPerDay && pool.length) {
-    let idx = pool.findIndex((c) => c.subjectId !== prev);
-    if (idx === -1) idx = 0; // pas d'alternative : on prend la plus haute priorité
-    const [picked] = pool.splice(idx, 1);
-    queue.push(picked);
-    prev = picked.subjectId;
+// Plan du jour sous contrainte de capacité : on retient les `subjectsPerDay`
+// matières (core) les plus sous pression, chacune avec ses `chaptersPerSession`
+// chapitres les plus prioritaires (une séance ≈ sessionHours h). Les matières
+// non faites aujourd'hui montent d'elles-mêmes en priorité les jours suivants.
+export function planDay(ranked, subjects, subjectsPerDay, chaptersPerSession) {
+  const core = new Map(subjects.filter((s) => s.type === 'core').map((s) => [s.id, s]));
+  const bySubject = new Map();
+  for (const ch of ranked) { // ranked déjà trié par priorité décroissante
+    if (!core.has(ch.subjectId)) continue;
+    if (!bySubject.has(ch.subjectId)) bySubject.set(ch.subjectId, []);
+    bySubject.get(ch.subjectId).push(ch);
   }
-  return queue;
+  const sessions = [];
+  for (const [sid, chs] of bySubject) {
+    const chapters = chs.slice(0, Math.max(1, chaptersPerSession));
+    const score = chapters.reduce((a, c) => a + c.priority, 0);
+    sessions.push({ subject: core.get(sid), chapters, score, total: chs.length });
+  }
+  sessions.sort((a, b) => b.score - a.score);
+  return sessions.slice(0, Math.max(1, subjectsPerDay));
 }
 
 /* ------------------------------------------------------------------ *
@@ -504,7 +560,9 @@ function QueueCard({ idx, ch, subject, simpleMode, onWorked, onMastery }) {
               <MasteryBar value={ch.mastery} color={subject.color} />
             </div>
             <Mono style={{ color: C.dim, fontSize: 11 }}>{Math.round(ch.mastery)}/100</Mono>
-            <Mono style={{ color: C.faint, fontSize: 11 }}>· {sinceLabel} · à revoir ~tous les {Math.round(ch.ti)} j</Mono>
+            <Mono style={{ color: C.faint, fontSize: 11 }}>
+              · {sinceLabel}{ch.R != null ? ` · mémoire ~${Math.round(ch.R * 100)}%` : ''} · revoir ~tous les {Math.round(ch.ti)} j
+            </Mono>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <Pencil size={12} color={C.faint} />
@@ -666,7 +724,10 @@ export default function Cadence() {
   });
 
   const addChapter = (subjectId, name) => patch((p) => ({
-    ...p, chapters: [...p.chapters, { id: uid(), subjectId, name, mastery: 50, lastReviewed: null }],
+    ...p, chapters: [...p.chapters, {
+      id: uid(), subjectId, name, mastery: 50, lastReviewed: null,
+      stability: targetInterval(50, p.settings),
+    }],
   }));
   const updateChapter = (id, up) => patch((p) => ({
     ...p, chapters: p.chapters.map((c) => (c.id === id ? { ...c, ...up } : c)),
@@ -676,8 +737,24 @@ export default function Cadence() {
     chapters: p.chapters.filter((c) => c.id !== id),
     exams: stripChapterIds(p.exams, [id]),
   }));
-  const markWorked = (id) => updateChapter(id, { lastReviewed: today });
-  const setMastery = (id, v) => updateChapter(id, { mastery: clamp(Math.round(v), 0, 100) });
+  // « J'ai travaillé » : révision réussie -> la stabilité grandit (intervalle
+  // expansif), gain modulé par l'effet d'espacement et la maîtrise.
+  const markWorked = (id) => patch((p) => ({
+    ...p, chapters: p.chapters.map((c) => {
+      if (c.id !== id) return c;
+      const stability = chapterStability(c, p.settings);
+      const since = c.lastReviewed ? daysBetween(c.lastReviewed, today) : stability;
+      const rOld = retrievability(since, stability);
+      return { ...c, lastReviewed: today, stability: nextStability(stability, c.mastery, rOld, p.settings) };
+    }),
+  }));
+  // Ajuster la maîtrise = recalibrer où tu en es : la stabilité repart de cette
+  // auto-évaluation (utile après un examen blanc noté).
+  const setMastery = (id, v) => patch((p) => {
+    const m = clamp(Math.round(v), 0, 100);
+    return { ...p, chapters: p.chapters.map((c) => (c.id === id
+      ? { ...c, mastery: m, stability: targetInterval(m, p.settings) } : c)) };
+  });
 
   const addExam = (subjectId, exam) => patch((p) => ({
     ...p, exams: [...p.exams, { id: uid(), subjectId, name: exam.name, date: exam.date, chapterIds: exam.chapterIds || [] }],
@@ -720,7 +797,11 @@ export default function Cadence() {
     .sort((a, b) => b.priority - a.priority), [chapters, exams, settings, today]);
 
   const overdue = ranked.filter((c) => c.urgency >= 1).length;
-  const queue = useMemo(() => buildQueue(ranked, settings.blocksPerDay), [ranked, settings.blocksPerDay]);
+  const chaptersPerSession = Math.max(1, Math.round((settings.sessionHours * 60) / settings.minutesPerChapter));
+  const sessions = useMemo(
+    () => planDay(ranked, subjects, settings.subjectsPerDay, chaptersPerSession),
+    [ranked, subjects, settings.subjectsPerDay, chaptersPerSession]);
+  const plannedCount = sessions.reduce((a, s) => a + s.chapters.length, 0);
 
   const annalesBanners = useMemo(() => coreSubjects
     .map((s) => ({ subject: s, info: annalesModeFor(s.id, exams, settings, today) }))
@@ -772,7 +853,7 @@ export default function Cadence() {
         {tab === 'today' && (
           <TodayView
             today={today} overdue={overdue} nextExam={nextExam} subjectById={subjectById}
-            annalesBanners={annalesBanners} queue={queue} ranked={ranked}
+            annalesBanners={annalesBanners} sessions={sessions} plannedCount={plannedCount} ranked={ranked}
             parallelSubjects={parallelSubjects} parallelLog={parallelLog} settings={settings}
             onWorked={markWorked} onMastery={setMastery} onAdjustParallel={adjustParallel}
             onGoSubjects={() => setTab('subjects')}
@@ -806,12 +887,14 @@ export default function Cadence() {
  * ------------------------------------------------------------------ */
 
 function TodayView({
-  today, overdue, nextExam, subjectById, annalesBanners, queue, ranked,
+  today, overdue, nextExam, subjectById, annalesBanners, sessions, plannedCount, ranked,
   parallelSubjects, parallelLog, settings, onWorked, onMastery, onAdjustParallel, onGoSubjects,
   onSetSimpleMode,
 }) {
   const [showAll, setShowAll] = useState(false);
   const wk = mondayOf(today);
+  const hrs = settings.sessionHours;
+  const hLabel = Number.isInteger(hrs) ? `${hrs} h` : `${hrs} h`;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -820,7 +903,7 @@ function TodayView({
         <div>
           <Mono style={{ fontSize: 22, color: C.text, textTransform: 'capitalize' }}>{fmtLongDate(today)}</Mono>
           <div style={{ fontFamily: SANS, fontSize: 12, color: C.faint, marginTop: 2 }}>
-            Ta liste du soir · coche ce qui est fait
+            Révisions espacées, à ta capacité · coche ce qui est fait
           </div>
         </div>
         <div style={{ display: 'flex', gap: 10, marginLeft: 'auto', flexWrap: 'wrap' }}>
@@ -850,19 +933,19 @@ function TodayView({
         </div>
       ))}
 
-      {/* File du jour */}
+      {/* Plan du jour : matières sous contrainte de capacité */}
       <div>
         <SectionTitle icon={Activity} right={
           ranked.length > 0 ? (
             <Btn variant="bare" onClick={() => setShowAll((v) => !v)} style={{ color: C.dim, fontSize: 12 }}>
-              {showAll ? 'voir la file du jour' : 'voir toute la file'}
+              {showAll ? 'voir le plan du jour' : 'voir tout le classement'}
               {showAll ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
             </Btn>
           ) : null
         }>
-          Ta liste du soir
-          <Chip color={C.faint} style={{ marginLeft: 8 }} title="Les matières sont alternées : jamais deux blocs de la même UE à la suite quand c'est possible.">
-            <Shuffle size={11} /> matières alternées
+          Plan du jour
+          <Chip color={C.faint} style={{ marginLeft: 8 }} title="Ta capacité : ce nombre de matières par jour, les plus sous pression d'abord. Les autres montent en priorité les jours suivants.">
+            {settings.subjectsPerDay} matières × {hLabel}
           </Chip>
         </SectionTitle>
 
@@ -874,9 +957,11 @@ function TodayView({
               <Btn variant="primary" onClick={onGoSubjects}><Layers size={14} /> Onglet Matières</Btn>
             </div>
           </Empty>
+        ) : sessions.length === 0 ? (
+          <Empty>Tes chapitres sont dans des matières « parallèle ». Passe une UE en « core » (onglet Matières) pour qu’elle entre dans le plan.</Empty>
         ) : (
           <>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 12px', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 14px', flexWrap: 'wrap' }}>
               <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>affichage</span>
               <Segmented value={settings.simpleMode ? 'simple' : 'full'} ariaLabel="Affichage des cartes"
                 onChange={(v) => onSetSimpleMode(v === 'simple')}
@@ -885,10 +970,31 @@ function TodayView({
               <ThermalLegend />
             </div>
             {!showAll ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {queue.map((ch, i) => (
-                  <QueueCard key={ch.id} idx={i} ch={ch} subject={subjectById[ch.subjectId]}
-                    simpleMode={settings.simpleMode} onWorked={onWorked} onMastery={onMastery} />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+                {sessions.map((session, si) => (
+                  <div key={session.subject.id}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 9 }}>
+                      <span style={{
+                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                        width: 22, height: 22, borderRadius: 6, background: `${session.subject.color}22`,
+                        color: session.subject.color, fontFamily: MONO, fontSize: 12, fontWeight: 700,
+                      }}>{si + 1}</span>
+                      <span style={{ fontFamily: SANS, fontSize: 15.5, fontWeight: 700, color: C.text }}>{session.subject.name}</span>
+                      <Chip color={C.dim}>séance ≈ {hLabel}</Chip>
+                      <Mono style={{ marginLeft: 'auto', color: C.faint, fontSize: 11 }}>
+                        {session.chapters.length} chap.{session.total > session.chapters.length ? ` · +${session.total - session.chapters.length} en attente` : ''}
+                      </Mono>
+                    </div>
+                    <div style={{
+                      display: 'flex', flexDirection: 'column', gap: 10,
+                      paddingLeft: 11, borderLeft: `2px solid ${session.subject.color}33`,
+                    }}>
+                      {session.chapters.map((ch, i) => (
+                        <QueueCard key={ch.id} idx={i} ch={ch} subject={session.subject}
+                          simpleMode={settings.simpleMode} onWorked={onWorked} onMastery={onMastery} />
+                      ))}
+                    </div>
+                  </div>
                 ))}
               </div>
             ) : (
@@ -1304,12 +1410,15 @@ function AddExam({ subjectId, today, onAdd }) {
  * ------------------------------------------------------------------ */
 
 const SLIDERS = [
-  { key: 'minInterval', label: 'Intervalle min', min: 1, max: 7, step: 1, unit: 'j', help: 'cible à maîtrise 0' },
-  { key: 'maxInterval', label: 'Intervalle max', min: 7, max: 60, step: 1, unit: 'j', help: 'cible à maîtrise 100' },
+  { key: 'requestRetention', label: 'Rétention cible', min: 0.8, max: 0.97, step: 0.01, fmt: (v) => `${Math.round(v * 100)} %`, help: 'tu revois quand il te reste ce niveau en mémoire — plus haut = plus de révisions' },
+  { key: 'subjectsPerDay', label: 'Matières par jour', min: 1, max: 6, step: 1, unit: '', help: 'ta capacité quotidienne' },
+  { key: 'sessionHours', label: 'Durée d’une séance', min: 1, max: 4, step: 0.5, unit: ' h', help: 'temps par matière' },
+  { key: 'minutesPerChapter', label: 'Minutes par chapitre', min: 10, max: 60, step: 5, unit: ' min', help: 'sert à estimer le nombre de chapitres par séance' },
+  { key: 'minInterval', label: 'Intervalle min', min: 1, max: 7, step: 1, unit: ' j', help: 'stabilité de départ à maîtrise 0' },
+  { key: 'maxInterval', label: 'Intervalle max', min: 7, max: 60, step: 1, unit: ' j', help: 'stabilité de départ à maîtrise 100' },
   { key: 'maxExamPressure', label: 'Pression d’examen max', min: 1, max: 10, step: 0.5, unit: '×', help: 'multiplicateur au jour J' },
-  { key: 'pressureHorizon', label: 'Horizon de pression', min: 7, max: 90, step: 1, unit: 'j', help: 'au-delà, l’examen n’influe pas' },
-  { key: 'examModeThreshold', label: 'Seuil « examen proche »', min: 3, max: 45, step: 1, unit: 'j', help: 'à partir de combien de jours une UE est signalée' },
-  { key: 'blocksPerDay', label: 'Blocs par jour', min: 1, max: 10, step: 1, unit: '', help: 'taille de la file du jour' },
+  { key: 'pressureHorizon', label: 'Horizon de pression', min: 7, max: 90, step: 1, unit: ' j', help: 'au-delà, l’examen n’influe pas' },
+  { key: 'examModeThreshold', label: 'Seuil « examen proche »', min: 3, max: 45, step: 1, unit: ' j', help: 'à partir de combien de jours une UE est signalée' },
 ];
 
 function SettingsView({ settings, state, store, onUpdate, onImport, onReset, today }) {
@@ -1345,6 +1454,15 @@ function SettingsView({ settings, state, store, onUpdate, onImport, onReset, tod
   });
   const ti = (m) => round1(targetInterval(m, settings));
 
+  // Aperçu de la courbe d'oubli pour une stabilité type (maîtrise 50).
+  const sampleS = targetInterval(50, settings);
+  const dueAt = optimalInterval(sampleS, settings.requestRetention);
+  const fSpan = Math.max(dueAt * 1.9, sampleS * 1.6, 4);
+  const fBars = Array.from({ length: 21 }, (_, i) => {
+    const t = (fSpan * i) / 20;
+    return { t, R: retrievability(t, sampleS) };
+  });
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       <div>
@@ -1369,7 +1487,7 @@ function SettingsView({ settings, state, store, onUpdate, onImport, onReset, tod
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 4 }}>
                 <span style={{ fontFamily: SANS, fontSize: 13, color: C.text }}>{sl.label}</span>
                 <Mono style={{ marginLeft: 'auto', fontSize: 14, color: C.accent }}>
-                  {settings[sl.key]}{sl.unit}
+                  {sl.fmt ? sl.fmt(settings[sl.key]) : `${settings[sl.key]}${sl.unit}`}
                 </Mono>
               </div>
               <Range value={settings[sl.key]} min={sl.min} max={sl.max} step={sl.step}
@@ -1411,9 +1529,27 @@ function SettingsView({ settings, state, store, onUpdate, onImport, onReset, tod
           </div>
 
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 14, marginTop: 12 }}>
-            <div style={{ fontFamily: SANS, fontSize: 12, color: C.dim, marginBottom: 8 }}>Intervalle cible selon la maîtrise</div>
-            <div style={{ display: 'flex', gap: 16, fontFamily: MONO, fontSize: 13 }}>
-              <span>m0 <b style={{ color: C.text }}>{ti(0)} j</b></span>
+            <div style={{ fontFamily: SANS, fontSize: 12, color: C.dim, marginBottom: 10 }}>
+              Courbe d’oubli & moment de révision
+            </div>
+            <div style={{ position: 'relative', display: 'flex', alignItems: 'flex-end', gap: 2, height: 96 }}>
+              {fBars.map((b, i) => (
+                <div key={i} title={`${Math.round(b.t)} j → mémoire ${Math.round(b.R * 100)}%`} style={{
+                  flex: 1, height: `${4 + b.R * 96}%`, background: thermal((1 - b.R) * 4),
+                  borderRadius: '2px 2px 0 0', opacity: 0.9,
+                }} />
+              ))}
+              <div title={`révision visée à ~${Math.round(dueAt)} j`} style={{
+                position: 'absolute', top: 0, bottom: 0, left: `${clamp((dueAt / fSpan) * 100, 0, 100)}%`,
+                borderLeft: `1px dashed ${C.accent}`,
+              }} />
+            </div>
+            <div style={{ fontFamily: MONO, fontSize: 11, color: C.dim, marginTop: 8 }}>
+              révision visée à ~{Math.round(dueAt)} j (mémoire {Math.round(settings.requestRetention * 100)}%),
+              stabilité {round1(sampleS)} j
+            </div>
+            <div style={{ display: 'flex', gap: 14, marginTop: 8, fontFamily: MONO, fontSize: 12, color: C.faint }}>
+              <span>stab. départ — m0 <b style={{ color: C.text }}>{ti(0)} j</b></span>
               <span>m50 <b style={{ color: C.text }}>{ti(50)} j</b></span>
               <span>m100 <b style={{ color: C.text }}>{ti(100)} j</b></span>
             </div>
