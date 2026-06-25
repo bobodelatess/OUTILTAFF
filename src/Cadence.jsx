@@ -386,7 +386,7 @@ function MasteryBar({ value, color }) {
       height: 5, background: C.inset, borderRadius: 3, overflow: 'hidden',
       border: `1px solid ${C.line}`,
     }}>
-      <div style={{
+      <div className="cad-bar" style={{
         width: `${clamp(value, 0, 100)}%`, height: '100%',
         background: color, opacity: 0.55, borderRadius: 3,
       }} />
@@ -531,8 +531,8 @@ function QueueCard({ idx, ch, subject, simpleMode, onWorked, onMastery }) {
     : ch.since === 0 ? 'révisé aujourd’hui' : `il y a ${ch.since} j`;
 
   return (
-    <div style={{
-      background: C.panel, border: `1px solid ${C.line}`, borderLeft: `3px solid ${tcol}`,
+    <div className={`cad-card${flash ? ' cad-ring' : ''}`} style={{
+      background: C.panel, border: `1px solid ${flash ? 'rgba(52,211,153,.5)' : C.line}`, borderLeft: `3px solid ${tcol}`,
       borderRadius: 10, padding: 13, display: 'flex', flexDirection: 'column', gap: 9,
     }}>
       {/* Quel chapitre */}
@@ -553,38 +553,42 @@ function QueueCard({ idx, ch, subject, simpleMode, onWorked, onMastery }) {
       </div>
 
       {/* Détails (repliés en mode simple) : maîtrise + chiffres transparents */}
-      {open && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingLeft: 28, paddingTop: 2 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <div style={{ flex: '1 1 150px', minWidth: 120 }}>
-              <MasteryBar value={ch.mastery} color={subject.color} />
+      <div className={`cad-collapse${open ? ' open' : ''}`}>
+        <div className="cad-collapse-in" {...(open ? {} : { inert: '' })}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingLeft: 28, paddingTop: 4 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <div style={{ flex: '1 1 150px', minWidth: 120 }}>
+                <MasteryBar value={ch.mastery} color={subject.color} />
+              </div>
+              <Mono style={{ color: C.dim, fontSize: 11 }}>{Math.round(ch.mastery)}/100</Mono>
+              <Mono style={{ color: C.faint, fontSize: 11 }}>
+                · {sinceLabel}{ch.R != null ? ` · mémoire ~${Math.round(ch.R * 100)}%` : ''} · revoir ~tous les {Math.round(ch.ti)} j
+              </Mono>
             </div>
-            <Mono style={{ color: C.dim, fontSize: 11 }}>{Math.round(ch.mastery)}/100</Mono>
-            <Mono style={{ color: C.faint, fontSize: 11 }}>
-              · {sinceLabel}{ch.R != null ? ` · mémoire ~${Math.round(ch.R * 100)}%` : ''} · revoir ~tous les {Math.round(ch.ti)} j
-            </Mono>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Pencil size={12} color={C.faint} />
-            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>ajuster la maîtrise</span>
-            <div style={{ flex: 1, minWidth: 90 }}>
-              <Range value={ch.mastery} min={0} max={100} ariaLabel={`maîtrise ${ch.name}`}
-                onChange={(v) => onMastery(ch.id, v)} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Pencil size={12} color={C.faint} />
+              <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>ajuster la maîtrise</span>
+              <div style={{ flex: 1, minWidth: 90 }}>
+                <Range value={ch.mastery} min={0} max={100} ariaLabel={`maîtrise ${ch.name}`}
+                  onChange={(v) => onMastery(ch.id, v)} />
+              </div>
             </div>
+            <PriorityReader m={ch} compact />
           </div>
-          <PriorityReader m={ch} compact />
         </div>
-      )}
+      </div>
 
       {/* Action : valider + (en mode simple) ouvrir les détails */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 28 }}>
         <Btn variant={flash ? 'ghost' : 'primary'}
           onClick={() => { onWorked(ch.id); setFlash(true); setTimeout(() => setFlash(false), 1200); }}>
-          {flash ? <><Check size={14} /> enregistré</> : <><Check size={14} /> J’ai travaillé</>}
+          {flash
+            ? <><Check size={14} className="cad-pop" color={C.good} /> <span style={{ color: C.good }}>enregistré</span></>
+            : <><Check size={14} /> J’ai travaillé</>}
         </Btn>
         {simpleMode && (
           <Btn variant="bare" onClick={() => setExpanded((v) => !v)} style={{ marginLeft: 'auto', color: C.faint, fontSize: 12 }}>
-            détails {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            détails <ChevronRight size={14} style={{ transition: 'transform .22s var(--ease)', transform: expanded ? 'rotate(90deg)' : 'none' }} />
           </Btn>
         )}
       </div>
@@ -596,7 +600,7 @@ function QueueCard({ idx, ch, subject, simpleMode, onWorked, onMastery }) {
 function RankRow({ idx, ch, subject }) {
   const tcol = thermal(ch.priority);
   return (
-    <div style={{
+    <div className="cad-card" style={{
       display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px',
       borderLeft: `3px solid ${tcol}`, background: C.panel2, border: `1px solid ${C.line}`,
       borderLeftWidth: 3, borderRadius: 7,
@@ -653,6 +657,7 @@ function AddRow({ placeholder, onAdd, cta = 'Ajouter' }) {
  * ------------------------------------------------------------------ */
 
 const GLOBAL_CSS = `
+  .cadence { --ease: cubic-bezier(.22,.61,.36,1); }
   .cadence * { box-sizing: border-box; }
   .cadence input[type=range] {
     -webkit-appearance: none; appearance: none; height: 4px;
@@ -661,17 +666,66 @@ const GLOBAL_CSS = `
   .cadence input[type=range]::-webkit-slider-thumb {
     -webkit-appearance: none; appearance: none; width: 14px; height: 14px;
     border-radius: 50%; background: ${C.accent}; border: 2px solid ${C.bg}; cursor: pointer;
+    transition: transform .12s var(--ease), box-shadow .12s var(--ease);
   }
+  .cadence input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.25); box-shadow: 0 0 0 6px rgba(94,169,255,.16); }
+  .cadence input[type=range]:active::-webkit-slider-thumb { transform: scale(1.1); }
   .cadence input[type=range]::-moz-range-thumb {
     width: 14px; height: 14px; border-radius: 50%; background: ${C.accent};
     border: 2px solid ${C.bg}; cursor: pointer;
   }
   .cadence *:focus-visible { outline: 2px solid ${C.accent}; outline-offset: 2px; border-radius: 4px; }
-  .cadence button { font: inherit; }
+
+  /* Boutons : transitions douces (les changements de style inline s'animent) */
+  .cadence button {
+    font: inherit;
+    transition: background .18s var(--ease), border-color .18s var(--ease),
+      color .18s var(--ease), filter .14s var(--ease), transform .07s var(--ease),
+      box-shadow .18s var(--ease);
+  }
+  .cadence button:hover { filter: brightness(1.22); }
+  .cadence button:active { transform: scale(.96); }
+  .cadence input { transition: border-color .16s var(--ease), background .16s var(--ease); }
+  .cadence input:hover { border-color: ${C.line2}; }
+
+  /* Cartes : survol qui soulève */
+  .cad-card { transition: transform .18s var(--ease), box-shadow .22s var(--ease), border-color .22s var(--ease); }
+  .cad-card:hover { transform: translateY(-2px); box-shadow: 0 12px 30px -10px rgba(0,0,0,.6); }
+
+  /* Cellules calendrier */
+  .cad-cell { transition: background .15s var(--ease), border-color .15s var(--ease), transform .12s var(--ease); }
+  .cad-cell:hover { background: rgba(255,255,255,.05); transform: translateY(-1px); }
+
+  /* Barres animées (maîtrise, planchers, jauges) */
+  .cad-bar { transition: width .35s var(--ease), background .25s var(--ease); }
+
+  /* Repli/dépli fluide (grille 0fr -> 1fr) */
+  .cad-collapse { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .26s var(--ease), opacity .2s var(--ease); opacity: .4; }
+  .cad-collapse.open { grid-template-rows: 1fr; opacity: 1; }
+  .cad-collapse > .cad-collapse-in { overflow: hidden; min-height: 0; }
+
+  /* Entrées en scène */
+  @keyframes cad-fade-up { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: none; } }
+  @keyframes cad-fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  @keyframes cad-pop { 0% { transform: scale(.5); opacity: .3; } 60% { transform: scale(1.18); } 100% { transform: scale(1); opacity: 1; } }
+  @keyframes cad-ring { 0% { box-shadow: 0 0 0 0 rgba(52,211,153,.55); } 100% { box-shadow: 0 0 0 16px rgba(52,211,153,0); } }
+  .cad-in { animation: cad-fade-up .36s var(--ease) both; }
+  .cad-view { animation: cad-fade .24s var(--ease) both; }
+  .cad-pop { animation: cad-pop .32s var(--ease); }
+  .cad-ring { animation: cad-ring .75s ease-out; }
+
   .cadence ::-webkit-scrollbar { width: 10px; height: 10px; }
   .cadence ::-webkit-scrollbar-thumb { background: #26303d; border-radius: 5px; }
+  .cadence ::-webkit-scrollbar-thumb:hover { background: #344150; }
   .cadence ::-webkit-scrollbar-track { background: transparent; }
   .cadence input::placeholder { color: ${C.faint}; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cadence *, .cad-card, .cad-in, .cad-view, .cad-collapse, .cad-pop, .cad-ring {
+      animation: none !important; transition: none !important;
+    }
+    .cad-collapse { opacity: 1; }
+  }
 `;
 
 /* ------------------------------------------------------------------ *
@@ -850,6 +904,7 @@ export default function Cadence() {
       </header>
 
       <main style={{ maxWidth: 980, margin: '0 auto', padding: '18px 16px 64px' }}>
+        <div key={tab} className="cad-view">
         {tab === 'today' && (
           <TodayView
             today={today} overdue={overdue} nextExam={nextExam} subjectById={subjectById}
@@ -877,6 +932,7 @@ export default function Cadence() {
           <SettingsView settings={settings} state={state} store={store}
             onUpdate={updateSetting} onImport={importState} onReset={resetAll} today={today} />
         )}
+        </div>
       </main>
     </div>
   );
@@ -917,10 +973,11 @@ function TodayView({
       </div>
 
       {/* Bannières « examen proche » (simple alerte, pas de consigne) */}
-      {annalesBanners.map(({ subject, info }) => (
-        <div key={subject.id} style={{
+      {annalesBanners.map(({ subject, info }, bi) => (
+        <div key={subject.id} className="cad-in cad-card" style={{
           display: 'flex', alignItems: 'center', gap: 10, padding: '10px 13px', borderRadius: 9,
           background: 'rgba(251,191,36,.08)', border: `1px solid rgba(251,191,36,.32)`,
+          animationDelay: `${bi * 50}ms`,
         }}>
           <CalendarDays size={16} color={C.warn} />
           <Pastille color={subject.color} />
@@ -972,7 +1029,7 @@ function TodayView({
             {!showAll ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
                 {sessions.map((session, si) => (
-                  <div key={session.subject.id}>
+                  <div key={session.subject.id} className="cad-in" style={{ animationDelay: `${si * 70}ms` }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 9 }}>
                       <span style={{
                         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
@@ -1018,7 +1075,7 @@ function TodayView({
               const floor = s.weeklyFloor || 0;
               const below = done < floor;
               return (
-                <div key={s.id} style={{
+                <div key={s.id} className="cad-card" style={{
                   flex: '1 1 220px', minWidth: 200, background: C.panel, borderRadius: 10,
                   border: `1px solid ${below ? 'rgba(251,191,36,.4)' : C.line}`, padding: 12,
                 }}>
@@ -1030,7 +1087,7 @@ function TodayView({
                     </Mono>
                   </div>
                   <div style={{ height: 5, background: C.inset, borderRadius: 3, margin: '9px 0', overflow: 'hidden', border: `1px solid ${C.line}` }}>
-                    <div style={{ width: `${floor ? clamp((done / floor) * 100, 0, 100) : 0}%`, height: '100%', background: below ? C.warn : C.good, opacity: .7 }} />
+                    <div className="cad-bar" style={{ width: `${floor ? clamp((done / floor) * 100, 0, 100) : 0}%`, height: '100%', background: below ? C.warn : C.good, opacity: .7 }} />
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <IconBtn icon={ChevronLeft} title="−1" onClick={() => onAdjustParallel(s.id, -1)} />
@@ -1056,7 +1113,7 @@ function TodayView({
 
 function Stat({ label, value, unit, tone }) {
   return (
-    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 9, padding: '8px 13px', minWidth: 110 }}>
+    <div className="cad-card" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 9, padding: '8px 13px', minWidth: 110 }}>
       <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, textTransform: 'uppercase', letterSpacing: '.06em' }}>{label}</div>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
         <Mono style={{ fontSize: 19, color: tone || C.text }}>{value}</Mono>
@@ -1150,7 +1207,7 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, onGo
             const dayExams = examsByDay[iso] || [];
             const shade = annalesShade(iso);
             return (
-              <div key={i} title={dayExams.map((e) => `${e.name} (${(e.chapterIds || []).length} chap.)`).join('\n')}
+              <div key={i} className="cad-cell" title={dayExams.map((e) => `${e.name} (${(e.chapterIds || []).length} chap.)`).join('\n')}
                 style={{
                   aspectRatio: '1 / 1', borderRadius: 7, padding: 5,
                   background: shade ? `${shade.color}1f` : C.panel2,
@@ -1190,11 +1247,11 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, onGo
           <Empty>Aucune épreuve. <b>Onglet Matières → ajoute une épreuve à une UE</b> (nom, date, chapitres couverts).</Empty>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {upcomingExams.map((e) => {
+            {upcomingExams.map((e, ei) => {
               const sub = subjectById[e.subjectId];
               const annales = e.days <= settings.examModeThreshold;
               return (
-                <div key={e.id} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 9, padding: 11 }}>
+                <div key={e.id} className="cad-card cad-in" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 9, padding: 11, animationDelay: `${ei * 45}ms` }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <Pastille color={sub?.color || C.dim} />
                     <span style={{ fontFamily: SANS, fontSize: 13.5, fontWeight: 600 }}>{e.name}</span>
@@ -1234,13 +1291,13 @@ function SubjectsView({
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <SectionTitle icon={Layers}>Matières (UE)</SectionTitle>
 
-      {subjects.map((s) => {
+      {subjects.map((s, sidx) => {
         const isCore = s.type === 'core';
         const subChapters = chapters.filter((c) => c.subjectId === s.id);
         const subExams = exams.filter((e) => e.subjectId === s.id);
         const expanded = !!open[s.id];
         return (
-          <div key={s.id} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10 }}>
+          <div key={s.id} className="cad-in" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, animationDelay: `${Math.min(sidx, 8) * 40}ms` }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 12 }}>
               {isCore ? (
                 <button onClick={() => toggle(s.id)} aria-label="déplier" style={{
@@ -1512,6 +1569,7 @@ function SettingsView({ settings, state, store, onUpdate, onImport, onReset, tod
                   <div key={i} title={`J−${b.j} → ×${f2(b.mult)}`} style={{
                     flex: 1, height: `${6 + h * 94}%`, background: thermal(b.mult),
                     borderRadius: '2px 2px 0 0', opacity: .9,
+                    transition: 'height .28s var(--ease), background .28s var(--ease)',
                   }} />
                 );
               })}
@@ -1537,11 +1595,12 @@ function SettingsView({ settings, state, store, onUpdate, onImport, onReset, tod
                 <div key={i} title={`${Math.round(b.t)} j → mémoire ${Math.round(b.R * 100)}%`} style={{
                   flex: 1, height: `${4 + b.R * 96}%`, background: thermal((1 - b.R) * 4),
                   borderRadius: '2px 2px 0 0', opacity: 0.9,
+                  transition: 'height .28s var(--ease), background .28s var(--ease)',
                 }} />
               ))}
               <div title={`révision visée à ~${Math.round(dueAt)} j`} style={{
                 position: 'absolute', top: 0, bottom: 0, left: `${clamp((dueAt / fSpan) * 100, 0, 100)}%`,
-                borderLeft: `1px dashed ${C.accent}`,
+                borderLeft: `1px dashed ${C.accent}`, transition: 'left .28s var(--ease)',
               }} />
             </div>
             <div style={{ fontFamily: MONO, fontSize: 11, color: C.dim, marginTop: 8 }}>
