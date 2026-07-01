@@ -1,12 +1,12 @@
 # CADENCE
 
 Planificateur d'étude **piloté par les examens** — répétition espacée au niveau
-**chapitre** (et non carte), avec une couche examens + calendrier + interleaving.
-Outil quotidien privé, pensé pour un usage du soir : ~2 min pour cocher ce qui a
-été fait, ~15 min le dimanche.
+**chapitre** (et non carte), moteur **FSRS‑4.5**, plan du jour borné par ta
+capacité, calendrier avec prévision de charge et statistiques. Outil quotidien
+privé : ~2 min le soir pour noter ce qui a été revu.
 
-> Coût d'usage cible bas, par construction. Tout vit côté client, aucune
-> dépendance backend.
+> 100 % côté client, aucune dépendance backend. Données locales (localStorage),
+> export / import JSON.
 
 ## Idée centrale
 
@@ -17,47 +17,53 @@ La priorité d'un chapitre combine deux signaux, et la pression d'examen
 priorité = urgence_de_péremption × pression_d'examen
 ```
 
-Conséquence voulue : un chapitre **faible dont l'examen approche** explose ; un
-chapitre **déjà solide** ne monte qu'un peu. La priorité est toujours affichée de
-façon transparente (`valeur = urgence × multiplicateur`, plus quelle épreuve la
-déclenche et dans combien de jours) — jamais de boîte noire.
+Un chapitre **fragile dont l'examen approche** explose ; un chapitre **déjà
+solide** ne monte qu'un peu. La décomposition est toujours affichée
+(`urgence × multiplicateur`, l'épreuve qui la déclenche, J−x) — jamais de
+boîte noire.
 
-## Espacement (fondé sur la recherche)
+## Le moteur (FSRS‑4.5)
 
-- **Courbe d'oubli en loi de puissance** `R(t) = (1 + FACTOR·t/S)^DECAY`
-  (Wixted ; FSRS) — meilleur ajustement que l'exponentielle.
-- **Stabilité de mémoire `S`** par chapitre, qui **grandit à chaque révision**
-  (intervalles expansifs ; Landauer & Bjork, SM‑2, FSRS).
-- **Effet d'espacement** : le gain de stabilité est maximal quand on révise
-  **près du seuil d'oubli** (R bas), minimal quand on bachote (Cepeda et al. ;
-  Bjork, *desirable difficulties*).
-- **Rétention cible** : on planifie la révision quand `R` retombe au niveau visé
-  (90 % par défaut) — `intervalle = optimalInterval(S, rétention)`.
-- La **maîtrise** (auto‑évaluée) joue le rôle de *facilité* : elle module la
-  vitesse de consolidation et fixe la stabilité de départ.
+Chaque chapitre porte un état mémoire **(stabilité S, difficulté D)** mis à
+jour par l'algorithme **FSRS‑4.5** (poids par défaut publiés, 17 paramètres) à
+chaque révision notée **Oublié · Difficile · Bien · Facile** :
 
-> Avec une rétention de 90 % et sans historique, le modèle se réduit exactement
-> à l'ancien (intervalle = `targetInterval(maîtrise)`) — d'où la continuité.
+- **Courbe d'oubli en loi de puissance** `R(t) = (1 + F·t/S)^−0.5`, calée pour
+  `R(S) = 90 %` (Wixted ; FSRS).
+- **Succès** : `S' = S·(1 + e^{w8}·(11−D)·S^{−w9}·(e^{w10(1−R)}−1)·pénalité/bonus)` —
+  intervalles expansifs, gain maximal près du seuil d'oubli (effet
+  d'espacement, Cepeda/Bjork), modulé par la difficulté.
+- **Oubli** : la stabilité **chute** (`w11·D^{−w12}·((S+1)^{w13}−1)·e^{w14(1−R)}`,
+  plafonnée à S) et la difficulté monte.
+- **Rétention cible** réglable (80–97 %) : on planifie la révision quand `R` y
+  retombe.
+- Chapitre sans historique : niveau nommé (« Jamais vu → Solide ») qui seed
+  S et D ; ensuite les notes pilotent tout.
+- **Journal des révisions** : chaque note est archivée (annulable), alimente
+  les statistiques et la stabilité du plan du jour.
 
-## Capacité (plan du jour)
+## Capacité & plan du jour
 
-CADENCE planifie **`subjectsPerDay` matières par jour** (3 par défaut), chacune
-sur une **séance de `sessionHours` h** (2 h). Les matières les plus sous pression
-passent en premier ; les autres montent d'elles‑mêmes en priorité les jours
-suivants. Le nombre de chapitres par séance est estimé via `minutesPerChapter`.
+`subjectsPerDay` matières par jour (3 par défaut), chacune en séance de
+`sessionHours` h (2 h) : les matières les plus sous pression d'abord, les autres
+remontent naturellement les jours suivants. Le plan du jour est **stable** :
+noter un chapitre ne réorganise pas la liste (il passe simplement à « fait »,
+annulable).
 
-## Les quatre vues
+## Les cinq vues
 
-1. **Aujourd'hui** — plan du jour en **séances par matière** (chapitre + raison
-   en clair + « J'ai travaillé »), détails repliables (maîtrise, mémoire,
-   intervalle), bannières « examen proche », minimums hebdo.
-2. **Calendrier** — grille mensuelle, épreuves en marqueurs couleur, fenêtres
-   « examen proche » ombrées, liste des épreuves à venir.
-3. **Matières** — CRUD des UE, chapitres (curseur de maîtrise) et épreuves
-   (date + sélection des chapitres couverts).
-4. **Réglages** — curseurs (rétention cible, capacité, intervalles, pression
-   d'examen) avec aperçu live de la **courbe d'oubli** et du **multiplicateur
-   d'examen** ; export / import JSON ; réinitialisation.
+1. **Aujourd'hui** — anneau de progression, séances par matière, cartes avec
+   **jauge mémoire** (R %), raison en clair, notation à 4 boutons, annulation
+   (toast), détails repliables, minimums hebdo protégés.
+2. **Calendrier** — épreuves, fenêtres « examen proche » ombrées, **prévision
+   de charge** (chapitres à échéance par jour, dans la grille et sur 14 j).
+3. **Matières** — CRUD des UE, chapitres (niveau nommé, jauge, prochaine
+   échéance) et épreuves (date + chapitres couverts).
+4. **Progrès** — série de jours, total de révisions, mémoire moyenne,
+   chapitres à jour, histogramme 30 j, répartition des notes.
+5. **Réglages** — rétention cible, capacité, pression d'examen, avancé
+   (stabilités initiales), aperçus live (courbe d'oubli + multiplicateur),
+   export / import / réinitialisation.
 
 ## Lancer
 
@@ -65,32 +71,17 @@ suivants. Le nombre de chapitres par séance est estimé via `minutesPerChapter`
 npm install
 npm run dev      # serveur de dev Vite
 npm run build    # build de production -> dist/
-npm test         # tests d'acceptation du moteur de priorité
+npm test         # tests du moteur (FSRS, priorité, plan, prévision, migration)
 ```
 
 ## Architecture
 
-- **Un seul fichier** pour l'application : `src/Cadence.jsx` (composant
-  fonctionnel + hooks, export par défaut, sans props requises). Le moteur de
-  priorité y est exposé en exports nommés (fonctions pures) afin d'être testé.
-- **Persistance** : tout l'état dans une seule clé (`cadence.v1`).
-  `window.storage` si présent (environnement d'artefact), sinon `localStorage`,
-  sinon repli **en mémoire** — l'app fonctionne même sans stockage.
-- `src/Cadence.test.js` vérifie les formules et l'ordre clé du barème ;
-  `src/Cadence.smoke.test.jsx` vérifie le montage du composant.
-
-## Moteur de priorité (résumé)
-
-| Étape | Formule |
-| --- | --- |
-| Stabilité de départ | `minInterval × (maxInterval / minInterval)^(m/100)` |
-| Courbe d'oubli | `R(t) = (1 + FACTOR·t/S)^DECAY`, calée pour `R(S) = 90 %` |
-| Intervalle visé | `optimalInterval(S, rétention)` (= `S` à 90 %) |
-| Urgence | `joursDepuis / intervalle` (jamais révisé ⇒ `× 2.2`) |
-| Gain de stabilité | `S × (1 + facilité(m) · espacement(R))` à chaque révision |
-| Multiplicateur d'examen | `1 + (maxExamPressure − 1) × ((horizon − j)/horizon)²` |
-| Priorité | `urgence × facteur d'examen` |
+- **Un seul fichier** : `src/Cadence.jsx` (composant + moteur en exports nommés
+  purs, testés).
+- **Persistance** : clé `cadence.v2` (localStorage → repli mémoire), migration
+  automatique depuis `cadence.v1` (maîtrise → difficulté).
+- Déploiement continu sur GitHub Pages (workflow `deploy.yml`).
 
 Réglages par défaut : `requestRetention=0.90`, `subjectsPerDay=3`,
-`sessionHours=2`, `minutesPerChapter=30`, `minInterval=2`, `maxInterval=30`,
-`maxExamPressure=5`, `pressureHorizon=35`, `examModeThreshold=21`.
+`sessionHours=2`, `minutesPerChapter=30`, `maxExamPressure=5`,
+`pressureHorizon=35`, `examModeThreshold=21`.

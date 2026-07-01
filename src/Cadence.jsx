@@ -1,58 +1,54 @@
 /*
- * CADENCE — planificateur d'étude piloté par les examens.
+ * CADENCE v2 — planificateur d'étude piloté par les examens.
  *
- * Répétition espacée au niveau CHAPITRE (pas carte), avec une couche
- * examens + calendrier + interleaving. Outil quotidien privé.
+ * Répétition espacée au niveau CHAPITRE, moteur FSRS-4.5 (courbe d'oubli en
+ * loi de puissance, stabilité + difficulté par chapitre, notation à 4 niveaux),
+ * plus une couche examens (pression MULTIPLICATIVE), un plan du jour borné par
+ * la capacité (N matières × H heures), une prévision de charge et des stats.
  *
  * Idée centrale : priorité = urgence_de_péremption × pression_d'examen.
- * La pression d'examen MULTIPLIE (un chapitre faible dont l'examen approche
- * explose ; un chapitre solide ne monte qu'un peu).
  *
- * Un seul fichier. Le moteur de priorité est exporté (fonctions pures) pour
- * être testé ; le composant par défaut est l'application.
- *
- * Modèle de données
- *   Subject  = { id, name, color, type: 'core' | 'parallel', weeklyFloor? }
- *   Chapter  = { id, subjectId, name, mastery: 0..100, lastReviewed: ISODate|null,
- *                stability?: number }   // stabilité de mémoire (jours), grandit aux révisions
+ * Modèle de données (v2)
+ *   Subject  = { id, name, color, type: 'core'|'parallel', weeklyFloor? }
+ *   Chapter  = { id, subjectId, name, difficulty: 1..10, stability: jours,
+ *                lastReviewed: ISODate|null }
  *   Exam     = { id, subjectId, name, date: ISODate, chapterIds: string[] }
- *   Settings = { minInterval, maxInterval, maxExamPressure, pressureHorizon,
- *                examModeThreshold, requestRetention, subjectsPerDay,
- *                sessionHours, minutesPerChapter, simpleMode }
- *   State    = { subjects, chapters, exams, settings, parallelLog }
- *   parallelLog : { [lundiISO]: { [subjectId]: nbSéances } }
+ *   Review   = { id, chapterId, date, grade: 1..4,
+ *                before: { stability, difficulty, lastReviewed },
+ *                after:  { stability, difficulty } }
+ *   State    = { version: 2, subjects, chapters, exams, settings,
+ *                parallelLog, reviewLog }
  *
- * Espacement (science) : courbe d'oubli en loi de puissance + stabilité de
- * mémoire qui grandit à chaque révision (intervalles expansifs), gain modulé
- * par l'effet d'espacement (réviser près du seuil d'oubli) et la maîtrise.
- * Plan du jour borné par la capacité (N matières × H heures).
+ * Migration : les données v1 (mastery 0..100) sont converties automatiquement
+ * (difficulté dérivée de la maîtrise, stabilité conservée ou dérivée).
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity, CalendarDays, Layers, Settings as SettingsIcon,
+  Activity, CalendarDays, Layers, Settings as SettingsIcon, TrendingUp,
   Plus, Trash2, ChevronDown, ChevronRight, ChevronLeft, Check,
-  Download, Upload, RotateCcw, AlertTriangle, Lock,
+  Download, Upload, RotateCcw, AlertTriangle, Lock, Undo2,
   BookOpen, FlaskConical, Flame, Pencil,
 } from 'lucide-react';
 
-/* ------------------------------------------------------------------ *
- *  Constantes
- * ------------------------------------------------------------------ */
+/* ================================================================== *
+ *  Constantes & thème
+ * ================================================================== */
 
-const STORAGE_KEY = 'cadence.v1';
+const STORAGE_KEY = 'cadence.v2';
+const LEGACY_KEY = 'cadence.v1';
 
 export const DEFAULT_SETTINGS = {
-  minInterval: 2,
-  maxInterval: 30,
+  requestRetention: 0.9, // rétention cible : on revoit quand R retombe à ce niveau
+  subjectsPerDay: 3,     // capacité : matières par jour
+  sessionHours: 2,       // durée d'une séance par matière
+  minutesPerChapter: 30, // -> nb de chapitres par séance
   maxExamPressure: 5,
   pressureHorizon: 35,
   examModeThreshold: 21,
-  requestRetention: 0.9, // rétention cible : on revoit quand R retombe à ce niveau
-  subjectsPerDay: 3,     // capacité : nombre de matières par jour
-  sessionHours: 2,       // durée d'une séance par matière
-  minutesPerChapter: 30, // estimation -> nb de chapitres par séance
-  simpleMode: true,      // cartes du soir épurées (chiffres derrière « détails »)
+  minInterval: 2,        // stabilité initiale « Jamais vu »
+  maxInterval: 30,       // stabilité initiale « Solide »
+  simpleMode: true,
 };
 
 const C = {
@@ -74,7 +70,7 @@ const C = {
 const MONO = "'JetBrains Mono','SFMono-Regular',ui-monospace,Menlo,Consolas,monospace";
 const SANS = "system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
-// Rampe thermique : froid (calme/maîtrisé) -> ambre -> rouge (urgent).
+// Rampe thermique : froid (calme) -> ambre -> rouge (urgent).
 const RAMP = [
   [0.0, [56, 189, 248]],
   [0.3, [45, 212, 191]],
@@ -83,11 +79,29 @@ const RAMP = [
   [1.0, [239, 68, 68]],
 ];
 
-/* ------------------------------------------------------------------ *
+// Notation d'une révision (FSRS) : 1 tape = 1 signal précis pour le modèle.
+export const GRADES = {
+  1: { key: 1, label: 'Oublié', hint: 'je ne savais plus', color: '#f87171' },
+  2: { key: 2, label: 'Difficile', hint: 'retrouvé avec effort', color: '#fbbf24' },
+  3: { key: 3, label: 'Bien', hint: 'retrouvé correctement', color: '#34d399' },
+  4: { key: 4, label: 'Facile', hint: 'trop facile', color: '#38bdf8' },
+};
+
+// Niveaux nommés pour calibrer un chapitre sans historique.
+export const LEVELS = [
+  { key: 'new', label: 'Jamais vu', m: 0, D: 8.5 },
+  { key: 'fragile', label: 'Fragile', m: 33, D: 6.8 },
+  { key: 'ok', label: 'Moyen', m: 66, D: 5.0 },
+  { key: 'solid', label: 'Solide', m: 100, D: 3.2 },
+];
+
+/* ================================================================== *
  *  Utilitaires
- * ------------------------------------------------------------------ */
+ * ================================================================== */
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const round1 = (x) => Math.round(x * 10) / 10;
+const f2 = (x) => x.toFixed(2);
 
 const uid = () =>
   typeof crypto !== 'undefined' && crypto.randomUUID
@@ -104,9 +118,7 @@ function parseISO(iso) {
   const [y, m, d] = iso.split('-').map(Number);
   return new Date(y, m - 1, d);
 }
-export function todayISO() {
-  return isoOf(new Date());
-}
+export function todayISO() { return isoOf(new Date()); }
 export function daysBetween(aISO, bISO) {
   return Math.round((parseISO(bISO) - parseISO(aISO)) / 86400000);
 }
@@ -117,15 +129,10 @@ export function addDays(iso, n) {
 }
 export function mondayOf(iso) {
   const d = parseISO(iso);
-  const offset = (d.getDay() + 6) % 7; // lundi = 0 … dimanche = 6
+  const offset = (d.getDay() + 6) % 7;
   d.setDate(d.getDate() - offset);
   return isoOf(d);
 }
-
-const round1 = (x) => Math.round(x * 10) / 10;
-const round2 = (x) => Math.round(x * 100) / 100;
-const f2 = (x) => x.toFixed(2);
-
 function fmtLongDate(iso) {
   return parseISO(iso).toLocaleDateString('fr-FR', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
@@ -137,94 +144,129 @@ function fmtShortDate(iso) {
   });
 }
 
+/* ================================================================== *
+ *  Moteur FSRS-4.5 (fonctions pures, testées)
+ *  Réf. : algorithme FSRS (open-spaced-repetition), poids par défaut 4.5.
+ * ================================================================== */
+
+export const FSRS_W = [
+  0.4872, 1.4003, 3.7145, 13.8206, 5.1618, 1.2298, 0.8975, 0.031,
+  1.6474, 0.1367, 1.0461, 2.1072, 0.0793, 0.3246, 1.587, 0.2272, 2.8755,
+];
+
+const DECAY = -0.5;
+const FACTOR = Math.pow(0.9, 1 / DECAY) - 1; // = 19/81, calé pour R(S) = 90 %
+const S_MIN = 0.2;
+const S_MAX = 730;
+
+// Rétrievabilité : probabilité de rappel après t jours (loi de puissance).
+export function retrievability(t, S) {
+  if (S <= 0) return 0;
+  return Math.pow(1 + FACTOR * Math.max(0, t) / S, DECAY);
+}
+
+// Intervalle qui ramène R à la rétention cible (= S quand cible = 90 %).
+export function optimalInterval(S, r = 0.9) {
+  const rt = clamp(r, 0.7, 0.99);
+  return (S / FACTOR) * (Math.pow(rt, 1 / DECAY) - 1);
+}
+
+// Difficulté initiale selon la première note (1..10 ; 1 = facile).
+export function initialDifficulty(grade) {
+  return clamp(FSRS_W[4] - FSRS_W[5] * (grade - 3), 1, 10);
+}
+
+// Mise à jour de la difficulté (dérive selon la note + rappel vers la moyenne).
+export function nextDifficulty(D, grade) {
+  const target = initialDifficulty(4);
+  return clamp(FSRS_W[7] * target + (1 - FSRS_W[7]) * (D - FSRS_W[6] * (grade - 3)), 1, 10);
+}
+
+// Croissance de stabilité après une révision réussie (grade 2..4).
+// Encode l'effet d'espacement : gain max quand R est bas (revu près du seuil).
+export function stabilityAfterSuccess(S, D, R, grade) {
+  let inc = Math.exp(FSRS_W[8]) * (11 - D) * Math.pow(S, -FSRS_W[9]) *
+    (Math.exp(FSRS_W[10] * (1 - R)) - 1);
+  if (grade === 2) inc *= FSRS_W[15]; // pénalité « Difficile »
+  if (grade === 4) inc *= FSRS_W[16]; // bonus « Facile »
+  return clamp(S * (1 + inc), S_MIN, S_MAX);
+}
+
+// Stabilité après un oubli (grade 1) : chute, jamais de gain.
+export function stabilityAfterFailure(S, D, R) {
+  const s2 = FSRS_W[11] * Math.pow(D, -FSRS_W[12]) *
+    (Math.pow(S + 1, FSRS_W[13]) - 1) * Math.exp(FSRS_W[14] * (1 - R));
+  return clamp(Math.min(s2, S), S_MIN, S_MAX);
+}
+
+// Applique une note à un chapitre -> nouvel état mémoire.
+// Jamais révisé : on suppose un retard important (t = 2.2 × S), cohérent avec
+// le modèle d'urgence.
+export function applyGrade(chapter, grade, today) {
+  const S = chapter.stability;
+  const D = chapter.difficulty ?? 5;
+  const since = chapter.lastReviewed ? daysBetween(chapter.lastReviewed, today) : null;
+  const elapsed = since != null ? since : S * 2.2;
+  const R = retrievability(elapsed, S);
+  const stability = grade === 1
+    ? stabilityAfterFailure(S, D, R)
+    : stabilityAfterSuccess(S, D, R, grade);
+  return { stability, difficulty: nextDifficulty(D, grade), R };
+}
+
+// Stabilité initiale d'un niveau nommé (interpolation géométrique min..max).
+export function targetInterval(m, s) {
+  const mm = clamp(m, 0, 100);
+  return s.minInterval * Math.pow(s.maxInterval / s.minInterval, mm / 100);
+}
+export function levelSeed(level, s) {
+  return { difficulty: level.D, stability: targetInterval(level.m, s) };
+}
+export function closestLevel(D) {
+  let best = LEVELS[0];
+  for (const l of LEVELS) if (Math.abs(l.D - D) < Math.abs(best.D - D)) best = l;
+  return best;
+}
+
 /* ------------------------------------------------------------------ *
- *  Moteur de priorité (fonctions pures, testées)
+ *  Couche examens (pression multiplicative) + priorité
  * ------------------------------------------------------------------ */
 
-// 1. Stabilité de mémoire initiale (jours) selon la maîtrise auto-évaluée :
-//    interpolation géométrique. Point de départ ; la stabilité grandit ensuite
-//    à chaque révision réussie (intervalles expansifs).
-export function targetInterval(mastery, s) {
-  const m = clamp(mastery, 0, 100);
-  return s.minInterval * Math.pow(s.maxInterval / s.minInterval, m / 100);
-}
-
-// Courbe d'oubli en loi de puissance (Wixted ; FSRS) — meilleur ajustement que
-// l'exponentielle. R(t) = (1 + FACTOR·t/S)^DECAY, calée pour que R(S) = 90 %.
-const DECAY = -0.5;
-const FACTOR = 0.9 ** (1 / DECAY) - 1; // ≈ 0.2345
-
-// Rétrievabilité : probabilité de te rappeler le chapitre après t jours.
-export function retrievability(daysSince, stability) {
-  if (stability <= 0) return 0;
-  return Math.pow(1 + FACTOR * Math.max(0, daysSince) / stability, DECAY);
-}
-
-// Intervalle optimal pour viser une rétention cible (ex. 90 %).
-// R(I) = RT  ⇒  I = S·(RT^(1/DECAY) − 1)/FACTOR. À 90 %, I = S.
-export function optimalInterval(stability, requestRetention) {
-  const rt = clamp(requestRetention ?? 0.9, 0.5, 0.99);
-  return stability * (Math.pow(rt, 1 / DECAY) - 1) / FACTOR;
-}
-
-// Stabilité courante (mémorisée si dispo, sinon dérivée de la maîtrise).
-export function chapterStability(chapter, s) {
-  return chapter.stability != null ? chapter.stability : targetInterval(chapter.mastery, s);
-}
-
-// Mise à jour de la stabilité après une révision réussie (« J'ai travaillé »).
-// Effet d'espacement : gain maximal quand on révise près du seuil d'oubli
-// (R bas) ; minimal quand on révise trop tôt (R haut). La maîtrise (≈ facilité)
-// module la vitesse de consolidation. Intervalles expansifs garantis.
-export function nextStability(stability, mastery, rOld, s) {
-  const rt = clamp(s.requestRetention ?? 0.9, 0.5, 0.99);
-  const ease = 0.3 + 1.5 * clamp(mastery, 0, 100) / 100;     // 0.3 … 1.8
-  const spacing = clamp((1 - rOld) / (1 - rt), 0.25, 2.5);   // effet d'espacement
-  return clamp(stability * (1 + ease * spacing), s.minInterval, 365);
-}
-
-// 2. Urgence de péremption (>= 1 ⇒ il te reste moins que la rétention cible ;
-//    jamais révisé ⇒ urgent).
-export function baseUrgency(chapter, s, today) {
-  const due = optimalInterval(chapterStability(chapter, s), s.requestRetention);
-  const days = chapter.lastReviewed ? daysBetween(chapter.lastReviewed, today) : due * 2.2;
-  return Math.max(0, days) / due;
-}
-
-// 3. Multiplicateur d'examen (≈1 quand loin, monte au carré jusqu'au jour J).
 export function examMultiplier(j, s) {
   if (j < 0 || j > s.pressureHorizon) return 1;
   const x = (s.pressureHorizon - j) / s.pressureHorizon;
   return 1 + (s.maxExamPressure - 1) * x * x;
 }
 
-// 4. Facteur d'examen d'un chapitre : max du multiplicateur sur toutes les
-//    épreuves FUTURES qui couvrent ce chapitre. Vaut 1 si aucune.
 export function chapterExamFactor(chapter, exams, s, today) {
   let factor = 1, exam = null, examDays = null;
   for (const ex of exams) {
     if (!ex.chapterIds || !ex.chapterIds.includes(chapter.id)) continue;
     const j = daysBetween(today, ex.date);
-    if (j < 0) continue; // épreuve passée
+    if (j < 0) continue;
     const mult = examMultiplier(j, s);
     if (mult > factor) { factor = mult; exam = ex; examDays = j; }
   }
   return { factor, exam, examDays };
 }
 
-// 5. Priorité finale + décomposition transparente.
+// Priorité + décomposition transparente d'un chapitre.
 export function chapterMetrics(chapter, exams, s, today) {
-  const stability = chapterStability(chapter, s);
-  const ti = optimalInterval(stability, s.requestRetention); // intervalle de révision visé
+  const S = chapter.stability;
+  const ti = Math.max(0.5, optimalInterval(S, s.requestRetention));
   const since = chapter.lastReviewed ? daysBetween(chapter.lastReviewed, today) : null;
-  const days = since != null ? since : ti * 2.2;
-  const urgency = Math.max(0, days) / ti;
-  const R = since != null ? retrievability(since, stability) : null;
+  const elapsed = since != null ? since : ti * 2.2;
+  const urgency = Math.max(0, elapsed) / ti;
+  const R = since != null ? retrievability(since, S) : null;
   const { factor, exam, examDays } = chapterExamFactor(chapter, exams, s, today);
-  return { ti, stability, since, R, urgency, factor, exam, examDays, priority: urgency * factor };
+  const dueIn = since == null ? 0 : Math.max(0, Math.round(ti - since));
+  return {
+    ti, stability: S, difficulty: chapter.difficulty ?? 5,
+    since, R, urgency, factor, exam, examDays, dueIn,
+    priority: urgency * factor,
+  };
 }
 
-// Prochaine épreuve future d'une matière.
 export function nextFutureExam(subjectId, exams, today) {
   let best = null;
   for (const ex of exams) {
@@ -236,14 +278,12 @@ export function nextFutureExam(subjectId, exams, today) {
   return best;
 }
 
-// Mode annales d'une matière : si la prochaine épreuve est à <= examModeThreshold.
 export function annalesModeFor(subjectId, exams, s, today) {
   const n = nextFutureExam(subjectId, exams, today);
   return n && n.days <= s.examModeThreshold ? n : null;
 }
 
-// Raison en langage clair (pas de formule) : pourquoi ce chapitre, là, maintenant.
-// Renvoie { text, tone } avec tone ∈ 'exam' | 'late' | 'calm'.
+// Raison en langage clair : pourquoi ce chapitre maintenant.
 export function reasonPhrase(m) {
   if (m.exam && m.examDays != null) {
     const d = m.examDays;
@@ -259,14 +299,12 @@ export function reasonPhrase(m) {
   return { text: inDays <= 1 ? 'Pas urgent' : `Pas urgent · à revoir dans ~${inDays} j`, tone: 'calm' };
 }
 
-// Plan du jour sous contrainte de capacité : on retient les `subjectsPerDay`
-// matières (core) les plus sous pression, chacune avec ses `chaptersPerSession`
-// chapitres les plus prioritaires (une séance ≈ sessionHours h). Les matières
-// non faites aujourd'hui montent d'elles-mêmes en priorité les jours suivants.
+// Plan du jour sous contrainte de capacité : les `subjectsPerDay` matières
+// (core) les plus sous pression, chacune avec ses chapitres prioritaires.
 export function planDay(ranked, subjects, subjectsPerDay, chaptersPerSession) {
   const core = new Map(subjects.filter((s) => s.type === 'core').map((s) => [s.id, s]));
   const bySubject = new Map();
-  for (const ch of ranked) { // ranked déjà trié par priorité décroissante
+  for (const ch of ranked) {
     if (!core.has(ch.subjectId)) continue;
     if (!bySubject.has(ch.subjectId)) bySubject.set(ch.subjectId, []);
     bySubject.get(ch.subjectId).push(ch);
@@ -281,31 +319,29 @@ export function planDay(ranked, subjects, subjectsPerDay, chaptersPerSession) {
   return sessions.slice(0, Math.max(1, subjectsPerDay));
 }
 
-/* ------------------------------------------------------------------ *
- *  Rampe thermique
- * ------------------------------------------------------------------ */
-
-function thermal(priority) {
-  const t = clamp(priority / 4, 0, 1);
-  let i = 0;
-  while (i < RAMP.length - 1 && t > RAMP[i + 1][0]) i++;
-  const [t0, c0] = RAMP[i];
-  const [t1, c1] = RAMP[Math.min(i + 1, RAMP.length - 1)];
-  const f = t1 === t0 ? 0 : (t - t0) / (t1 - t0);
-  const rgb = c0.map((c, k) => Math.round(c + (c1[k] - c) * f));
-  return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+// Prévision de charge : combien de chapitres arrivent à échéance chaque jour.
+export function forecastDue(chapters, s, today, horizon = 28) {
+  const map = {};
+  for (const c of chapters) {
+    const interval = Math.max(1, Math.round(optimalInterval(c.stability, s.requestRetention)));
+    const since = c.lastReviewed ? daysBetween(c.lastReviewed, today) : null;
+    const dueIn = since == null ? 0 : Math.max(0, interval - since);
+    if (dueIn <= horizon) {
+      const iso = addDays(today, dueIn);
+      map[iso] = (map[iso] || 0) + 1;
+    }
+  }
+  return map;
 }
 
-/* ------------------------------------------------------------------ *
- *  Persistance (window.storage -> localStorage -> mémoire)
- * ------------------------------------------------------------------ */
+/* ================================================================== *
+ *  Persistance, migration & seed
+ * ================================================================== */
 
 function makeStore() {
   try {
     if (typeof window !== 'undefined' && window.storage &&
-        typeof window.storage.getItem === 'function') {
-      return window.storage;
-    }
+        typeof window.storage.getItem === 'function') return window.storage;
   } catch (e) { /* ignore */ }
   try {
     if (typeof localStorage !== 'undefined') {
@@ -315,7 +351,6 @@ function makeStore() {
       return localStorage;
     }
   } catch (e) { /* ignore */ }
-  // Repli gracieux en mémoire : l'app fonctionne sans stockage.
   const mem = {};
   return {
     getItem: (k) => (k in mem ? mem[k] : null),
@@ -324,17 +359,50 @@ function makeStore() {
   };
 }
 
-function normalize(s) {
+// v1 -> v2 : mastery (0..100) devient difficulté (10..1) ; stabilité conservée
+// ou dérivée de la maîtrise ; journal vide.
+export function migrateV1(v1) {
+  const settings = { ...DEFAULT_SETTINGS, ...(v1?.settings || {}) };
+  delete settings.blocksPerDay;
+  const chapters = (v1?.chapters || []).map((c) => {
+    const m = clamp(c.mastery ?? 50, 0, 100);
+    return {
+      id: c.id, subjectId: c.subjectId, name: c.name,
+      difficulty: c.difficulty ?? clamp(1 + 9 * (1 - m / 100), 1, 10),
+      stability: c.stability ?? targetInterval(m, settings),
+      lastReviewed: c.lastReviewed ?? null,
+    };
+  });
   return {
-    subjects: Array.isArray(s?.subjects) ? s.subjects : [],
-    chapters: Array.isArray(s?.chapters) ? s.chapters : [],
-    exams: Array.isArray(s?.exams) ? s.exams : [],
-    settings: { ...DEFAULT_SETTINGS, ...(s?.settings || {}) },
-    parallelLog: s?.parallelLog && typeof s.parallelLog === 'object' ? s.parallelLog : {},
+    version: 2,
+    subjects: v1?.subjects || [],
+    chapters,
+    exams: v1?.exams || [],
+    settings,
+    parallelLog: v1?.parallelLog || {},
+    reviewLog: [],
   };
 }
 
-// Données de départ : seulement les matières (aucun chapitre, aucune épreuve).
+function normalize(s) {
+  if (!s || typeof s !== 'object') return seedState();
+  if (s.version !== 2) return migrateV1(s);
+  return {
+    version: 2,
+    subjects: Array.isArray(s.subjects) ? s.subjects : [],
+    chapters: (Array.isArray(s.chapters) ? s.chapters : []).map((c) => ({
+      ...c,
+      difficulty: clamp(c.difficulty ?? 5, 1, 10),
+      stability: Math.max(S_MIN, c.stability ?? 2),
+      lastReviewed: c.lastReviewed ?? null,
+    })),
+    exams: Array.isArray(s.exams) ? s.exams : [],
+    settings: { ...DEFAULT_SETTINGS, ...(s.settings || {}) },
+    parallelLog: s.parallelLog && typeof s.parallelLog === 'object' ? s.parallelLog : {},
+    reviewLog: Array.isArray(s.reviewLog) ? s.reviewLog : [],
+  };
+}
+
 export function seedState() {
   const core = [
     ['Algèbre linéaire 2', '#7c9cf5'],
@@ -349,11 +417,13 @@ export function seedState() {
     { id: uid(), name: 'Anki', color: '#fca5a5', type: 'parallel', weeklyFloor: 6 },
   ];
   return {
+    version: 2,
     subjects: [...core, ...parallel],
     chapters: [],
     exams: [],
     settings: { ...DEFAULT_SETTINGS },
     parallelLog: {},
+    reviewLog: [],
   };
 }
 
@@ -365,9 +435,24 @@ function stripChapterIds(exams, ids) {
   }));
 }
 
-/* ------------------------------------------------------------------ *
- *  Petits composants de présentation
- * ------------------------------------------------------------------ */
+/* ================================================================== *
+ *  Rampe thermique
+ * ================================================================== */
+
+function thermal(priority) {
+  const t = clamp(priority / 4, 0, 1);
+  let i = 0;
+  while (i < RAMP.length - 1 && t > RAMP[i + 1][0]) i++;
+  const [t0, c0] = RAMP[i];
+  const [t1, c1] = RAMP[Math.min(i + 1, RAMP.length - 1)];
+  const f = t1 === t0 ? 0 : (t - t0) / (t1 - t0);
+  const rgb = c0.map((c, k) => Math.round(c + (c1[k] - c) * f));
+  return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+}
+
+/* ================================================================== *
+ *  Atomes d'interface
+ * ================================================================== */
 
 const Mono = ({ children, style, color }) => (
   <span style={{ fontFamily: MONO, color, ...style }}>{children}</span>
@@ -376,23 +461,9 @@ const Mono = ({ children, style, color }) => (
 const Pastille = ({ color, size = 10 }) => (
   <span style={{
     width: size, height: size, borderRadius: '50%', background: color,
-    display: 'inline-block', flex: '0 0 auto', boxShadow: `0 0 0 1px rgba(0,0,0,.35)`,
+    display: 'inline-block', flex: '0 0 auto', boxShadow: '0 0 0 1px rgba(0,0,0,.35)',
   }} />
 );
-
-function MasteryBar({ value, color }) {
-  return (
-    <div title={`maîtrise ${Math.round(value)} / 100`} style={{
-      height: 5, background: C.inset, borderRadius: 3, overflow: 'hidden',
-      border: `1px solid ${C.line}`,
-    }}>
-      <div className="cad-bar" style={{
-        width: `${clamp(value, 0, 100)}%`, height: '100%',
-        background: color, opacity: 0.55, borderRadius: 3,
-      }} />
-    </div>
-  );
-}
 
 function Chip({ children, color = C.dim, bg, title, style }) {
   return (
@@ -410,7 +481,7 @@ function Btn({ children, onClick, variant = 'ghost', title, disabled, style, typ
     display: 'inline-flex', alignItems: 'center', gap: 6, cursor: disabled ? 'not-allowed' : 'pointer',
     fontFamily: SANS, fontSize: 13, padding: '7px 12px', borderRadius: 8,
     border: `1px solid ${C.line2}`, background: 'transparent', color: C.text,
-    opacity: disabled ? 0.45 : 1, transition: 'background .12s, border-color .12s',
+    opacity: disabled ? 0.45 : 1,
   };
   const variants = {
     primary: { background: 'rgba(94,169,255,.14)', borderColor: 'rgba(94,169,255,.5)', color: '#dbeafe' },
@@ -458,7 +529,132 @@ function TextInput({ value, onChange, placeholder, type = 'text', style, ariaLab
   );
 }
 
-// Lecteur de priorité transparent : valeur + urgence × mult + épreuve/jours.
+function Segmented({ value, options, onChange, ariaLabel }) {
+  return (
+    <div role="group" aria-label={ariaLabel} style={{
+      display: 'inline-flex', border: `1px solid ${C.line2}`, borderRadius: 8, overflow: 'hidden',
+    }}>
+      {options.map((o) => {
+        const active = o.value === value;
+        return (
+          <button key={o.value} type="button" onClick={() => onChange(o.value)} style={{
+            fontFamily: SANS, fontSize: 12, padding: '5px 11px', cursor: 'pointer', border: 'none',
+            background: active ? 'rgba(94,169,255,.16)' : 'transparent',
+            color: active ? '#dbeafe' : C.dim,
+          }}>{o.label}</button>
+        );
+      })}
+    </div>
+  );
+}
+
+function SectionTitle({ icon: Icon, children, right }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+      {Icon && <Icon size={15} color={C.dim} />}
+      <h2 style={{ margin: 0, fontFamily: SANS, fontSize: 13, fontWeight: 600, letterSpacing: '.04em', textTransform: 'uppercase', color: C.dim }}>
+        {children}
+      </h2>
+      <div style={{ flex: 1, height: 1, background: C.line }} />
+      {right}
+    </div>
+  );
+}
+
+function Empty({ children }) {
+  return (
+    <div style={{
+      fontFamily: SANS, fontSize: 13, color: C.dim, padding: '18px 16px',
+      border: `1px dashed ${C.line2}`, borderRadius: 9, background: C.panel2, lineHeight: 1.5,
+    }}>{children}</div>
+  );
+}
+
+function AddRow({ placeholder, onAdd, cta = 'Ajouter' }) {
+  const [v, setV] = useState('');
+  const add = () => { const t = v.trim(); if (!t) return; onAdd(t); setV(''); };
+  return (
+    <div style={{ display: 'flex', gap: 8 }}>
+      <TextInput value={v} onChange={setV} placeholder={placeholder} ariaLabel={placeholder}
+        onKeyDown={(e) => { if (e.key === 'Enter') add(); }} />
+      <Btn variant="primary" onClick={add}><Plus size={14} /> {cta}</Btn>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ *  Visuels : anneaux SVG (progression du jour, jauge mémoire)
+ * ------------------------------------------------------------------ */
+
+function Ring({ value, total, size = 54, label }) {
+  const stroke = 5;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const frac = total > 0 ? clamp(value / total, 0, 1) : 0;
+  const col = frac >= 1 ? C.good : C.accent;
+  return (
+    <svg width={size} height={size} role="img" aria-label={label || `${value} sur ${total}`}
+      style={{ flex: '0 0 auto' }}>
+      <circle cx={size / 2} cy={size / 2} r={r} stroke={C.line} strokeWidth={stroke} fill="none" />
+      <circle cx={size / 2} cy={size / 2} r={r} stroke={col} strokeWidth={stroke} fill="none"
+        strokeLinecap="round" strokeDasharray={`${c * frac} ${c}`}
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
+        style={{ transition: 'stroke-dasharray .5s var(--ease), stroke .3s var(--ease)' }} />
+      <text x="50%" y="52%" dominantBaseline="middle" textAnchor="middle"
+        style={{ fontFamily: MONO, fontSize: 13, fill: C.text, fontWeight: 700 }}>
+        {value}/{total}
+      </text>
+    </svg>
+  );
+}
+
+// Jauge mémoire compacte : R (%) en anneau thermique. Tiret si jamais révisé.
+function MemGauge({ R, size = 30 }) {
+  const stroke = 3.5;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  if (R == null) {
+    return (
+      <svg width={size} height={size} role="img" aria-label="jamais révisé" style={{ flex: '0 0 auto' }}>
+        <circle cx={size / 2} cy={size / 2} r={r} stroke={C.line2} strokeWidth={stroke}
+          fill="none" strokeDasharray="3 4" />
+        <text x="50%" y="54%" dominantBaseline="middle" textAnchor="middle"
+          style={{ fontFamily: MONO, fontSize: 9, fill: C.faint }}>–</text>
+      </svg>
+    );
+  }
+  const col = thermal((1 - R) * 4);
+  return (
+    <svg width={size} height={size} role="img" aria-label={`mémoire ${Math.round(R * 100)} %`}
+      title={`mémoire ~${Math.round(R * 100)} %`} style={{ flex: '0 0 auto' }}>
+      <circle cx={size / 2} cy={size / 2} r={r} stroke={C.line} strokeWidth={stroke} fill="none" />
+      <circle cx={size / 2} cy={size / 2} r={r} stroke={col} strokeWidth={stroke} fill="none"
+        strokeLinecap="round" strokeDasharray={`${c * clamp(R, 0, 1)} ${c}`}
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
+        style={{ transition: 'stroke-dasharray .45s var(--ease), stroke .3s var(--ease)' }} />
+      <text x="50%" y="54%" dominantBaseline="middle" textAnchor="middle"
+        style={{ fontFamily: MONO, fontSize: 8.5, fill: col, fontWeight: 700 }}>
+        {Math.round(R * 100)}
+      </text>
+    </svg>
+  );
+}
+
+function ThermalLegend() {
+  const grad = `linear-gradient(90deg, ${thermal(0)}, ${thermal(1.2)}, ${thermal(2.2)}, ${thermal(4)})`;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>calme</span>
+      <div style={{ flex: '0 1 140px', width: 140, height: 5, borderRadius: 3, background: grad, border: `1px solid ${C.line}` }} />
+      <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>urgent</span>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ *  Lecture de priorité & raison
+ * ------------------------------------------------------------------ */
+
 function PriorityReader({ m, compact }) {
   const col = thermal(m.priority);
   return (
@@ -487,7 +683,6 @@ function PriorityReader({ m, compact }) {
   );
 }
 
-// Raison en langage clair, colorée par la rampe thermique.
 const REASON_ICON = { exam: CalendarDays, late: AlertTriangle, calm: Check };
 function ReasonLine({ m, size = 13.5 }) {
   const r = reasonPhrase(m);
@@ -501,93 +696,104 @@ function ReasonLine({ m, size = 13.5 }) {
   );
 }
 
-// Bascule à deux états (Simple / Détaillé, etc.).
-function Segmented({ value, options, onChange, ariaLabel }) {
+/* ------------------------------------------------------------------ *
+ *  Notation (4 boutons) & carte de chapitre
+ * ------------------------------------------------------------------ */
+
+function GradeButtons({ onGrade, compact }) {
   return (
-    <div role="group" aria-label={ariaLabel} style={{
-      display: 'inline-flex', border: `1px solid ${C.line2}`, borderRadius: 8, overflow: 'hidden',
-    }}>
-      {options.map((o) => {
-        const active = o.value === value;
+    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+      {[1, 2, 3, 4].map((g) => {
+        const G = GRADES[g];
         return (
-          <button key={o.value} type="button" onClick={() => onChange(o.value)} style={{
-            fontFamily: SANS, fontSize: 12, padding: '5px 11px', cursor: 'pointer', border: 'none',
-            background: active ? 'rgba(94,169,255,.16)' : 'transparent',
-            color: active ? '#dbeafe' : C.dim,
-          }}>{o.label}</button>
+          <button key={g} type="button" onClick={() => onGrade(g)}
+            title={G.hint}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+              fontFamily: SANS, fontSize: compact ? 12 : 12.5, fontWeight: 600,
+              padding: compact ? '5px 9px' : '6px 11px', borderRadius: 8,
+              border: `1px solid ${G.color}55`, background: `${G.color}14`, color: G.color,
+            }}>
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: G.color }} />
+            {G.label}
+          </button>
         );
       })}
     </div>
   );
 }
 
-// Carte de la file du jour. En mode simple : l'essentiel + « détails » repliable.
-function QueueCard({ idx, ch, subject, simpleMode, onWorked, onMastery }) {
-  const [flash, setFlash] = useState(false);
+// Carte d'un chapitre dans le plan du jour.
+function QueueCard({ idx, ch, subject, simpleMode, done, onGrade, onUndo }) {
   const [expanded, setExpanded] = useState(false);
   const open = !simpleMode || expanded;
   const tcol = thermal(ch.priority);
   const sinceLabel = ch.since == null ? 'jamais révisé'
-    : ch.since === 0 ? 'révisé aujourd’hui' : `il y a ${ch.since} j`;
+    : ch.since === 0 ? 'révisé aujourd’hui' : `revu il y a ${ch.since} j`;
+  const G = done ? GRADES[done.grade] : null;
 
   return (
-    <div className={`cad-card${flash ? ' cad-ring' : ''}`} style={{
-      background: C.panel, border: `1px solid ${flash ? 'rgba(52,211,153,.5)' : C.line}`, borderLeft: `3px solid ${tcol}`,
+    <div className={`cad-card${done ? ' cad-done' : ''}`} style={{
+      background: C.panel, border: `1px solid ${done ? `${G.color}44` : C.line}`,
+      borderLeft: `3px solid ${done ? G.color : tcol}`,
       borderRadius: 10, padding: 13, display: 'flex', flexDirection: 'column', gap: 9,
+      opacity: done ? 0.82 : 1,
     }}>
-      {/* Quel chapitre */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-        <Mono style={{ color: C.faint, fontSize: 12, marginTop: 2, width: 18 }}>{idx + 1}</Mono>
-        <Pastille color={subject.color} />
+      {/* Quel chapitre + jauge mémoire */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <Mono style={{ color: C.faint, fontSize: 12, width: 16 }}>{idx + 1}</Mono>
+        <MemGauge R={ch.R} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-            <span style={{ fontFamily: SANS, fontSize: 15.5, color: C.text, fontWeight: 600 }}>{ch.name}</span>
+            <span style={{
+              fontFamily: SANS, fontSize: 15.5, color: C.text, fontWeight: 600,
+              textDecoration: done ? 'line-through' : 'none',
+              textDecorationColor: done ? `${G.color}88` : undefined,
+            }}>{ch.name}</span>
             <span style={{ fontFamily: SANS, fontSize: 11, color: C.dim }}>{subject.name}</span>
           </div>
+          <div style={{ marginTop: 3 }}>
+            <ReasonLine m={ch} size={12.5} />
+          </div>
         </div>
+        <Pastille color={subject.color} />
       </div>
 
-      {/* Pourquoi : une phrase claire (tu décides quoi faire) */}
-      <div style={{ paddingLeft: 28 }}>
-        <ReasonLine m={ch} />
-      </div>
-
-      {/* Détails (repliés en mode simple) : maîtrise + chiffres transparents */}
+      {/* Détails (repliés en mode simple) : chiffres transparents */}
       <div className={`cad-collapse${open ? ' open' : ''}`}>
         <div className="cad-collapse-in" {...(open ? {} : { inert: '' })}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingLeft: 28, paddingTop: 4 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-              <div style={{ flex: '1 1 150px', minWidth: 120 }}>
-                <MasteryBar value={ch.mastery} color={subject.color} />
-              </div>
-              <Mono style={{ color: C.dim, fontSize: 11 }}>{Math.round(ch.mastery)}/100</Mono>
-              <Mono style={{ color: C.faint, fontSize: 11 }}>
-                · {sinceLabel}{ch.R != null ? ` · mémoire ~${Math.round(ch.R * 100)}%` : ''} · revoir ~tous les {Math.round(ch.ti)} j
-              </Mono>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Pencil size={12} color={C.faint} />
-              <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>ajuster la maîtrise</span>
-              <div style={{ flex: 1, minWidth: 90 }}>
-                <Range value={ch.mastery} min={0} max={100} ariaLabel={`maîtrise ${ch.name}`}
-                  onChange={(v) => onMastery(ch.id, v)} />
-              </div>
-            </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 7, paddingLeft: 26, paddingTop: 4 }}>
+            <Mono style={{ color: C.faint, fontSize: 11 }}>
+              {sinceLabel}
+              {ch.R != null ? ` · mémoire ~${Math.round(ch.R * 100)} %` : ''}
+              {` · solidité ${round1(ch.stability)} j · difficulté ${round1(ch.difficulty)}/10`}
+            </Mono>
+            <Mono style={{ color: C.faint, fontSize: 11 }}>
+              prochaine révision {ch.dueIn <= 0 ? 'aujourd’hui' : `dans ~${ch.dueIn} j`} · intervalle visé {Math.round(ch.ti)} j
+            </Mono>
             <PriorityReader m={ch} compact />
           </div>
         </div>
       </div>
 
-      {/* Action : valider + (en mode simple) ouvrir les détails */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 28 }}>
-        <Btn variant={flash ? 'ghost' : 'primary'}
-          onClick={() => { onWorked(ch.id); setFlash(true); setTimeout(() => setFlash(false), 1200); }}>
-          {flash
-            ? <><Check size={14} className="cad-pop" color={C.good} /> <span style={{ color: C.good }}>enregistré</span></>
-            : <><Check size={14} /> J’ai travaillé</>}
-        </Btn>
+      {/* Notation ou état fait */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 26, flexWrap: 'wrap' }}>
+        {done ? (
+          <>
+            <Chip color={G.color} bg={`${G.color}18`} style={{ fontWeight: 700 }}>
+              <Check size={12} className="cad-pop" /> {G.label}
+            </Chip>
+            <Btn variant="bare" onClick={() => onUndo(done.id)} title="Annuler cette révision"
+              style={{ color: C.faint, fontSize: 12 }}>
+              <Undo2 size={13} /> annuler
+            </Btn>
+          </>
+        ) : (
+          <GradeButtons onGrade={(g) => onGrade(ch.id, g)} />
+        )}
         {simpleMode && (
-          <Btn variant="bare" onClick={() => setExpanded((v) => !v)} style={{ marginLeft: 'auto', color: C.faint, fontSize: 12 }}>
+          <Btn variant="bare" onClick={() => setExpanded((v) => !v)}
+            style={{ marginLeft: 'auto', color: C.faint, fontSize: 12 }}>
             détails <ChevronRight size={14} style={{ transition: 'transform .22s var(--ease)', transform: expanded ? 'rotate(90deg)' : 'none' }} />
           </Btn>
         )}
@@ -596,7 +802,7 @@ function QueueCard({ idx, ch, subject, simpleMode, onWorked, onMastery }) {
   );
 }
 
-// Ligne compacte pour « voir toute la file ».
+// Ligne compacte du classement complet.
 function RankRow({ idx, ch, subject }) {
   const tcol = thermal(ch.priority);
   return (
@@ -606,6 +812,7 @@ function RankRow({ idx, ch, subject }) {
       borderLeftWidth: 3, borderRadius: 7,
     }}>
       <Mono style={{ color: C.faint, fontSize: 11, width: 18 }}>{idx + 1}</Mono>
+      <MemGauge R={ch.R} size={24} />
       <Pastille color={subject.color} size={8} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontFamily: SANS, fontSize: 13, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -617,44 +824,21 @@ function RankRow({ idx, ch, subject }) {
   );
 }
 
-function SectionTitle({ icon: Icon, children, right }) {
+function Stat({ label, value, unit, tone }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-      {Icon && <Icon size={15} color={C.dim} />}
-      <h2 style={{ margin: 0, fontFamily: SANS, fontSize: 13, fontWeight: 600, letterSpacing: '.04em', textTransform: 'uppercase', color: C.dim }}>
-        {children}
-      </h2>
-      <div style={{ flex: 1, height: 1, background: C.line }} />
-      {right}
+    <div className="cad-card" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 9, padding: '8px 13px', minWidth: 108 }}>
+      <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, textTransform: 'uppercase', letterSpacing: '.06em' }}>{label}</div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+        <Mono style={{ fontSize: 19, color: tone || C.text }}>{value}</Mono>
+        {unit != null && <span style={{ fontFamily: SANS, fontSize: 11, color: C.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 130 }}>{unit}</span>}
+      </div>
     </div>
   );
 }
 
-function Empty({ children }) {
-  return (
-    <div style={{
-      fontFamily: SANS, fontSize: 13, color: C.dim, padding: '18px 16px',
-      border: `1px dashed ${C.line2}`, borderRadius: 9, background: C.panel2, lineHeight: 1.5,
-    }}>{children}</div>
-  );
-}
-
-// Petit ajout texte (nom) avec bouton +.
-function AddRow({ placeholder, onAdd, cta = 'Ajouter' }) {
-  const [v, setV] = useState('');
-  const add = () => { const t = v.trim(); if (!t) return; onAdd(t); setV(''); };
-  return (
-    <div style={{ display: 'flex', gap: 8 }}>
-      <TextInput value={v} onChange={setV} placeholder={placeholder} ariaLabel={placeholder}
-        onKeyDown={(e) => { if (e.key === 'Enter') add(); }} />
-      <Btn variant="primary" onClick={add}><Plus size={14} /> {cta}</Btn>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ *
- *  Styles globaux (injectés une fois — composant auto-suffisant)
- * ------------------------------------------------------------------ */
+/* ================================================================== *
+ *  Styles globaux (mouvement, repli fluide, reduced-motion)
+ * ================================================================== */
 
 const GLOBAL_CSS = `
   .cadence { --ease: cubic-bezier(.22,.61,.36,1); }
@@ -676,7 +860,6 @@ const GLOBAL_CSS = `
   }
   .cadence *:focus-visible { outline: 2px solid ${C.accent}; outline-offset: 2px; border-radius: 4px; }
 
-  /* Boutons : transitions douces (les changements de style inline s'animent) */
   .cadence button {
     font: inherit;
     transition: background .18s var(--ease), border-color .18s var(--ease),
@@ -688,31 +871,36 @@ const GLOBAL_CSS = `
   .cadence input { transition: border-color .16s var(--ease), background .16s var(--ease); }
   .cadence input:hover { border-color: ${C.line2}; }
 
-  /* Cartes : survol qui soulève */
-  .cad-card { transition: transform .18s var(--ease), box-shadow .22s var(--ease), border-color .22s var(--ease); }
+  .cad-card { transition: transform .18s var(--ease), box-shadow .22s var(--ease), border-color .22s var(--ease), opacity .3s var(--ease); }
   .cad-card:hover { transform: translateY(-2px); box-shadow: 0 12px 30px -10px rgba(0,0,0,.6); }
+  .cad-done:hover { transform: none; box-shadow: none; }
 
-  /* Cellules calendrier */
   .cad-cell { transition: background .15s var(--ease), border-color .15s var(--ease), transform .12s var(--ease); }
   .cad-cell:hover { background: rgba(255,255,255,.05); transform: translateY(-1px); }
 
-  /* Barres animées (maîtrise, planchers, jauges) */
-  .cad-bar { transition: width .35s var(--ease), background .25s var(--ease); }
+  .cad-bar { transition: width .35s var(--ease), background .25s var(--ease), height .3s var(--ease); }
 
-  /* Repli/dépli fluide (grille 0fr -> 1fr) */
   .cad-collapse { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .26s var(--ease), opacity .2s var(--ease); opacity: .4; }
   .cad-collapse.open { grid-template-rows: 1fr; opacity: 1; }
   .cad-collapse > .cad-collapse-in { overflow: hidden; min-height: 0; }
 
-  /* Entrées en scène */
   @keyframes cad-fade-up { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: none; } }
   @keyframes cad-fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
   @keyframes cad-pop { 0% { transform: scale(.5); opacity: .3; } 60% { transform: scale(1.18); } 100% { transform: scale(1); opacity: 1; } }
-  @keyframes cad-ring { 0% { box-shadow: 0 0 0 0 rgba(52,211,153,.55); } 100% { box-shadow: 0 0 0 16px rgba(52,211,153,0); } }
+  @keyframes cad-toast { from { opacity: 0; transform: translate(-50%, 14px); } to { opacity: 1; transform: translate(-50%, 0); } }
   .cad-in { animation: cad-fade-up .36s var(--ease) both; }
   .cad-view { animation: cad-fade .24s var(--ease) both; }
   .cad-pop { animation: cad-pop .32s var(--ease); }
-  .cad-ring { animation: cad-ring .75s ease-out; }
+
+  .cad-toast {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+    z-index: 50; display: flex; align-items: center; gap: 12px;
+    background: #141c2b; border: 1px solid ${C.line2}; border-radius: 12px;
+    padding: 10px 16px; box-shadow: 0 18px 40px -12px rgba(0,0,0,.7);
+    animation: cad-toast .3s var(--ease) both;
+  }
+
+  @media (max-width: 640px) { .cad-tab-label { display: none; } }
 
   .cadence ::-webkit-scrollbar { width: 10px; height: 10px; }
   .cadence ::-webkit-scrollbar-thumb { background: #26303d; border-radius: 5px; }
@@ -721,21 +909,22 @@ const GLOBAL_CSS = `
   .cadence input::placeholder { color: ${C.faint}; }
 
   @media (prefers-reduced-motion: reduce) {
-    .cadence *, .cad-card, .cad-in, .cad-view, .cad-collapse, .cad-pop, .cad-ring {
+    .cadence *, .cad-card, .cad-in, .cad-view, .cad-collapse, .cad-pop, .cad-toast {
       animation: none !important; transition: none !important;
     }
     .cad-collapse { opacity: 1; }
   }
 `;
 
-/* ------------------------------------------------------------------ *
+/* ================================================================== *
  *  Application
- * ------------------------------------------------------------------ */
+ * ================================================================== */
 
 const TABS = [
   { id: 'today', label: 'Aujourd’hui', icon: Activity },
   { id: 'calendar', label: 'Calendrier', icon: CalendarDays },
   { id: 'subjects', label: 'Matières', icon: Layers },
+  { id: 'progress', label: 'Progrès', icon: TrendingUp },
   { id: 'settings', label: 'Réglages', icon: SettingsIcon },
 ];
 
@@ -745,18 +934,21 @@ export default function Cadence() {
     try {
       const raw = store.getItem(STORAGE_KEY);
       if (raw) return normalize(JSON.parse(raw));
+      const legacy = store.getItem(LEGACY_KEY);
+      if (legacy) return migrateV1(JSON.parse(legacy));
     } catch (e) { /* ignore */ }
     return seedState();
   });
 
-  // Sauvegarde à chaque mutation.
   useEffect(() => {
     try { store.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
   }, [state, store]);
 
   const [tab, setTab] = useState('today');
+  const [toast, setToast] = useState(null); // { text, entryId }
+  const toastTimer = useRef(null);
   const today = todayISO();
-  const { subjects, chapters, exams, settings, parallelLog } = state;
+  const { subjects, chapters, exams, settings, parallelLog, reviewLog } = state;
 
   /* ----- Mutations ----- */
   const patch = (fn) => setState((prev) => fn(prev));
@@ -769,18 +961,20 @@ export default function Cadence() {
   }));
   const deleteSubject = (id) => patch((p) => {
     const chapIds = p.chapters.filter((c) => c.subjectId === id).map((c) => c.id);
+    const idSet = new Set(chapIds);
     return {
       ...p,
       subjects: p.subjects.filter((s) => s.id !== id),
       chapters: p.chapters.filter((c) => c.subjectId !== id),
       exams: stripChapterIds(p.exams.filter((e) => e.subjectId !== id), chapIds),
+      reviewLog: p.reviewLog.filter((r) => !idSet.has(r.chapterId)),
     };
   });
 
   const addChapter = (subjectId, name) => patch((p) => ({
     ...p, chapters: [...p.chapters, {
-      id: uid(), subjectId, name, mastery: 50, lastReviewed: null,
-      stability: targetInterval(50, p.settings),
+      id: uid(), subjectId, name, lastReviewed: null,
+      ...levelSeed(LEVELS[0], p.settings), // « Jamais vu » par défaut
     }],
   }));
   const updateChapter = (id, up) => patch((p) => ({
@@ -790,25 +984,53 @@ export default function Cadence() {
     ...p,
     chapters: p.chapters.filter((c) => c.id !== id),
     exams: stripChapterIds(p.exams, [id]),
+    reviewLog: p.reviewLog.filter((r) => r.chapterId !== id),
   }));
-  // « J'ai travaillé » : révision réussie -> la stabilité grandit (intervalle
-  // expansif), gain modulé par l'effet d'espacement et la maîtrise.
-  const markWorked = (id) => patch((p) => ({
-    ...p, chapters: p.chapters.map((c) => {
-      if (c.id !== id) return c;
-      const stability = chapterStability(c, p.settings);
-      const since = c.lastReviewed ? daysBetween(c.lastReviewed, today) : stability;
-      const rOld = retrievability(since, stability);
-      return { ...c, lastReviewed: today, stability: nextStability(stability, c.mastery, rOld, p.settings) };
-    }),
+  // Recalibrer un chapitre sur un niveau nommé (repart de zéro côté mémoire).
+  const setChapterLevel = (id, level) => patch((p) => ({
+    ...p, chapters: p.chapters.map((c) => (c.id === id ? { ...c, ...levelSeed(level, p.settings) } : c)),
   }));
-  // Ajuster la maîtrise = recalibrer où tu en es : la stabilité repart de cette
-  // auto-évaluation (utile après un examen blanc noté).
-  const setMastery = (id, v) => patch((p) => {
-    const m = clamp(Math.round(v), 0, 100);
-    return { ...p, chapters: p.chapters.map((c) => (c.id === id
-      ? { ...c, mastery: m, stability: targetInterval(m, p.settings) } : c)) };
-  });
+
+  // Noter une révision (FSRS) : met à jour stabilité + difficulté, journalise.
+  const gradeChapter = (id, grade) => {
+    const entryId = uid();
+    patch((p) => {
+      const ch = p.chapters.find((c) => c.id === id);
+      if (!ch) return p;
+      const already = p.reviewLog.some((r) => r.chapterId === id && r.date === today);
+      if (already) return p; // une note par jour et par chapitre
+      const { stability, difficulty } = applyGrade(ch, grade, today);
+      const entry = {
+        id: entryId, chapterId: id, date: today, grade,
+        before: { stability: ch.stability, difficulty: ch.difficulty, lastReviewed: ch.lastReviewed },
+        after: { stability, difficulty },
+      };
+      return {
+        ...p,
+        chapters: p.chapters.map((c) => (c.id === id ? { ...c, stability, difficulty, lastReviewed: today } : c)),
+        reviewLog: [...p.reviewLog, entry],
+      };
+    });
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast({ text: `Noté « ${GRADES[grade].label} »`, entryId });
+    toastTimer.current = setTimeout(() => setToast(null), 6000);
+  };
+
+  // Annuler une révision : restaure l'état mémoire d'avant, retire l'entrée.
+  const undoReview = (entryId) => {
+    patch((p) => {
+      const entry = p.reviewLog.find((r) => r.id === entryId);
+      if (!entry) return p;
+      return {
+        ...p,
+        chapters: p.chapters.map((c) => (c.id === entry.chapterId
+          ? { ...c, stability: entry.before.stability, difficulty: entry.before.difficulty, lastReviewed: entry.before.lastReviewed }
+          : c)),
+        reviewLog: p.reviewLog.filter((r) => r.id !== entryId),
+      };
+    });
+    setToast(null);
+  };
 
   const addExam = (subjectId, exam) => patch((p) => ({
     ...p, exams: [...p.exams, { id: uid(), subjectId, name: exam.name, date: exam.date, chapterIds: exam.chapterIds || [] }],
@@ -838,7 +1060,9 @@ export default function Cadence() {
   });
 
   const importState = (obj) => setState(normalize(obj));
-  const resetAll = () => { if (confirm('Réinitialiser CADENCE ? Tes chapitres, épreuves et réglages seront effacés.')) setState(seedState()); };
+  const resetAll = () => {
+    if (confirm('Réinitialiser CADENCE ? Tes chapitres, épreuves, historique et réglages seront effacés.')) setState(seedState());
+  };
 
   /* ----- Données dérivées ----- */
   const subjectById = useMemo(
@@ -846,16 +1070,34 @@ export default function Cadence() {
   const coreSubjects = useMemo(() => subjects.filter((s) => s.type === 'core'), [subjects]);
   const parallelSubjects = useMemo(() => subjects.filter((s) => s.type === 'parallel'), [subjects]);
 
+  // Révisions du jour (pour l'état « fait » et la stabilité du plan).
+  const todayEntries = useMemo(
+    () => reviewLog.filter((r) => r.date === today), [reviewLog, today]);
+  const doneByChapter = useMemo(
+    () => Object.fromEntries(todayEntries.map((r) => [r.chapterId, r])), [todayEntries]);
+
+  // Classement courant (post-révisions).
   const ranked = useMemo(() => chapters
     .map((ch) => ({ ...ch, ...chapterMetrics(ch, exams, settings, today) }))
     .sort((a, b) => b.priority - a.priority), [chapters, exams, settings, today]);
 
-  const overdue = ranked.filter((c) => c.urgency >= 1).length;
+  // Plan du jour STABLE : les chapitres déjà notés aujourd'hui sont replacés
+  // dans leur état d'avant révision, pour que la liste ne se réorganise pas.
+  const planningRanked = useMemo(() => chapters
+    .map((ch) => {
+      const e = doneByChapter[ch.id];
+      const base = e ? { ...ch, ...e.before } : ch;
+      return { ...base, ...chapterMetrics(base, exams, settings, today) };
+    })
+    .sort((a, b) => b.priority - a.priority), [chapters, doneByChapter, exams, settings, today]);
+
+  const overdue = ranked.filter((c) => c.urgency >= 1 && !doneByChapter[c.id]).length;
   const chaptersPerSession = Math.max(1, Math.round((settings.sessionHours * 60) / settings.minutesPerChapter));
   const sessions = useMemo(
-    () => planDay(ranked, subjects, settings.subjectsPerDay, chaptersPerSession),
-    [ranked, subjects, settings.subjectsPerDay, chaptersPerSession]);
+    () => planDay(planningRanked, subjects, settings.subjectsPerDay, chaptersPerSession),
+    [planningRanked, subjects, settings.subjectsPerDay, chaptersPerSession]);
   const plannedCount = sessions.reduce((a, s) => a + s.chapters.length, 0);
+  const doneCount = sessions.reduce((a, s) => a + s.chapters.filter((c) => doneByChapter[c.id]).length, 0);
 
   const annalesBanners = useMemo(() => coreSubjects
     .map((s) => ({ subject: s, info: annalesModeFor(s.id, exams, settings, today) }))
@@ -867,6 +1109,9 @@ export default function Cadence() {
     .sort((a, b) => a.days - b.days), [exams, today]);
   const nextExam = upcomingExams[0] || null;
 
+  const dueForecast = useMemo(
+    () => forecastDue(chapters, settings, today, 35), [chapters, settings, today]);
+
   return (
     <div className="cadence" style={{
       minHeight: '100%', background: C.bg, color: C.text, fontFamily: SANS,
@@ -874,12 +1119,11 @@ export default function Cadence() {
     }}>
       <style>{GLOBAL_CSS}</style>
 
-      {/* Barre supérieure */}
       <header style={{
         position: 'sticky', top: 0, zIndex: 10, background: 'rgba(10,14,20,.86)',
         backdropFilter: 'blur(8px)', borderBottom: `1px solid ${C.line}`,
       }}>
-        <div style={{ maxWidth: 980, margin: '0 auto', padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+        <div style={{ maxWidth: 1000, margin: '0 auto', padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
             <Flame size={18} color={C.accent} />
             <span style={{ fontFamily: MONO, fontWeight: 700, letterSpacing: '.22em', fontSize: 16 }}>CADENCE</span>
@@ -888,14 +1132,14 @@ export default function Cadence() {
             {TABS.map((t) => {
               const active = tab === t.id;
               return (
-                <button key={t.id} onClick={() => setTab(t.id)} style={{
+                <button key={t.id} onClick={() => setTab(t.id)} title={t.label} style={{
                   display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer',
                   fontFamily: SANS, fontSize: 13, padding: '7px 12px', borderRadius: 8,
                   border: `1px solid ${active ? 'rgba(94,169,255,.5)' : 'transparent'}`,
                   background: active ? 'rgba(94,169,255,.14)' : 'transparent',
                   color: active ? '#dbeafe' : C.dim,
                 }}>
-                  <t.icon size={15} /> {t.label}
+                  <t.icon size={15} /> <span className="cad-tab-label">{t.label}</span>
                 </button>
               );
             })}
@@ -903,63 +1147,79 @@ export default function Cadence() {
         </div>
       </header>
 
-      <main style={{ maxWidth: 980, margin: '0 auto', padding: '18px 16px 64px' }}>
+      <main style={{ maxWidth: 1000, margin: '0 auto', padding: '18px 16px 72px' }}>
         <div key={tab} className="cad-view">
-        {tab === 'today' && (
-          <TodayView
-            today={today} overdue={overdue} nextExam={nextExam} subjectById={subjectById}
-            annalesBanners={annalesBanners} sessions={sessions} plannedCount={plannedCount} ranked={ranked}
-            parallelSubjects={parallelSubjects} parallelLog={parallelLog} settings={settings}
-            onWorked={markWorked} onMastery={setMastery} onAdjustParallel={adjustParallel}
-            onGoSubjects={() => setTab('subjects')}
-            onSetSimpleMode={(v) => updateSetting('simpleMode', v)}
-          />
-        )}
-        {tab === 'calendar' && (
-          <CalendarView today={today} exams={exams} subjectById={subjectById}
-            settings={settings} upcomingExams={upcomingExams} onGoSubjects={() => setTab('subjects')} />
-        )}
-        {tab === 'subjects' && (
-          <SubjectsView
-            subjects={subjects} chapters={chapters} exams={exams} settings={settings} today={today}
-            onAddSubject={addSubject} onUpdateSubject={updateSubject} onDeleteSubject={deleteSubject}
-            onAddChapter={addChapter} onUpdateChapter={updateChapter} onDeleteChapter={deleteChapter}
-            onAddExam={addExam} onUpdateExam={updateExam} onDeleteExam={deleteExam}
-            onToggleExamChapter={toggleExamChapter}
-          />
-        )}
-        {tab === 'settings' && (
-          <SettingsView settings={settings} state={state} store={store}
-            onUpdate={updateSetting} onImport={importState} onReset={resetAll} today={today} />
-        )}
+          {tab === 'today' && (
+            <TodayView
+              today={today} overdue={overdue} nextExam={nextExam} subjectById={subjectById}
+              annalesBanners={annalesBanners} sessions={sessions} ranked={ranked}
+              plannedCount={plannedCount} doneCount={doneCount} doneByChapter={doneByChapter}
+              parallelSubjects={parallelSubjects} parallelLog={parallelLog} settings={settings}
+              onGrade={gradeChapter} onUndo={undoReview} onAdjustParallel={adjustParallel}
+              onGoSubjects={() => setTab('subjects')}
+              onSetSimpleMode={(v) => updateSetting('simpleMode', v)}
+            />
+          )}
+          {tab === 'calendar' && (
+            <CalendarView today={today} exams={exams} subjectById={subjectById}
+              settings={settings} upcomingExams={upcomingExams} dueForecast={dueForecast} />
+          )}
+          {tab === 'subjects' && (
+            <SubjectsView
+              subjects={subjects} chapters={chapters} exams={exams} settings={settings} today={today}
+              onAddSubject={addSubject} onUpdateSubject={updateSubject} onDeleteSubject={deleteSubject}
+              onAddChapter={addChapter} onUpdateChapter={updateChapter} onDeleteChapter={deleteChapter}
+              onSetLevel={setChapterLevel}
+              onAddExam={addExam} onUpdateExam={updateExam} onDeleteExam={deleteExam}
+              onToggleExamChapter={toggleExamChapter}
+            />
+          )}
+          {tab === 'progress' && (
+            <ProgressView reviewLog={reviewLog} ranked={ranked} today={today} />
+          )}
+          {tab === 'settings' && (
+            <SettingsView settings={settings} state={state} onUpdate={updateSetting}
+              onImport={importState} onReset={resetAll} today={today} />
+          )}
         </div>
       </main>
+
+      {toast && (
+        <div className="cad-toast" role="status">
+          <Check size={15} color={C.good} />
+          <span style={{ fontFamily: SANS, fontSize: 13 }}>{toast.text}</span>
+          <Btn variant="bare" onClick={() => undoReview(toast.entryId)} style={{ color: C.accent, fontSize: 13 }}>
+            <Undo2 size={13} /> Annuler
+          </Btn>
+        </div>
+      )}
     </div>
   );
 }
 
-/* ------------------------------------------------------------------ *
+/* ================================================================== *
  *  Vue 1 — Aujourd'hui
- * ------------------------------------------------------------------ */
+ * ================================================================== */
 
 function TodayView({
-  today, overdue, nextExam, subjectById, annalesBanners, sessions, plannedCount, ranked,
-  parallelSubjects, parallelLog, settings, onWorked, onMastery, onAdjustParallel, onGoSubjects,
-  onSetSimpleMode,
+  today, overdue, nextExam, subjectById, annalesBanners, sessions, ranked,
+  plannedCount, doneCount, doneByChapter, parallelSubjects, parallelLog, settings,
+  onGrade, onUndo, onAdjustParallel, onGoSubjects, onSetSimpleMode,
 }) {
   const [showAll, setShowAll] = useState(false);
   const wk = mondayOf(today);
   const hrs = settings.sessionHours;
-  const hLabel = Number.isInteger(hrs) ? `${hrs} h` : `${hrs} h`;
+  const hLabel = `${hrs} h`;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-      {/* En-tête : date + métriques */}
-      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 16, flexWrap: 'wrap' }}>
+      {/* En-tête : date + anneau de progression + métriques */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+        {plannedCount > 0 && <Ring value={doneCount} total={plannedCount} label="progression du jour" />}
         <div>
           <Mono style={{ fontSize: 22, color: C.text, textTransform: 'capitalize' }}>{fmtLongDate(today)}</Mono>
           <div style={{ fontFamily: SANS, fontSize: 12, color: C.faint, marginTop: 2 }}>
-            Révisions espacées, à ta capacité · coche ce qui est fait
+            Révise, puis note chaque chapitre : Oublié · Difficile · Bien · Facile
           </div>
         </div>
         <div style={{ display: 'flex', gap: 10, marginLeft: 'auto', flexWrap: 'wrap' }}>
@@ -972,11 +1232,11 @@ function TodayView({
         </div>
       </div>
 
-      {/* Bannières « examen proche » (simple alerte, pas de consigne) */}
+      {/* Bannières « examen proche » */}
       {annalesBanners.map(({ subject, info }, bi) => (
         <div key={subject.id} className="cad-in cad-card" style={{
           display: 'flex', alignItems: 'center', gap: 10, padding: '10px 13px', borderRadius: 9,
-          background: 'rgba(251,191,36,.08)', border: `1px solid rgba(251,191,36,.32)`,
+          background: 'rgba(251,191,36,.08)', border: '1px solid rgba(251,191,36,.32)',
           animationDelay: `${bi * 50}ms`,
         }}>
           <CalendarDays size={16} color={C.warn} />
@@ -990,7 +1250,7 @@ function TodayView({
         </div>
       ))}
 
-      {/* Plan du jour : matières sous contrainte de capacité */}
+      {/* Plan du jour */}
       <div>
         <SectionTitle icon={Activity} right={
           ranked.length > 0 ? (
@@ -1028,31 +1288,36 @@ function TodayView({
             </div>
             {!showAll ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-                {sessions.map((session, si) => (
-                  <div key={session.subject.id} className="cad-in" style={{ animationDelay: `${si * 70}ms` }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 9 }}>
-                      <span style={{
-                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                        width: 22, height: 22, borderRadius: 6, background: `${session.subject.color}22`,
-                        color: session.subject.color, fontFamily: MONO, fontSize: 12, fontWeight: 700,
-                      }}>{si + 1}</span>
-                      <span style={{ fontFamily: SANS, fontSize: 15.5, fontWeight: 700, color: C.text }}>{session.subject.name}</span>
-                      <Chip color={C.dim}>séance ≈ {hLabel}</Chip>
-                      <Mono style={{ marginLeft: 'auto', color: C.faint, fontSize: 11 }}>
-                        {session.chapters.length} chap.{session.total > session.chapters.length ? ` · +${session.total - session.chapters.length} en attente` : ''}
-                      </Mono>
+                {sessions.map((session, si) => {
+                  const sDone = session.chapters.filter((c) => doneByChapter[c.id]).length;
+                  return (
+                    <div key={session.subject.id} className="cad-in" style={{ animationDelay: `${si * 70}ms` }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 9 }}>
+                        <span style={{
+                          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                          width: 22, height: 22, borderRadius: 6, background: `${session.subject.color}22`,
+                          color: session.subject.color, fontFamily: MONO, fontSize: 12, fontWeight: 700,
+                        }}>{si + 1}</span>
+                        <span style={{ fontFamily: SANS, fontSize: 15.5, fontWeight: 700, color: C.text }}>{session.subject.name}</span>
+                        <Chip color={C.dim}>séance ≈ {hLabel}</Chip>
+                        <Mono style={{ marginLeft: 'auto', color: sDone === session.chapters.length ? C.good : C.faint, fontSize: 11 }}>
+                          {sDone}/{session.chapters.length} fait{sDone > 1 ? 's' : ''}
+                          {session.total > session.chapters.length ? ` · +${session.total - session.chapters.length} en attente` : ''}
+                        </Mono>
+                      </div>
+                      <div style={{
+                        display: 'flex', flexDirection: 'column', gap: 10,
+                        paddingLeft: 11, borderLeft: `2px solid ${session.subject.color}33`,
+                      }}>
+                        {session.chapters.map((ch, i) => (
+                          <QueueCard key={ch.id} idx={i} ch={ch} subject={session.subject}
+                            simpleMode={settings.simpleMode} done={doneByChapter[ch.id]}
+                            onGrade={onGrade} onUndo={onUndo} />
+                        ))}
+                      </div>
                     </div>
-                    <div style={{
-                      display: 'flex', flexDirection: 'column', gap: 10,
-                      paddingLeft: 11, borderLeft: `2px solid ${session.subject.color}33`,
-                    }}>
-                      {session.chapters.map((ch, i) => (
-                        <QueueCard key={ch.id} idx={i} ch={ch} subject={session.subject}
-                          simpleMode={settings.simpleMode} onWorked={onWorked} onMastery={onMastery} />
-                      ))}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -1065,7 +1330,7 @@ function TodayView({
         )}
       </div>
 
-      {/* Minimums hebdo (matières en parallèle — à tenir quoi qu'il arrive) */}
+      {/* Minimums hebdo */}
       {parallelSubjects.length > 0 && (
         <div>
           <SectionTitle icon={Lock}>À tenir cette semaine</SectionTitle>
@@ -1111,35 +1376,9 @@ function TodayView({
   );
 }
 
-function Stat({ label, value, unit, tone }) {
-  return (
-    <div className="cad-card" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 9, padding: '8px 13px', minWidth: 110 }}>
-      <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, textTransform: 'uppercase', letterSpacing: '.06em' }}>{label}</div>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-        <Mono style={{ fontSize: 19, color: tone || C.text }}>{value}</Mono>
-        {unit != null && <span style={{ fontFamily: SANS, fontSize: 11, color: C.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 130 }}>{unit}</span>}
-      </div>
-    </div>
-  );
-}
-
-function ThermalLegend() {
-  const grad = `linear-gradient(90deg, ${thermal(0)}, ${thermal(1.2)}, ${thermal(2.2)}, ${thermal(4)})`;
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '2px 0 12px' }}>
-      <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>calme</span>
-      <div style={{ flex: '0 1 180px', height: 5, borderRadius: 3, background: grad, border: `1px solid ${C.line}` }} />
-      <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>urgent</span>
-      <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, marginLeft: 6 }}>
-        — la couleur = l’urgence
-      </span>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ *
- *  Vue 2 — Calendrier
- * ------------------------------------------------------------------ */
+/* ================================================================== *
+ *  Vue 2 — Calendrier (épreuves + prévision de charge)
+ * ================================================================== */
 
 function monthMatrix(year, month) {
   const first = new Date(year, month, 1);
@@ -1154,7 +1393,7 @@ function monthMatrix(year, month) {
 
 const WEEKDAYS = ['lun', 'mar', 'mer', 'jeu', 'ven', 'sam', 'dim'];
 
-function CalendarView({ today, exams, subjectById, settings, upcomingExams, onGoSubjects }) {
+function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueForecast }) {
   const t = parseISO(today);
   const [cursor, setCursor] = useState({ y: t.getFullYear(), m: t.getMonth() });
   const cells = monthMatrix(cursor.y, cursor.m);
@@ -1167,7 +1406,8 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, onGo
     return map;
   }, [exams]);
 
-  // Une date est en fenêtre annales si une épreuve la couvre dans [date−seuil, date].
+  const maxDue = Math.max(1, ...Object.values(dueForecast));
+
   function annalesShade(iso) {
     let best = null;
     for (const e of exams) {
@@ -1185,9 +1425,16 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, onGo
     return { y: d.getFullYear(), m: d.getMonth() };
   });
 
+  // Charge des 14 prochains jours (liste latérale).
+  const nextDays = Array.from({ length: 14 }, (_, i) => {
+    const iso = addDays(today, i);
+    return { iso, count: dueForecast[iso] || 0 };
+  });
+  const maxNext = Math.max(1, ...nextDays.map((d) => d.count));
+
   return (
     <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', alignItems: 'flex-start' }}>
-      <div style={{ flex: '1 1 360px', minWidth: 300 }}>
+      <div style={{ flex: '1 1 380px', minWidth: 300 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
           <IconBtn icon={ChevronLeft} title="Mois précédent" onClick={() => move(-1)} />
           <Mono style={{ fontSize: 16, textTransform: 'capitalize', minWidth: 150, textAlign: 'center' }}>{monthLabel}</Mono>
@@ -1206,25 +1453,45 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, onGo
             const isToday = iso === today;
             const dayExams = examsByDay[iso] || [];
             const shade = annalesShade(iso);
+            const due = dueForecast[iso] || 0;
+            const titleParts = [
+              ...dayExams.map((e) => `${e.name} (${(e.chapterIds || []).length} chap.)`),
+              due ? `${due} chapitre${due > 1 ? 's' : ''} à revoir` : null,
+            ].filter(Boolean);
             return (
-              <div key={i} className="cad-cell" title={dayExams.map((e) => `${e.name} (${(e.chapterIds || []).length} chap.)`).join('\n')}
+              <div key={i} className="cad-cell" title={titleParts.join('\n')}
                 style={{
                   aspectRatio: '1 / 1', borderRadius: 7, padding: 5,
                   background: shade ? `${shade.color}1f` : C.panel2,
                   border: `1px solid ${isToday ? C.accent : C.line}`,
                   display: 'flex', flexDirection: 'column', gap: 3, position: 'relative', overflow: 'hidden',
                 }}>
-                <Mono style={{
-                  fontSize: 11, color: isToday ? C.accent : C.dim, alignSelf: 'flex-end',
-                  fontWeight: isToday ? 700 : 400,
-                }}>{cell.getDate()}</Mono>
-                <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginTop: 'auto' }}>
-                  {dayExams.map((e) => (
-                    <span key={e.id} style={{
-                      height: 6, minWidth: 6, flex: dayExams.length > 1 ? '1 1 auto' : '0 0 auto',
-                      borderRadius: 3, background: subjectById[e.subjectId]?.color || C.dim,
-                    }} />
-                  ))}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                  {due > 0 && (
+                    <Mono style={{ fontSize: 9, color: thermal((due / maxDue) * 4) }}>{due}</Mono>
+                  )}
+                  <Mono style={{
+                    fontSize: 11, color: isToday ? C.accent : C.dim, marginLeft: 'auto',
+                    fontWeight: isToday ? 700 : 400,
+                  }}>{cell.getDate()}</Mono>
+                </div>
+                <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  {due > 0 && (
+                    <div style={{ height: 3, borderRadius: 2, background: C.inset, overflow: 'hidden' }}>
+                      <div className="cad-bar" style={{
+                        width: `${clamp((due / maxDue) * 100, 8, 100)}%`, height: '100%',
+                        background: thermal((due / maxDue) * 4), opacity: .85,
+                      }} />
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                    {dayExams.map((e) => (
+                      <span key={e.id} style={{
+                        height: 6, minWidth: 6, flex: dayExams.length > 1 ? '1 1 auto' : '0 0 auto',
+                        borderRadius: 3, background: subjectById[e.subjectId]?.color || C.dim,
+                      }} />
+                    ))}
+                  </div>
                 </div>
               </div>
             );
@@ -1235,53 +1502,102 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, onGo
             <span style={{ width: 18, height: 10, borderRadius: 3, background: '#fbbf241f', border: `1px solid ${C.line}` }} /> fenêtre « examen proche »
           </span>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 18, height: 4, borderRadius: 2, background: thermal(2.5) }} /> chapitres à revoir ce jour-là
+          </span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <span style={{ width: 10, height: 10, borderRadius: 3, border: `1px solid ${C.accent}` }} /> aujourd’hui
           </span>
         </div>
       </div>
 
-      {/* Liste latérale */}
-      <div style={{ flex: '1 1 240px', minWidth: 240 }}>
-        <SectionTitle icon={CalendarDays}>Épreuves à venir</SectionTitle>
-        {upcomingExams.length === 0 ? (
-          <Empty>Aucune épreuve. <b>Onglet Matières → ajoute une épreuve à une UE</b> (nom, date, chapitres couverts).</Empty>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {upcomingExams.map((e, ei) => {
-              const sub = subjectById[e.subjectId];
-              const annales = e.days <= settings.examModeThreshold;
-              return (
-                <div key={e.id} className="cad-card cad-in" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 9, padding: 11, animationDelay: `${ei * 45}ms` }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <Pastille color={sub?.color || C.dim} />
-                    <span style={{ fontFamily: SANS, fontSize: 13.5, fontWeight: 600 }}>{e.name}</span>
-                    <Mono style={{ marginLeft: 'auto', fontSize: 14, color: annales ? C.warn : C.accent }}>J−{e.days}</Mono>
+      <div style={{ flex: '1 1 260px', minWidth: 250, display: 'flex', flexDirection: 'column', gap: 18 }}>
+        <div>
+          <SectionTitle icon={CalendarDays}>Épreuves à venir</SectionTitle>
+          {upcomingExams.length === 0 ? (
+            <Empty>Aucune épreuve. <b>Onglet Matières → ajoute une épreuve à une UE</b> (nom, date, chapitres couverts).</Empty>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {upcomingExams.map((e, ei) => {
+                const sub = subjectById[e.subjectId];
+                const annales = e.days <= settings.examModeThreshold;
+                return (
+                  <div key={e.id} className="cad-card cad-in" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 9, padding: 11, animationDelay: `${ei * 45}ms` }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <Pastille color={sub?.color || C.dim} />
+                      <span style={{ fontFamily: SANS, fontSize: 13.5, fontWeight: 600 }}>{e.name}</span>
+                      <Mono style={{ marginLeft: 'auto', fontSize: 14, color: annales ? C.warn : C.accent }}>J−{e.days}</Mono>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 7, flexWrap: 'wrap' }}>
+                      <Mono style={{ fontSize: 11, color: C.dim }}>{fmtShortDate(e.date)}</Mono>
+                      <Chip color={C.dim}>{(e.chapterIds || []).length} chap.</Chip>
+                      {annales && <Chip color={C.warn}><CalendarDays size={11} /> examen proche</Chip>}
+                    </div>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 7, flexWrap: 'wrap' }}>
-                    <Mono style={{ fontSize: 11, color: C.dim }}>{fmtShortDate(e.date)}</Mono>
-                    <Chip color={C.dim}>{(e.chapterIds || []).length} chap.</Chip>
-                    {annales && <Chip color={C.warn}><CalendarDays size={11} /> examen proche</Chip>}
-                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <SectionTitle icon={TrendingUp}>Charge à venir (14 j)</SectionTitle>
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 12, display: 'flex', flexDirection: 'column', gap: 5 }}>
+            {nextDays.map((d, i) => (
+              <div key={d.iso} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Mono style={{ fontSize: 10.5, color: i === 0 ? C.accent : C.faint, width: 64 }}>
+                  {i === 0 ? 'auj.' : fmtShortDate(d.iso)}
+                </Mono>
+                <div style={{ flex: 1, height: 7, background: C.inset, borderRadius: 4, overflow: 'hidden', border: `1px solid ${C.line}` }}>
+                  <div className="cad-bar" style={{
+                    width: `${(d.count / maxNext) * 100}%`, height: '100%',
+                    background: d.count ? thermal((d.count / maxNext) * 4) : 'transparent', opacity: .85,
+                  }} />
                 </div>
-              );
-            })}
+                <Mono style={{ fontSize: 10.5, color: d.count ? C.dim : C.faint, width: 18, textAlign: 'right' }}>{d.count || '·'}</Mono>
+              </div>
+            ))}
           </div>
-        )}
+          <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint, marginTop: 7 }}>
+            Nombre de chapitres qui arrivent à échéance chaque jour (rétention cible {Math.round(settings.requestRetention * 100)} %).
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
-/* ------------------------------------------------------------------ *
+/* ================================================================== *
  *  Vue 3 — Matières
- * ------------------------------------------------------------------ */
+ * ================================================================== */
 
-const PALETTE = ['#7c9cf5', '#a78bfa', '#38bdf8', '#fbbf24', '#f472b6', '#34d399', '#5eead4', '#fca5a5', '#f59e0b', '#22d3ee'];
+function LevelPicker({ current, onPick, compact }) {
+  const active = closestLevel(current);
+  return (
+    <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+      {LEVELS.map((l) => {
+        const on = l.key === active.key;
+        return (
+          <button key={l.key} type="button" onClick={() => onPick(l)}
+            title={`repartir de « ${l.label} »`}
+            style={{
+              fontFamily: SANS, fontSize: compact ? 11 : 12, padding: compact ? '3px 8px' : '4px 10px',
+              borderRadius: 999, cursor: 'pointer',
+              border: `1px solid ${on ? 'rgba(94,169,255,.5)' : C.line2}`,
+              background: on ? 'rgba(94,169,255,.14)' : 'transparent',
+              color: on ? '#dbeafe' : C.dim,
+            }}>
+            {l.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 function SubjectsView({
   subjects, chapters, exams, settings, today,
   onAddSubject, onUpdateSubject, onDeleteSubject,
-  onAddChapter, onUpdateChapter, onDeleteChapter,
+  onAddChapter, onUpdateChapter, onDeleteChapter, onSetLevel,
   onAddExam, onUpdateExam, onDeleteExam, onToggleExamChapter,
 }) {
   const [open, setOpen] = useState({});
@@ -1298,12 +1614,12 @@ function SubjectsView({
         const expanded = !!open[s.id];
         return (
           <div key={s.id} className="cad-in" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, animationDelay: `${Math.min(sidx, 8) * 40}ms` }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 12, flexWrap: 'wrap' }}>
               {isCore ? (
                 <button onClick={() => toggle(s.id)} aria-label="déplier" style={{
                   background: 'transparent', border: 'none', cursor: 'pointer', color: C.dim, display: 'flex', padding: 2,
                 }}>
-                  {expanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                  <ChevronRight size={18} style={{ transition: 'transform .22s var(--ease)', transform: expanded ? 'rotate(90deg)' : 'none' }} />
                 </button>
               ) : <span style={{ width: 22 }} />}
 
@@ -1313,11 +1629,12 @@ function SubjectsView({
 
               <TextInput value={s.name} onChange={(v) => onUpdateSubject(s.id, { name: v })} ariaLabel="nom de la matière" style={{ maxWidth: 280 }} />
 
-              <Chip color={isCore ? C.accent : C.good} title="type de matière">
-                {isCore ? 'core' : 'parallèle'}
-              </Chip>
+              {isCore && subChapters.length > 0 && (
+                <Chip color={C.dim} title="chapitres">{subChapters.length} chap.</Chip>
+              )}
 
               <button onClick={() => onUpdateSubject(s.id, { type: isCore ? 'parallel' : 'core', weeklyFloor: isCore ? 4 : undefined })}
+                title="core = planifiée par CADENCE · parallèle = minimum hebdo à tenir"
                 style={{ background: 'transparent', border: `1px solid ${C.line}`, color: C.faint, borderRadius: 7, fontSize: 11, padding: '4px 7px', cursor: 'pointer', fontFamily: SANS }}>
                 ↔ {isCore ? 'parallèle' : 'core'}
               </button>
@@ -1327,7 +1644,7 @@ function SubjectsView({
                   <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>minimum</span>
                   <input type="number" min={0} max={20} value={s.weeklyFloor ?? 0}
                     onChange={(e) => onUpdateSubject(s.id, { weeklyFloor: Math.max(0, Number(e.target.value) || 0) })}
-                    aria-label="plancher hebdo"
+                    aria-label="minimum hebdo"
                     style={{ width: 52, fontFamily: MONO, fontSize: 13, color: C.text, background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 6, padding: '5px 6px' }} />
                   <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>/sem</span>
                 </div>
@@ -1345,31 +1662,33 @@ function SubjectsView({
                 <div>
                   <SectionTitle icon={BookOpen}>Chapitres</SectionTitle>
                   {subChapters.length === 0 && (
-                    <Empty>Aucun chapitre. Ajoute-les ci-dessous, puis règle la maîtrise au curseur.</Empty>
+                    <Empty>Aucun chapitre. Ajoute-les ci-dessous, puis choisis leur niveau de départ.</Empty>
                   )}
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
                     {subChapters.map((c) => {
                       const m = chapterMetrics(c, exams, settings, today);
                       const tcol = thermal(m.priority);
-                      const since = c.lastReviewed ? `il y a ${m.since} j` : 'jamais révisé';
+                      const since = c.lastReviewed
+                        ? (m.since === 0 ? 'revu aujourd’hui' : `revu il y a ${m.since} j`)
+                        : 'jamais révisé';
                       return (
-                        <div key={c.id} style={{ display: 'flex', flexDirection: 'column', gap: 7, padding: 10, background: C.panel2, border: `1px solid ${C.line}`, borderLeft: `3px solid ${tcol}`, borderRadius: 8 }}>
+                        <div key={c.id} className="cad-card" style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 10, background: C.panel2, border: `1px solid ${C.line}`, borderLeft: `3px solid ${tcol}`, borderRadius: 8 }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <MemGauge R={m.R} size={26} />
                             <TextInput value={c.name} onChange={(v) => onUpdateChapter(c.id, { name: v })} ariaLabel="nom du chapitre" />
                             <IconBtn icon={Trash2} danger title="Supprimer le chapitre" onClick={() => onDeleteChapter(c.id)} />
                           </div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>maîtrise</span>
-                            <div style={{ flex: '1 1 140px', minWidth: 120 }}>
-                              <Range value={c.mastery} min={0} max={100} ariaLabel={`maîtrise ${c.name}`} onChange={(v) => onUpdateChapter(c.id, { mastery: Math.round(v) })} />
-                            </div>
-                            <Mono style={{ fontSize: 12, color: C.dim }}>{Math.round(c.mastery)}/100</Mono>
-                            <Mono style={{ fontSize: 11, color: C.faint }}>· {since} · cible {round1(m.ti)} j</Mono>
-                            <Btn variant="bare" style={{ fontSize: 11, color: C.dim }} onClick={() => onUpdateChapter(c.id, { lastReviewed: today })}>
-                              <Check size={12} /> révisé aujourd’hui
-                            </Btn>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', paddingLeft: 34 }}>
+                            <Pencil size={12} color={C.faint} />
+                            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>niveau</span>
+                            <LevelPicker compact current={c.difficulty} onPick={(l) => onSetLevel(c.id, l)} />
+                            <Mono style={{ fontSize: 11, color: C.faint }}>
+                              · {since} · prochaine {m.dueIn <= 0 ? 'auj.' : `dans ~${m.dueIn} j`} · solidité {round1(m.stability)} j
+                            </Mono>
                           </div>
-                          <PriorityReader m={m} compact />
+                          <div style={{ paddingLeft: 34 }}>
+                            <PriorityReader m={m} compact />
+                          </div>
                         </div>
                       );
                     })}
@@ -1462,24 +1781,128 @@ function AddExam({ subjectId, today, onAdd }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- *  Vue 4 — Réglages
- * ------------------------------------------------------------------ */
+/* ================================================================== *
+ *  Vue 4 — Progrès (statistiques dérivées du journal)
+ * ================================================================== */
+
+function ProgressView({ reviewLog, ranked, today }) {
+  // Révisions par jour (30 derniers jours).
+  const days = Array.from({ length: 30 }, (_, i) => addDays(today, i - 29));
+  const byDay = {};
+  for (const r of reviewLog) byDay[r.date] = (byDay[r.date] || 0) + 1;
+  const maxDay = Math.max(1, ...days.map((d) => byDay[d] || 0));
+
+  // Série de jours consécutifs avec au moins une révision.
+  let streak = 0;
+  for (let i = 0; ; i++) {
+    const iso = addDays(today, -i);
+    if (byDay[iso]) streak++;
+    else if (i === 0) continue; // aujourd'hui pas encore fait ne casse pas la série
+    else break;
+    if (i > 3650) break;
+  }
+
+  const reviewed = ranked.filter((c) => c.R != null);
+  const avgR = reviewed.length
+    ? reviewed.reduce((a, c) => a + c.R, 0) / reviewed.length : null;
+  const fresh = ranked.filter((c) => c.urgency < 1).length;
+
+  const gradeCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
+  for (const r of reviewLog) gradeCounts[r.grade] = (gradeCounts[r.grade] || 0) + 1;
+  const totalGrades = Math.max(1, reviewLog.length);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      <SectionTitle icon={TrendingUp}>Progrès</SectionTitle>
+
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <Stat label="série" value={streak} unit={`jour${streak > 1 ? 's' : ''} d’affilée`} tone={streak > 0 ? C.warn : C.faint} />
+        <Stat label="révisions (total)" value={reviewLog.length} unit="notées" tone={C.accent} />
+        <Stat label="mémoire moyenne" value={avgR != null ? `${Math.round(avgR * 100)}%` : '—'}
+          unit={reviewed.length ? `${reviewed.length} chap.` : 'aucun chapitre revu'} tone={avgR != null ? thermal((1 - avgR) * 4) : C.faint} />
+        <Stat label="à jour" value={`${fresh}/${ranked.length}`} unit="chapitres" tone={ranked.length && fresh === ranked.length ? C.good : C.dim} />
+      </div>
+
+      <div>
+        <SectionTitle icon={Activity}>Révisions des 30 derniers jours</SectionTitle>
+        {reviewLog.length === 0 ? (
+          <Empty>Encore aucune révision notée. Après chaque séance, note le chapitre (Oublié · Difficile · Bien · Facile) : tout s’enregistre ici.</Empty>
+        ) : (
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 14 }}>
+            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height: 110 }}>
+              {days.map((d) => {
+                const n = byDay[d] || 0;
+                return (
+                  <div key={d} title={`${fmtShortDate(d)} : ${n} révision${n > 1 ? 's' : ''}`}
+                    style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', height: '100%' }}>
+                    <div className="cad-bar" style={{
+                      height: `${n ? 8 + (n / maxDay) * 92 : 2}%`,
+                      background: n ? (d === today ? C.accent : `${C.accent}88`) : C.line,
+                      borderRadius: '2px 2px 0 0',
+                    }} />
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontFamily: MONO, fontSize: 10.5, color: C.faint }}>
+              <span>{fmtShortDate(days[0])}</span>
+              <span>aujourd’hui</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {reviewLog.length > 0 && (
+        <div>
+          <SectionTitle icon={Check}>Répartition des notes</SectionTitle>
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {[1, 2, 3, 4].map((g) => {
+              const G = GRADES[g];
+              const n = gradeCounts[g] || 0;
+              return (
+                <div key={g} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontFamily: SANS, fontSize: 12, color: G.color, width: 70, fontWeight: 600 }}>{G.label}</span>
+                  <div style={{ flex: 1, height: 9, background: C.inset, borderRadius: 5, overflow: 'hidden', border: `1px solid ${C.line}` }}>
+                    <div className="cad-bar" style={{ width: `${(n / totalGrades) * 100}%`, height: '100%', background: G.color, opacity: .75 }} />
+                  </div>
+                  <Mono style={{ fontSize: 11, color: C.dim, width: 56, textAlign: 'right' }}>
+                    {n} · {Math.round((n / totalGrades) * 100)}%
+                  </Mono>
+                </div>
+              );
+            })}
+            <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint, marginTop: 4 }}>
+              Beaucoup de « Facile » ? Espace davantage (baisse la rétention cible). Beaucoup d’« Oublié » ? Resserre (monte-la).
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ================================================================== *
+ *  Vue 5 — Réglages
+ * ================================================================== */
 
 const SLIDERS = [
   { key: 'requestRetention', label: 'Rétention cible', min: 0.8, max: 0.97, step: 0.01, fmt: (v) => `${Math.round(v * 100)} %`, help: 'tu revois quand il te reste ce niveau en mémoire — plus haut = plus de révisions' },
   { key: 'subjectsPerDay', label: 'Matières par jour', min: 1, max: 6, step: 1, unit: '', help: 'ta capacité quotidienne' },
   { key: 'sessionHours', label: 'Durée d’une séance', min: 1, max: 4, step: 0.5, unit: ' h', help: 'temps par matière' },
   { key: 'minutesPerChapter', label: 'Minutes par chapitre', min: 10, max: 60, step: 5, unit: ' min', help: 'sert à estimer le nombre de chapitres par séance' },
-  { key: 'minInterval', label: 'Intervalle min', min: 1, max: 7, step: 1, unit: ' j', help: 'stabilité de départ à maîtrise 0' },
-  { key: 'maxInterval', label: 'Intervalle max', min: 7, max: 60, step: 1, unit: ' j', help: 'stabilité de départ à maîtrise 100' },
   { key: 'maxExamPressure', label: 'Pression d’examen max', min: 1, max: 10, step: 0.5, unit: '×', help: 'multiplicateur au jour J' },
   { key: 'pressureHorizon', label: 'Horizon de pression', min: 7, max: 90, step: 1, unit: ' j', help: 'au-delà, l’examen n’influe pas' },
   { key: 'examModeThreshold', label: 'Seuil « examen proche »', min: 3, max: 45, step: 1, unit: ' j', help: 'à partir de combien de jours une UE est signalée' },
 ];
 
-function SettingsView({ settings, state, store, onUpdate, onImport, onReset, today }) {
+const ADVANCED_SLIDERS = [
+  { key: 'minInterval', label: 'Stabilité initiale « Jamais vu »', min: 1, max: 7, step: 1, unit: ' j', help: 'point de départ des nouveaux chapitres' },
+  { key: 'maxInterval', label: 'Stabilité initiale « Solide »', min: 7, max: 60, step: 1, unit: ' j', help: 'point de départ d’un chapitre déjà maîtrisé' },
+];
+
+function SettingsView({ settings, state, onUpdate, onImport, onReset, today }) {
   const fileRef = useRef(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const exportJSON = () => {
     try {
@@ -1503,22 +1926,34 @@ function SettingsView({ settings, state, store, onUpdate, onImport, onReset, tod
     e.target.value = '';
   };
 
-  // Aperçu live de la courbe du multiplicateur.
+  // Aperçus live.
   const N = 24;
   const bars = Array.from({ length: N + 1 }, (_, i) => {
     const j = Math.round((settings.pressureHorizon * i) / N);
     return { j, mult: examMultiplier(j, settings) };
   });
-  const ti = (m) => round1(targetInterval(m, settings));
-
-  // Aperçu de la courbe d'oubli pour une stabilité type (maîtrise 50).
-  const sampleS = targetInterval(50, settings);
+  const sampleS = targetInterval(66, settings); // niveau « Moyen »
   const dueAt = optimalInterval(sampleS, settings.requestRetention);
   const fSpan = Math.max(dueAt * 1.9, sampleS * 1.6, 4);
   const fBars = Array.from({ length: 21 }, (_, i) => {
     const t = (fSpan * i) / 20;
     return { t, R: retrievability(t, sampleS) };
   });
+
+  const renderSlider = (sl) => (
+    <div key={sl.key}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 4 }}>
+        <span style={{ fontFamily: SANS, fontSize: 13, color: C.text }}>{sl.label}</span>
+        <Mono style={{ marginLeft: 'auto', fontSize: 14, color: C.accent }}>
+          {sl.fmt ? sl.fmt(settings[sl.key]) : `${settings[sl.key]}${sl.unit}`}
+        </Mono>
+      </div>
+      <Range value={settings[sl.key]} min={sl.min} max={sl.max} step={sl.step}
+        ariaLabel={sl.label}
+        onChange={(v) => onUpdate(sl.key, v)} />
+      <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint, marginTop: 3 }}>{sl.help}</div>
+    </div>
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -1530,7 +1965,7 @@ function SettingsView({ settings, state, store, onUpdate, onImport, onReset, tod
             onChange={(v) => onUpdate('simpleMode', v === 'simple')}
             options={[{ value: 'simple', label: 'Simple' }, { value: 'full', label: 'Détaillé' }]} />
           <span style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, flex: '1 1 240px' }}>
-            Simple = juste quoi faire + « J’ai travaillé ». Détaillé = chiffres et maîtrise toujours visibles.
+            Simple = jauge, raison et notation. Détaillé = chiffres du moteur toujours visibles.
           </span>
         </div>
       </div>
@@ -1539,23 +1974,27 @@ function SettingsView({ settings, state, store, onUpdate, onImport, onReset, tod
 
       <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', alignItems: 'flex-start' }}>
         <div style={{ flex: '1 1 320px', minWidth: 280, display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {SLIDERS.map((sl) => (
-            <div key={sl.key}>
-              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 4 }}>
-                <span style={{ fontFamily: SANS, fontSize: 13, color: C.text }}>{sl.label}</span>
-                <Mono style={{ marginLeft: 'auto', fontSize: 14, color: C.accent }}>
-                  {sl.fmt ? sl.fmt(settings[sl.key]) : `${settings[sl.key]}${sl.unit}`}
-                </Mono>
+          {SLIDERS.map(renderSlider)}
+
+          <div>
+            <Btn variant="bare" onClick={() => setShowAdvanced((v) => !v)} style={{ color: C.dim, fontSize: 12, paddingLeft: 0 }}>
+              <ChevronRight size={14} style={{ transition: 'transform .22s var(--ease)', transform: showAdvanced ? 'rotate(90deg)' : 'none' }} />
+              réglages avancés
+            </Btn>
+            <div className={`cad-collapse${showAdvanced ? ' open' : ''}`}>
+              <div className="cad-collapse-in" {...(showAdvanced ? {} : { inert: '' })}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 14, paddingTop: 10 }}>
+                  {ADVANCED_SLIDERS.map(renderSlider)}
+                  <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>
+                    Le moteur FSRS ajuste ensuite la stabilité et la difficulté de chaque
+                    chapitre à partir de tes notes (Oublié · Difficile · Bien · Facile).
+                  </div>
+                </div>
               </div>
-              <Range value={settings[sl.key]} min={sl.min} max={sl.max} step={sl.step}
-                ariaLabel={sl.label}
-                onChange={(v) => onUpdate(sl.key, v)} />
-              <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint, marginTop: 3 }}>{sl.help}</div>
             </div>
-          ))}
+          </div>
         </div>
 
-        {/* Aperçu courbe + intervalle cible */}
         <div style={{ flex: '1 1 320px', minWidth: 280 }}>
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 14 }}>
             <div style={{ fontFamily: SANS, fontSize: 12, color: C.dim, marginBottom: 10 }}>
@@ -1588,7 +2027,7 @@ function SettingsView({ settings, state, store, onUpdate, onImport, onReset, tod
 
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 14, marginTop: 12 }}>
             <div style={{ fontFamily: SANS, fontSize: 12, color: C.dim, marginBottom: 10 }}>
-              Courbe d’oubli & moment de révision
+              Courbe d’oubli &amp; moment de révision
             </div>
             <div style={{ position: 'relative', display: 'flex', alignItems: 'flex-end', gap: 2, height: 96 }}>
               {fBars.map((b, i) => (
@@ -1604,19 +2043,13 @@ function SettingsView({ settings, state, store, onUpdate, onImport, onReset, tod
               }} />
             </div>
             <div style={{ fontFamily: MONO, fontSize: 11, color: C.dim, marginTop: 8 }}>
-              révision visée à ~{Math.round(dueAt)} j (mémoire {Math.round(settings.requestRetention * 100)}%),
-              stabilité {round1(sampleS)} j
-            </div>
-            <div style={{ display: 'flex', gap: 14, marginTop: 8, fontFamily: MONO, fontSize: 12, color: C.faint }}>
-              <span>stab. départ — m0 <b style={{ color: C.text }}>{ti(0)} j</b></span>
-              <span>m50 <b style={{ color: C.text }}>{ti(50)} j</b></span>
-              <span>m100 <b style={{ color: C.text }}>{ti(100)} j</b></span>
+              révision visée à ~{Math.round(dueAt)} j (mémoire {Math.round(settings.requestRetention * 100)} %),
+              solidité {round1(sampleS)} j (niveau « Moyen »)
             </div>
           </div>
         </div>
       </div>
 
-      {/* Sauvegarde / données */}
       <div>
         <SectionTitle icon={Download}>Données &amp; sauvegarde</SectionTitle>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -1628,6 +2061,7 @@ function SettingsView({ settings, state, store, onUpdate, onImport, onReset, tod
         <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, marginTop: 10, lineHeight: 1.5, maxWidth: 620 }}>
           Tout est stocké localement sur cet appareil (une seule clé <Mono color={C.dim}>{STORAGE_KEY}</Mono>),
           avec repli en mémoire si le stockage est indisponible — rien n’est envoyé sur un serveur.
+          Les données de l’ancienne version sont migrées automatiquement.
           Exporte de temps en temps : c’est ta seule sauvegarde.
         </div>
       </div>
