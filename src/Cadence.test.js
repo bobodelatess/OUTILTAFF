@@ -17,6 +17,8 @@ import {
   annalesModeFor,
   reasonPhrase,
   migrateV1,
+  examReadiness,
+  pruneBackups,
   daysBetween,
   addDays,
 } from './Cadence.jsx';
@@ -242,6 +244,49 @@ describe('annalesModeFor', () => {
   it('inactif au-delà du seuil', () => {
     const exams = [{ id: 'e', subjectId: 's', name: 'CC', date: EXAM_FAR, chapterIds: [] }];
     expect(annalesModeFor('s', exams, S, TODAY)).toBeNull();
+  });
+});
+
+describe('examReadiness — mémoire prévue le jour J', () => {
+  const EXAM_5D = addDays(TODAY, 5);
+  it('chapitre S=10 revu il y a 5 j, examen dans 5 j -> ~90 % prévu', () => {
+    const exam = { id: 'e', subjectId: 's', name: 'CC', date: EXAM_5D, chapterIds: ['c1'] };
+    const chapters = [{ id: 'c1', subjectId: 's', stability: 10, difficulty: 5, lastReviewed: FIVE_AGO }];
+    const r = examReadiness(exam, chapters, S, TODAY);
+    expect(r.days).toBe(5);
+    expect(r.avgR).toBeCloseTo(0.9, 3); // 10 j écoulés le jour J sur S=10
+    expect(r.weak).toBe(0);
+  });
+  it('chapitre jamais révisé -> fragile, trié en premier', () => {
+    const exam = { id: 'e', subjectId: 's', name: 'CC', date: EXAM_5D, chapterIds: ['c1', 'c2'] };
+    const chapters = [
+      { id: 'c1', subjectId: 's', name: 'ok', stability: 30, difficulty: 4, lastReviewed: FIVE_AGO },
+      { id: 'c2', subjectId: 's', name: 'neuf', stability: 2, difficulty: 8.5, lastReviewed: null },
+    ];
+    const r = examReadiness(exam, chapters, S, TODAY);
+    expect(r.per[0].chapter.id).toBe('c2');
+    expect(r.per[0].projR).toBeLessThan(0.7);
+    expect(r.weak).toBe(1);
+  });
+  it('null si épreuve passée ou sans chapitre couvert', () => {
+    const past = { id: 'e', subjectId: 's', name: 'CC', date: addDays(TODAY, -1), chapterIds: ['c1'] };
+    const empty = { id: 'e2', subjectId: 's', name: 'CC', date: EXAM_5D, chapterIds: [] };
+    const chapters = [{ id: 'c1', subjectId: 's', stability: 10, difficulty: 5, lastReviewed: FIVE_AGO }];
+    expect(examReadiness(past, chapters, S, TODAY)).toBeNull();
+    expect(examReadiness(empty, chapters, S, TODAY)).toBeNull();
+  });
+});
+
+describe('pruneBackups — 7 jours glissants', () => {
+  it('garde les 7 plus récentes (<= aujourd’hui)', () => {
+    const backups = {};
+    for (let i = 0; i < 10; i++) backups[addDays(TODAY, -i)] = { i };
+    backups[addDays(TODAY, 3)] = { future: true }; // date future ignorée
+    const out = pruneBackups(backups, TODAY, 7);
+    const keys = Object.keys(out).sort();
+    expect(keys.length).toBe(7);
+    expect(keys[keys.length - 1]).toBe(TODAY);
+    expect(keys[0]).toBe(addDays(TODAY, -6));
   });
 });
 

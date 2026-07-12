@@ -53,17 +53,27 @@ annulable).
 ## Les cinq vues
 
 1. **Aujourd'hui** — anneau de progression, séances par matière, cartes avec
-   **jauge mémoire** (R %), raison en clair, notation à 4 boutons, annulation
-   (toast), détails repliables, minimums hebdo protégés.
-2. **Calendrier** — épreuves, fenêtres « examen proche » ombrées, **prévision
-   de charge** (chapitres à échéance par jour, dans la grille et sur 14 j).
+   **jauge mémoire** (R %), raison en clair, notation à 4 boutons (avec
+   **aperçu de l'intervalle** au survol), **reporter** (le plan se recomplète),
+   annulation (toast), **clavier** (Tab puis 1–4), minimums hebdo protégés.
+2. **Calendrier** — épreuves avec **mémoire prévue le jour J** (projection
+   FSRS par chapitre couvert, chapitres fragiles signalés), fenêtres « examen
+   proche » ombrées, **prévision de charge** (grille + 14 j).
 3. **Matières** — CRUD des UE, chapitres (niveau nommé, jauge, prochaine
    échéance) et épreuves (date + chapitres couverts).
-4. **Progrès** — série de jours, total de révisions, mémoire moyenne,
-   chapitres à jour, histogramme 30 j, répartition des notes.
+4. **Progrès** — série de jours, total de révisions, mémoire moyenne (globale
+   et **par matière**), chapitres à jour, histogramme 30 j, répartition des
+   notes.
 5. **Réglages** — rétention cible, capacité, pression d'examen, avancé
    (stabilités initiales), aperçus live (courbe d'oubli + multiplicateur),
-   export / import / réinitialisation.
+   export / import / réinitialisation, **sauvegardes automatiques
+   restaurables** (7 jours glissants).
+
+## PWA
+
+CADENCE est **installable** (« Ajouter à l'écran d'accueil ») et fonctionne
+**hors-ligne** (service worker : réseau d'abord pour les mises à jour, cache
+en secours ; assets en cache d'abord).
 
 ## Lancer
 
