@@ -19,6 +19,9 @@ import {
   migrateV1,
   examReadiness,
   pruneBackups,
+  isWorthReviewing,
+  cruiseLoad,
+  observedRetention,
   daysBetween,
   addDays,
 } from './Cadence.jsx';
@@ -274,6 +277,52 @@ describe('examReadiness — mémoire prévue le jour J', () => {
     const chapters = [{ id: 'c1', subjectId: 's', stability: 10, difficulty: 5, lastReviewed: FIVE_AGO }];
     expect(examReadiness(past, chapters, S, TODAY)).toBeNull();
     expect(examReadiness(empty, chapters, S, TODAY)).toBeNull();
+  });
+});
+
+describe('isWorthReviewing — plan honnête (jamais de remplissage)', () => {
+  it('trop tôt (urgence < 0.75, pas d’examen) -> non', () => {
+    expect(isWorthReviewing({ urgency: 0.5, factor: 1 })).toBe(false);
+  });
+  it('proche de l’échéance -> oui', () => {
+    expect(isWorthReviewing({ urgency: 0.8, factor: 1 })).toBe(true);
+  });
+  it('pas urgent mais examen qui pousse -> oui', () => {
+    expect(isWorthReviewing({ urgency: 0.3, factor: 2.4 })).toBe(true);
+  });
+});
+
+describe('cruiseLoad — charge de croisière', () => {
+  it('Σ 1/intervalle : 2 chapitres S=10 à 90 % -> 0.2 chap./jour', () => {
+    const chapters = [
+      { stability: 10, difficulty: 5 },
+      { stability: 10, difficulty: 5 },
+    ];
+    expect(cruiseLoad(chapters, S)).toBeCloseTo(0.2, 5);
+  });
+  it('une rétention plus exigeante augmente la charge', () => {
+    const chapters = [{ stability: 10, difficulty: 5 }];
+    expect(cruiseLoad(chapters, { ...S, requestRetention: 0.95 }))
+      .toBeGreaterThan(cruiseLoad(chapters, { ...S, requestRetention: 0.85 }));
+  });
+});
+
+describe('observedRetention — calibration modèle vs réalité', () => {
+  it('taux de réussite (note > Oublié) et prédiction moyenne', () => {
+    const mk = (grade) => ({
+      grade, date: TODAY,
+      before: { stability: 10, difficulty: 5, lastReviewed: addDays(TODAY, -10) },
+    });
+    const log = [mk(3), mk(3), mk(1), mk(4)];
+    const r = observedRetention(log);
+    expect(r.n).toBe(4);
+    expect(r.rate).toBeCloseTo(0.75, 5);
+    expect(r.predicted).toBeCloseTo(0.9, 4); // R(10 j, S=10) = 0.9
+  });
+  it('ignore les premières révisions (pas d’historique)', () => {
+    const log = [{ grade: 3, date: TODAY, before: { stability: 2, difficulty: 8, lastReviewed: null } }];
+    expect(observedRetention(log).n).toBe(0);
+    expect(observedRetention(log).rate).toBeNull();
   });
 });
 

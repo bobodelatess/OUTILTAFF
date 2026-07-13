@@ -50,6 +50,15 @@ remontent naturellement les jours suivants. Le plan du jour est **stable** :
 noter un chapitre ne réorganise pas la liste (il passe simplement à « fait »,
 annulable).
 
+Le plan est aussi **honnête** : un chapitre n'y entre que s'il vaut la peine
+d'être revu aujourd'hui (≥ 75 % de l'intervalle écoulé, ou poussé par un
+examen). Rien d'utile → « Rien d'urgent aujourd'hui », plutôt que du
+remplissage contre-productif. En cas de retard supérieur à la capacité
+quotidienne, une **alerte de surcharge** chiffre le rattrapage et propose des
+leviers ; la **charge de croisière** (Σ 1/intervalle) s'affiche en direct sous
+le curseur de rétention ; la **rétention observée** (Progrès) confronte le
+modèle à tes résultats réels.
+
 ## Les cinq vues
 
 1. **Aujourd'hui** — anneau de progression, séances par matière, cartes avec

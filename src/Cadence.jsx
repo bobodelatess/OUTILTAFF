@@ -300,6 +300,38 @@ export function reasonPhrase(m) {
   return { text: inDays <= 1 ? 'Pas urgent' : `Pas urgent · à revoir dans ~${inDays} j`, tone: 'calm' };
 }
 
+// Pertinence : vaut-il la peine de réviser ce chapitre AUJOURD'HUI ?
+// Réviser trop tôt consolide peu (effet d'espacement) et gaspille du temps :
+// on ne planifie un chapitre que s'il approche de son échéance (≥ 75 % de
+// l'intervalle écoulé) ou si un examen le pousse réellement.
+export function isWorthReviewing(m) {
+  return m.urgency >= 0.75 || m.factor > 1.15;
+}
+
+// Charge de croisière : nombre moyen de chapitres/jour qu'exige la rétention
+// cible en régime établi (Σ 1/intervalle). Sert d'aperçu au réglage.
+export function cruiseLoad(chapters, s) {
+  let sum = 0;
+  for (const c of chapters) {
+    sum += 1 / Math.max(1, optimalInterval(c.stability, s.requestRetention));
+  }
+  return sum;
+}
+
+// Calibration : rétention observée (taux de réussite, note > Oublié) vs
+// prévue par le modèle au moment de chaque révision. Ignore les premières
+// révisions (pas d'historique -> pas de prédiction honnête).
+export function observedRetention(reviewLog) {
+  const entries = (reviewLog || []).filter((r) => r.before && r.before.lastReviewed);
+  if (!entries.length) return { n: 0, rate: null, predicted: null };
+  let ok = 0, pred = 0;
+  for (const r of entries) {
+    if (r.grade > 1) ok++;
+    pred += retrievability(daysBetween(r.before.lastReviewed, r.date), r.before.stability);
+  }
+  return { n: entries.length, rate: ok / entries.length, predicted: pred / entries.length };
+}
+
 // Plan du jour sous contrainte de capacité : les `subjectsPerDay` matières
 // (core) les plus sous pression, chacune avec ses chapitres prioritaires.
 export function planDay(ranked, subjects, subjectsPerDay, chaptersPerSession) {
@@ -1190,11 +1222,20 @@ export default function Cadence() {
 
   const overdue = ranked.filter((c) => c.urgency >= 1 && !doneByChapter[c.id]).length;
   const chaptersPerSession = Math.max(1, Math.round((settings.sessionHours * 60) / settings.minutesPerChapter));
+  const dailyCapacity = chaptersPerSession * settings.subjectsPerDay;
+  // Plan honnête : seulement les chapitres qui valent la peine aujourd'hui
+  // (proches de l'échéance ou poussés par un examen) — jamais de remplissage.
+  const worthToday = useMemo(
+    () => planningRanked.filter((c) => isWorthReviewing(c) || doneByChapter[c.id]),
+    [planningRanked, doneByChapter]);
   const sessions = useMemo(
-    () => planDay(planningRanked, subjects, settings.subjectsPerDay, chaptersPerSession),
-    [planningRanked, subjects, settings.subjectsPerDay, chaptersPerSession]);
+    () => planDay(worthToday, subjects, settings.subjectsPerDay, chaptersPerSession),
+    [worthToday, subjects, settings.subjectsPerDay, chaptersPerSession]);
   const plannedCount = sessions.reduce((a, s) => a + s.chapters.length, 0);
   const doneCount = sessions.reduce((a, s) => a + s.chapters.filter((c) => doneByChapter[c.id]).length, 0);
+  const hasCoreChapters = useMemo(
+    () => chapters.some((c) => subjectById[c.subjectId]?.type === 'core'),
+    [chapters, subjectById]);
 
   const annalesBanners = useMemo(() => coreSubjects
     .map((s) => ({ subject: s, info: annalesModeFor(s.id, exams, settings, today) }))
@@ -1262,6 +1303,7 @@ export default function Cadence() {
               annalesBanners={annalesBanners} sessions={sessions} ranked={ranked}
               plannedCount={plannedCount} doneCount={doneCount} doneByChapter={doneByChapter}
               skippedToday={skippedToday} readinessByExam={readinessByExam}
+              dailyCapacity={dailyCapacity} hasCoreChapters={hasCoreChapters}
               parallelSubjects={parallelSubjects} parallelLog={parallelLog} settings={settings}
               onGrade={gradeChapter} onUndo={undoReview} onSkip={skipChapter} onUnskip={unskipToday}
               onAdjustParallel={adjustParallel}
@@ -1286,10 +1328,11 @@ export default function Cadence() {
           )}
           {tab === 'progress' && (
             <ProgressView reviewLog={reviewLog} ranked={ranked} today={today}
-              subjects={subjects} />
+              subjects={subjects} settings={settings} />
           )}
           {tab === 'settings' && (
-            <SettingsView settings={settings} state={state} onUpdate={updateSetting}
+            <SettingsView settings={settings} state={state} chapters={chapters}
+              onUpdate={updateSetting}
               onImport={importState} onReset={resetAll} today={today}
               listBackups={listBackups} onRestore={restoreBackup} />
           )}
@@ -1316,7 +1359,7 @@ export default function Cadence() {
 function TodayView({
   today, overdue, nextExam, subjectById, annalesBanners, sessions, ranked,
   plannedCount, doneCount, doneByChapter, skippedToday, readinessByExam,
-  parallelSubjects, parallelLog, settings,
+  dailyCapacity, hasCoreChapters, parallelSubjects, parallelLog, settings,
   onGrade, onUndo, onSkip, onUnskip, onAdjustParallel, onGoSubjects, onSetSimpleMode,
 }) {
   const [showAll, setShowAll] = useState(false);
@@ -1369,6 +1412,23 @@ function TodayView({
         </div>
       ))}
 
+      {/* Alerte de surcharge : le retard dépasse la capacité quotidienne */}
+      {overdue > dailyCapacity && (
+        <div className="cad-in cad-card" style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '10px 13px', borderRadius: 9,
+          background: 'rgba(248,113,113,.08)', border: '1px solid rgba(248,113,113,.35)', flexWrap: 'wrap',
+        }}>
+          <AlertTriangle size={16} color={C.bad} />
+          <span style={{ fontFamily: SANS, fontSize: 13 }}>
+            <b>Surcharge</b> · {overdue} chapitres en retard pour ~{dailyCapacity}/jour de capacité
+            (≈ {Math.ceil(overdue / Math.max(1, dailyCapacity))} j pour résorber)
+          </span>
+          <span style={{ fontFamily: SANS, fontSize: 11.5, color: C.dim, marginLeft: 'auto' }}>
+            options : +1 matière/jour quelque temps, ou rétention cible à 85 %
+          </span>
+        </div>
+      )}
+
       {/* Plan du jour */}
       <div>
         <SectionTitle icon={Activity} right={
@@ -1394,7 +1454,23 @@ function TodayView({
             </div>
           </Empty>
         ) : sessions.length === 0 ? (
-          <Empty>Tes chapitres sont dans des matières « parallèle ». Passe une UE en « core » (onglet Matières) pour qu’elle entre dans le plan.</Empty>
+          hasCoreChapters ? (
+            <div className="cad-in" style={{
+              display: 'flex', alignItems: 'center', gap: 12, padding: '18px 16px',
+              border: `1px solid rgba(52,211,153,.35)`, borderRadius: 9, background: 'rgba(52,211,153,.06)',
+            }}>
+              <Check size={18} color={C.good} />
+              <div style={{ fontFamily: SANS, fontSize: 13.5, lineHeight: 1.5 }}>
+                <b style={{ color: C.good }}>Rien d’urgent aujourd’hui — tout est à jour.</b>
+                <div style={{ color: C.dim, fontSize: 12.5 }}>
+                  Réviser en avance consolide peu : profites-en pour avancer sur les nouvelles notions.
+                  La file se remplira toute seule quand des chapitres approcheront de leur échéance.
+                </div>
+              </div>
+            </div>
+          ) : (
+            <Empty>Tes chapitres sont dans des matières « parallèle ». Passe une UE en « core » (onglet Matières) pour qu’elle entre dans le plan.</Empty>
+          )
         ) : (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 14px', flexWrap: 'wrap' }}>
@@ -1873,8 +1949,17 @@ function SubjectsView({
                                 </div>
                               </div>
                               <div>
-                                <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint, marginBottom: 5 }}>
-                                  Chapitres couverts ({(e.chapterIds || []).length})
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: SANS, fontSize: 11, color: C.faint, marginBottom: 5 }}>
+                                  <span>Chapitres couverts ({(e.chapterIds || []).length})</span>
+                                  <button type="button" onClick={() => onUpdateExam(e.id, { chapterIds: subChapters.map((c) => c.id) })}
+                                    style={{ fontFamily: SANS, fontSize: 10.5, color: C.accent, background: 'transparent', border: 'none', cursor: 'pointer', padding: '1px 4px' }}>
+                                    tout
+                                  </button>
+                                  <span style={{ color: C.line2 }}>·</span>
+                                  <button type="button" onClick={() => onUpdateExam(e.id, { chapterIds: [] })}
+                                    style={{ fontFamily: SANS, fontSize: 10.5, color: C.dim, background: 'transparent', border: 'none', cursor: 'pointer', padding: '1px 4px' }}>
+                                    aucun
+                                  </button>
                                 </div>
                                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                                   {subChapters.map((c) => {
@@ -1939,7 +2024,7 @@ function AddExam({ subjectId, today, onAdd }) {
  *  Vue 4 — Progrès (statistiques dérivées du journal)
  * ================================================================== */
 
-function ProgressView({ reviewLog, ranked, today, subjects }) {
+function ProgressView({ reviewLog, ranked, today, subjects, settings }) {
   // Révisions par jour (30 derniers jours).
   const days = Array.from({ length: 30 }, (_, i) => addDays(today, i - 29));
   const byDay = {};
@@ -1960,6 +2045,7 @@ function ProgressView({ reviewLog, ranked, today, subjects }) {
   const avgR = reviewed.length
     ? reviewed.reduce((a, c) => a + c.R, 0) / reviewed.length : null;
   const fresh = ranked.filter((c) => c.urgency < 1).length;
+  const calib = observedRetention(reviewLog);
 
   const gradeCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
   for (const r of reviewLog) gradeCounts[r.grade] = (gradeCounts[r.grade] || 0) + 1;
@@ -1984,7 +2070,18 @@ function ProgressView({ reviewLog, ranked, today, subjects }) {
         <Stat label="mémoire moyenne" value={avgR != null ? `${Math.round(avgR * 100)}%` : '—'}
           unit={reviewed.length ? `${reviewed.length} chap.` : 'aucun chapitre revu'} tone={avgR != null ? thermal((1 - avgR) * 4) : C.faint} />
         <Stat label="à jour" value={`${fresh}/${ranked.length}`} unit="chapitres" tone={ranked.length && fresh === ranked.length ? C.good : C.dim} />
+        {calib.n >= 5 && (
+          <Stat label="rétention observée" value={`${Math.round(calib.rate * 100)}%`}
+            unit={`cible ${Math.round((settings?.requestRetention ?? 0.9) * 100)} % · ${calib.n} rév.`}
+            tone={calib.rate >= (settings?.requestRetention ?? 0.9) - 0.05 ? C.good : C.warn} />
+        )}
       </div>
+      {calib.n >= 5 && calib.rate < (settings?.requestRetention ?? 0.9) - 0.07 && (
+        <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.warn }}>
+          Tu retiens moins que la cible : resserre les révisions (monte la rétention cible)
+          ou allège les chapitres trop denses en les découpant.
+        </div>
+      )}
 
       <div>
         <SectionTitle icon={Activity}>Révisions des 30 derniers jours</SectionTitle>
@@ -2091,10 +2188,14 @@ const ADVANCED_SLIDERS = [
   { key: 'maxInterval', label: 'Stabilité initiale « Solide »', min: 7, max: 60, step: 1, unit: ' j', help: 'point de départ d’un chapitre déjà maîtrisé' },
 ];
 
-function SettingsView({ settings, state, onUpdate, onImport, onReset, today, listBackups, onRestore }) {
+function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, today, listBackups, onRestore }) {
   const fileRef = useRef(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const backups = listBackups ? listBackups() : [];
+
+  // Compromis rétention <-> travail, calculé sur TES chapitres (live).
+  const load = chapters?.length ? cruiseLoad(chapters, settings) : null;
+  const dailyCap = Math.max(1, Math.round((settings.sessionHours * 60) / settings.minutesPerChapter)) * settings.subjectsPerDay;
 
   const exportJSON = () => {
     try {
@@ -2144,6 +2245,16 @@ function SettingsView({ settings, state, onUpdate, onImport, onReset, today, lis
         ariaLabel={sl.label}
         onChange={(v) => onUpdate(sl.key, v)} />
       <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint, marginTop: 3 }}>{sl.help}</div>
+      {sl.key === 'requestRetention' && load != null && (
+        <div style={{
+          fontFamily: MONO, fontSize: 11.5, marginTop: 5,
+          color: load > dailyCap ? C.warn : C.good,
+        }}>
+          charge de croisière ≈ {load < 0.95 ? round1(load) : Math.round(load)} chap./jour
+          <span style={{ color: C.faint }}> · ta capacité : {dailyCap}/jour</span>
+          {load > dailyCap ? ' — trop haut, baisse la rétention' : ''}
+        </div>
+      )}
     </div>
   );
 
