@@ -22,14 +22,14 @@ import {
 import {
   STORAGE_KEY, LEGACY_KEY, BACKUP_KEY,
   DEFAULT_SETTINGS, GRADES, EVIDENCE, gradeLabel, LEVELS, IMPORTANCE,
-  CHAPTER_SIZES, INITIAL_URGENCY,
+  AXES, AXIS_KEYS, AXIS_MINUTES, MINUTE_CHOICES, evidenceAxis, closestLevel,
   clamp, uid, parseISO, isoOf, todayISO, daysBetween, addDays, mondayOf,
-  retrievability, optimalInterval, applyGrade, targetInterval, levelSeed,
-  closestLevel, examMultiplier, chapterMetrics, nextFutureExam,
-  annalesModeFor, reasonPhrase, isWorthReviewing,
-  defaultDailyMinutes, todayCapacityMinutes, chapterMinutes, planDay,
+  retrievability, optimalInterval, applyEvidence, targetInterval, levelSeed,
+  examMultiplier, chapterMetrics, recallInfo, practiceRisk, nextFutureExam,
+  annalesModeFor, reasonPhrase, isWorthReviewing, axisMinutes, axisSummary,
+  defaultDailyMinutes, todayCapacityMinutes, planDay,
   cruiseLoad, observedRetention, forecastDue, examReadiness,
-  pruneBackups, validateImport, normalize, migrateV1, seedState,
+  pruneBackups, validateImport, normalize, migrateV1, seedState, newChapter,
   stripChapterIds, recalibrateState, makeStore,
 } from './engine.js';
 
@@ -301,20 +301,21 @@ function ThermalLegend() {
 
 function PriorityReader({ m, compact }) {
   const col = thermal(m.priority);
+  const axisLabel = AXES[m.dominant]?.label.toLowerCase() || 'risque';
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: compact ? 8 : 10, flexWrap: 'wrap',
       fontFamily: MONO, fontSize: compact ? 11 : 12,
     }}>
-      <span title="priorité = urgence × multiplicateur d'examen" style={{
+      <span title="priorité = risque de l'axe dominant × pression d'examen" style={{
         color: col, fontWeight: 700, fontSize: compact ? 13 : 15,
       }}>
         ▲ {f2(m.priority)}
       </span>
       <span style={{ color: C.dim }}>
-        {f2(m.urgency)}<span style={{ color: C.faint }}> urg</span>
+        {f2(m.baseRisk)}<span style={{ color: C.faint }}> {axisLabel}</span>
         {' × '}
-        {f2(m.factor)}<span style={{ color: C.faint }}> mult</span>
+        {f2(m.factor)}<span style={{ color: C.faint }}> exam</span>
       </span>
       {m.exam ? (
         <span style={{ color: C.warn }} title={`épreuve : ${m.exam.name}`}>
@@ -344,18 +345,17 @@ function ReasonLine({ m, size = 13.5 }) {
  *  Notation (4 boutons) & carte de chapitre
  * ------------------------------------------------------------------ */
 
-// Les libellés des 4 issues dépendent du type de preuve (rappel / exercice /
-// annale). La note décrit le RÉSULTAT du test — pas le temps passé ni
-// l'impression d'avoir compris.
-function GradeButtons({ onGrade, previewFor, evidence = 'recall', compact }) {
-  const ev = EVIDENCE[evidence] || EVIDENCE.recall;
+// Les libellés des 4 issues dépendent de l'axe (rappel / exercice / annale).
+// La note décrit le RÉSULTAT d'un test sans correction sous les yeux — pas le
+// temps passé ni l'impression d'avoir compris.
+function GradeButtons({ onGrade, titleFor, evidenceType = 'recall', compact }) {
+  const ev = EVIDENCE[evidenceType] || EVIDENCE.recall;
   return (
     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
       {[1, 2, 3, 4].map((g) => {
         const G = GRADES[g];
         const label = ev.grades[g];
-        const days = previewFor ? previewFor(g) : null;
-        const title = days != null ? `résultat du test → retester dans ~${days} j` : 'résultat du test';
+        const title = titleFor ? titleFor(g) : 'résultat du test';
         return (
           <button key={g} type="button" onClick={() => onGrade(g)}
             title={title}
@@ -374,91 +374,167 @@ function GradeButtons({ onGrade, previewFor, evidence = 'recall', compact }) {
   );
 }
 
+// Petit sélecteur d'axe (rappel / exercice / problème) DANS une carte.
+// Chaque axe montre son état (rappel estimé ou maîtrise observée, ou « non
+// testé ») et sa durée. Un axe déjà noté aujourd'hui est coché.
+function AxisPicker({ ch, axis, onPick, doneAxes }) {
+  return (
+    <div role="group" aria-label="Axe à travailler" style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+      {AXIS_KEYS.map((ax) => {
+        const on = ax === axis;
+        const done = doneAxes.has(ax);
+        const info = ch.axisInfo[ax];
+        const col = info.pct != null ? thermal((1 - info.pct / 100) * 4) : C.faint;
+        return (
+          <button key={ax} type="button" onClick={() => onPick(ax)}
+            title={`${AXES[ax].long} · ${info.tested ? `${info.pct} %` : 'non testé'} · ~${fmtMinutes(info.minutes)}`}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+              fontFamily: SANS, fontSize: 11.5, padding: '4px 9px', borderRadius: 999,
+              border: `1px solid ${on ? 'rgba(94,169,255,.55)' : C.line2}`,
+              background: on ? 'rgba(94,169,255,.14)' : 'transparent',
+              color: on ? '#dbeafe' : C.dim,
+            }}>
+            {done && <Check size={11} color={C.good} />}
+            {AXES[ax].label}
+            <span style={{ fontFamily: MONO, fontSize: 10.5, color: info.tested ? col : C.faint }}>
+              {info.tested ? `${info.pct}%` : '—'}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // Carte d'un chapitre dans le plan du jour.
-// Clavier : Tab pour sélectionner la carte, 1–4 pour noter.
-function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, evidence, onGrade, onUndo, onSkip }) {
+// Trois axes indépendants : on choisit l'axe (défaut = axe dominant), on note
+// le RÉSULTAT du test ; seul cet axe est modifié. On peut noter plusieurs axes
+// le même jour. Clavier : Tab pour sélectionner la carte, 1–4 pour noter.
+function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrade, onUndo, onSkip }) {
   const [expanded, setExpanded] = useState(false);
+  const doneEntries = done || [];
+  const doneAxes = useMemo(
+    () => new Set(doneEntries.map((d) => d.axis || evidenceAxis(d.evidenceType))), [doneEntries]);
+  // Axe par défaut : l'axe dominant, ou le premier axe non encore noté aujourd'hui.
+  const preferred = !doneAxes.has(ch.dominant)
+    ? ch.dominant : (AXIS_KEYS.find((a) => !doneAxes.has(a)) || ch.dominant);
+  const [axis, setAxis] = useState(preferred);
+  // Si l'axe choisi vient d'être noté, avancer vers un axe restant.
+  useEffect(() => {
+    if (doneAxes.has(axis)) {
+      const next = AXIS_KEYS.find((a) => !doneAxes.has(a));
+      if (next) setAxis(next);
+    }
+  }, [doneAxes]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const open = !simpleMode || expanded;
   const tcol = thermal(ch.priority);
-  const sinceLabel = ch.since == null ? 'jamais testé'
-    : ch.since === 0 ? 'testé aujourd’hui' : `testé il y a ${ch.since} j`;
-  const G = done ? GRADES[done.grade] : null;
+  const axisDone = doneAxes.has(axis);
+  const allDone = AXIS_KEYS.every((a) => doneAxes.has(a));
+  const accent = doneEntries.length ? C.good : tcol;
 
-  // Aperçu : où atterrirait la prochaine révision selon la note.
-  const previewFor = (g) => {
-    const r = applyGrade(ch, g, today);
-    return Math.max(1, Math.round(optimalInterval(r.stability, settings.requestRetention)));
+  // Aperçu de l'effet de la note sur l'axe choisi (jours pour le rappel,
+  // maîtrise observée pour les axes pratiques).
+  const titleFor = (g) => {
+    const { after, axis: ax } = applyEvidence(ch.raw, axis, g, today);
+    if (ax === 'recall') {
+      const d = Math.max(1, Math.round(optimalInterval(after.stability, settings.requestRetention)));
+      return `résultat du test → retester le rappel dans ~${d} j`;
+    }
+    return `résultat du test → maîtrise observée ~${Math.round(after.score * 100)} %`;
   };
 
   const onKey = (e) => {
     if (e.target !== e.currentTarget) return;
-    if (!done && ['1', '2', '3', '4'].includes(e.key)) { onGrade(ch.id, Number(e.key)); e.preventDefault(); }
+    if (['1', '2', '3', '4'].includes(e.key) && !axisDone) { onGrade(ch.id, axis, Number(e.key)); e.preventDefault(); }
   };
 
+  const rec = ch.recall; // info rappel : { risk, ti, since, R, dueIn, tested }
+
   return (
-    <div className={`cad-card${done ? ' cad-done' : ''}`} tabIndex={0} onKeyDown={onKey}
-      title={done ? undefined : 'Tab pour sélectionner · touches 1–4 pour noter'}
+    <div className={`cad-card${allDone ? ' cad-done' : ''}`} tabIndex={0} onKeyDown={onKey}
+      title={allDone ? undefined : 'Tab pour sélectionner · touches 1–4 pour noter l’axe choisi'}
       style={{
-      background: C.panel, border: `1px solid ${done ? `${G.color}44` : C.line}`,
-      borderLeft: `3px solid ${done ? G.color : tcol}`,
+      background: C.panel, border: `1px solid ${doneEntries.length ? `${accent}44` : C.line}`,
+      borderLeft: `3px solid ${accent}`,
       borderRadius: 10, padding: 13, display: 'flex', flexDirection: 'column', gap: 9,
-      opacity: done ? 0.82 : 1,
+      opacity: allDone ? 0.82 : 1,
     }}>
-      {/* Quel chapitre + jauge de rappel estimé */}
+      {/* Quel chapitre + jauge de rappel estimé + axe prioritaire */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <Mono style={{ color: C.faint, fontSize: 12, width: 16 }}>{idx + 1}</Mono>
-        <MemGauge R={ch.R} />
+        <MemGauge R={rec.R} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
             <span style={{
               fontFamily: SANS, fontSize: 15.5, color: C.text, fontWeight: 600,
-              textDecoration: done ? 'line-through' : 'none',
-              textDecorationColor: done ? `${G.color}88` : undefined,
+              textDecoration: allDone ? 'line-through' : 'none',
+              textDecorationColor: allDone ? `${accent}88` : undefined,
             }}>{ch.name}</span>
             <span style={{ fontFamily: SANS, fontSize: 11, color: C.dim }}>{subject.name}</span>
           </div>
-          <div style={{ marginTop: 3 }}>
+          <div style={{ marginTop: 3, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <Chip color={C.accent} title={`axe prioritaire : ${AXES[ch.dominant].long}`}>
+              {AXES[ch.dominant].label}
+            </Chip>
             <ReasonLine m={ch} size={12.5} />
           </div>
         </div>
         <Pastille color={subject.color} />
       </div>
 
-      {/* Détails (repliés en mode simple) : chiffres transparents */}
+      {/* Choix de l'axe à travailler + durée estimée de l'axe choisi */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 26, flexWrap: 'wrap' }}>
+        <AxisPicker ch={ch} axis={axis} onPick={setAxis} doneAxes={doneAxes} />
+        <Mono style={{ fontSize: 11, color: C.faint }}>
+          ~{fmtMinutes(ch.axisInfo[axis].minutes)}
+        </Mono>
+      </div>
+
+      {/* Détails (repliés en mode simple) : chiffres transparents, par axe */}
       <div className={`cad-collapse${open ? ' open' : ''}`}>
         <div className="cad-collapse-in" {...(open ? {} : { inert: '' })}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 7, paddingLeft: 26, paddingTop: 4 }}>
             <Mono style={{ color: C.faint, fontSize: 11 }}>
-              {sinceLabel}
-              {ch.R != null ? ` · rappel estimé ~${Math.round(ch.R * 100)} %` : ''}
-              {` · solidité ${round1(ch.stability)} j · difficulté ${round1(ch.difficulty)}/10`}
-            </Mono>
-            <Mono style={{ color: C.faint, fontSize: 11 }}>
-              prochain test {ch.dueIn <= 0 ? 'aujourd’hui' : `dans ~${ch.dueIn} j`} · intervalle visé {Math.round(ch.ti)} j · ~{fmtMinutes(ch.estimatedMinutes ?? 30)}
+              {axis === 'recall' ? (
+                rec.tested
+                  ? `rappel testé il y a ${rec.since} j · estimé ~${Math.round(rec.R * 100)} % · solidité ${round1(ch.raw.recall.stability)} j · prochain test ${rec.dueIn <= 0 ? 'auj.' : `~${rec.dueIn} j`}`
+                  : 'rappel jamais testé'
+              ) : (
+                ch.axisInfo[axis].tested
+                  ? `${AXES[axis].long} : maîtrise observée ~${ch.axisInfo[axis].pct} % · ${ch.raw[axis].attempts} test${ch.raw[axis].attempts > 1 ? 's' : ''}${ch.raw[axis].recentFails ? ` · ${ch.raw[axis].recentFails} échec(s) récent(s)` : ''}`
+                  : `${AXES[axis].long} : jamais testé (score heuristique, pas une probabilité)`
+              )}
             </Mono>
             <PriorityReader m={ch} compact />
           </div>
         </div>
       </div>
 
-      {/* Notation ou état fait */}
+      {/* Notation de l'axe choisi + états déjà faits aujourd'hui */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 26, flexWrap: 'wrap' }}>
-        {done ? (
-          <>
-            <Chip color={G.color} bg={`${G.color}18`} style={{ fontWeight: 700 }}
-              title={EVIDENCE[done.evidenceType]?.label}>
-              <Check size={12} className="cad-pop" /> {gradeLabel(done.evidenceType, done.grade)}
+        {doneEntries.map((d) => {
+          const ax = d.axis || evidenceAxis(d.evidenceType);
+          const G = GRADES[d.grade];
+          return (
+            <Chip key={d.id} color={G.color} bg={`${G.color}18`} style={{ fontWeight: 700 }}
+              title={`${AXES[ax].long} · ${EVIDENCE[d.evidenceType]?.label || ''}`}>
+              <Check size={12} className="cad-pop" /> {AXES[ax].label} : {gradeLabel(d.evidenceType, d.grade)}
+              <button type="button" onClick={() => onUndo(d.id)} aria-label="annuler"
+                title="Annuler ce test"
+                style={{ background: 'transparent', border: 'none', color: C.faint, cursor: 'pointer', padding: 0, marginLeft: 2, display: 'inline-flex' }}>
+                <Undo2 size={12} />
+              </button>
             </Chip>
-            <Btn variant="bare" onClick={() => onUndo(done.id)} title="Annuler ce test"
-              style={{ color: C.faint, fontSize: 12 }}>
-              <Undo2 size={13} /> annuler
-            </Btn>
-          </>
-        ) : (
-          <GradeButtons onGrade={(g) => onGrade(ch.id, g)} previewFor={previewFor} evidence={evidence} />
+          );
+        })}
+        {!axisDone && (
+          <GradeButtons evidenceType={axis} titleFor={titleFor}
+            onGrade={(g) => onGrade(ch.id, axis, g)} />
         )}
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 2 }}>
-          {!done && onSkip && (
+          {!allDone && onSkip && (
             <Btn variant="bare" onClick={() => onSkip(ch.id)}
               title="Pas aujourd'hui : sort du plan du jour, un autre chapitre le remplace"
               style={{ color: C.faint, fontSize: 12 }}>
@@ -495,6 +571,9 @@ function RankRow({ idx, ch, subject }) {
         </div>
         <PriorityReader m={ch} compact />
       </div>
+      <Chip color={C.dim} title={`axe prioritaire : ${AXES[ch.dominant].long} · ~${fmtMinutes(ch.minutes)}`}>
+        {AXES[ch.dominant].label}
+      </Chip>
     </div>
   );
 }
@@ -603,6 +682,34 @@ const TABS = [
   { id: 'settings', label: 'Réglages', icon: SettingsIcon },
 ];
 
+// État par axe, prêt pour l'affichage (jamais testé -> pct null).
+function axisInfoOf(m, raw) {
+  return {
+    recall: {
+      tested: m.recall.tested,
+      pct: m.recall.R != null ? Math.round(m.recall.R * 100) : null,
+      minutes: raw.minutes?.recall ?? AXIS_MINUTES.recall,
+    },
+    exercise: {
+      tested: (raw.exercise?.attempts || 0) > 0,
+      pct: raw.exercise?.score != null ? Math.round(raw.exercise.score * 100) : null,
+      minutes: raw.minutes?.exercise ?? AXIS_MINUTES.exercise,
+    },
+    problem: {
+      tested: (raw.problem?.attempts || 0) > 0,
+      pct: raw.problem?.score != null ? Math.round(raw.problem.score * 100) : null,
+      minutes: raw.minutes?.problem ?? AXIS_MINUTES.problem,
+    },
+  };
+}
+
+// Enrichit un chapitre avec ses métriques multi-axes, en préservant l'état brut
+// (`raw`) car le spread des métriques masque les axes FSRS/heuristiques bruts.
+function enrichChapter(raw, exams, settings, today) {
+  const m = chapterMetrics(raw, exams, settings, today);
+  return { ...raw, ...m, raw, axisInfo: axisInfoOf(m, raw) };
+}
+
 export default function Cadence() {
   const store = useMemo(() => makeStore(), []);
   const [state, setState] = useState(() => {
@@ -630,8 +737,6 @@ export default function Cadence() {
 
   const [tab, setTab] = useState('today');
   const [toast, setToast] = useState(null); // { text, entryId }
-  // Type de preuve courant pour les notes (rappel / exercice / annale).
-  const [evidence, setEvidence] = useState('recall');
   const toastTimer = useRef(null);
   const today = todayISO();
   const {
@@ -660,12 +765,12 @@ export default function Cadence() {
     };
   });
 
-  const addChapter = (subjectId, name) => patch((p) => ({
-    ...p, chapters: [...p.chapters, {
-      id: uid(), subjectId, name, lastReviewed: null,
-      estimatedMinutes: p.settings.minutesPerChapter ?? 30,
-      ...levelSeed(LEVELS[0], p.settings), // « Jamais vu » par défaut
-    }],
+  const addChapter = (subjectId, name, level) => patch((p) => ({
+    ...p, chapters: [...p.chapters, newChapter(subjectId, name, level || LEVELS[0], p.settings)],
+  }));
+  // Ajout groupé : un chapitre par ligne (niveau + durées par défaut).
+  const addChaptersBulk = (subjectId, names, level) => patch((p) => ({
+    ...p, chapters: [...p.chapters, ...names.map((n) => newChapter(subjectId, n, level || LEVELS[0], p.settings))],
   }));
   const updateChapter = (id, up) => patch((p) => ({
     ...p, chapters: p.chapters.map((c) => (c.id === id ? { ...c, ...up } : c)),
@@ -676,57 +781,61 @@ export default function Cadence() {
     exams: stripChapterIds(p.exams, [id]),
     reviewLog: p.reviewLog.filter((r) => r.chapterId !== id),
   }));
-  // Recalibrer un chapitre : confirmation, puis nouveau niveau + lastReviewed
-  // remis à null + historique du chapitre archivé (cohérence garantie).
+  // Recalibrer : confirmation, puis les 3 axes repartent du niveau + historique
+  // du chapitre archivé (cohérence garantie entre niveau, dates et journal).
   const setChapterLevel = (id, level) => {
     const ch = chapters.find((c) => c.id === id);
-    const hasHistory = ch?.lastReviewed || reviewLog.some((r) => r.chapterId === id);
+    const hasHistory = ch?.recall?.lastReviewed || ch?.exercise?.attempts || ch?.problem?.attempts
+      || reviewLog.some((r) => r.chapterId === id);
     if (hasHistory && !confirm(
       `Recalibrer « ${ch?.name} » sur « ${level.label} » ?\n` +
-      'Le chapitre repart de ce niveau : sa date de test est effacée et son historique est archivé.')) return;
+      'Le chapitre repart de ce niveau sur les trois axes : dates de test effacées, historique archivé.')) return;
     patch((p) => recalibrateState(p, id, level.key));
   };
 
-  // Taille estimée d'un chapitre (minutes de travail).
-  const setChapterMinutes = (id, minutes) => updateChapter(id, { estimatedMinutes: minutes });
+  // Durée estimée d'un axe pour un chapitre (minutes).
+  const setChapterAxisMinutes = (id, axis, minutes) => patch((p) => ({
+    ...p, chapters: p.chapters.map((c) => (c.id === id
+      ? { ...c, minutes: { ...c.minutes, [axis]: minutes } } : c)),
+  }));
 
-  // Noter un TEST : met à jour stabilité + difficulté, journalise avec le
-  // type de preuve (rappel / exercice / annale).
-  const gradeChapter = (id, grade) => {
+  // Noter un TEST sur UN AXE : ne modifie que cet axe. Une note par axe et par
+  // jour ; une seconde du même axe le même jour demande confirmation.
+  const gradeEvidence = (id, evidenceType, grade) => {
+    const axis = evidenceAxis(evidenceType);
+    const existing = reviewLog.find((r) => r.chapterId === id && r.date === today
+      && evidenceAxis(r.evidenceType) === axis);
+    if (existing && !confirm(
+      `Tu as déjà noté l'axe « ${AXES[axis].label} » pour ce chapitre aujourd'hui.\nRemplacer par cette nouvelle note ?`)) return;
     const entryId = uid();
-    const ev = evidence;
     patch((p) => {
       const ch = p.chapters.find((c) => c.id === id);
       if (!ch) return p;
-      const already = p.reviewLog.some((r) => r.chapterId === id && r.date === today);
-      if (already) return p; // une note par jour et par chapitre
-      const { stability, difficulty } = applyGrade(ch, grade, today);
-      const entry = {
-        id: entryId, chapterId: id, date: today, grade, evidenceType: ev,
-        before: { stability: ch.stability, difficulty: ch.difficulty, lastReviewed: ch.lastReviewed },
-        after: { stability, difficulty },
-      };
+      const { chapter, before, after } = applyEvidence(ch, evidenceType, grade, today);
+      // Remplace une note existante du même axe/jour (après confirmation).
+      const log = p.reviewLog.filter((r) => !(r.chapterId === id && r.date === today && evidenceAxis(r.evidenceType) === axis));
+      const entry = { id: entryId, chapterId: id, date: today, grade, evidenceType, axis, before, after };
       return {
         ...p,
-        chapters: p.chapters.map((c) => (c.id === id ? { ...c, stability, difficulty, lastReviewed: today } : c)),
-        reviewLog: [...p.reviewLog, entry],
+        chapters: p.chapters.map((c) => (c.id === id ? chapter : c)),
+        reviewLog: [...log, entry],
       };
     });
     if (toastTimer.current) clearTimeout(toastTimer.current);
-    setToast({ text: `Noté « ${gradeLabel(ev, grade)} » (${EVIDENCE[ev]?.short?.toLowerCase()})`, entryId });
+    setToast({ text: `${AXES[axis].label} : « ${gradeLabel(evidenceType, grade)} »`, entryId });
     toastTimer.current = setTimeout(() => setToast(null), 6000);
   };
 
-  // Annuler une révision : restaure l'état mémoire d'avant, retire l'entrée.
+  // Annuler une note : restaure l'état de l'axe concerné, retire l'entrée.
   const undoReview = (entryId) => {
     patch((p) => {
       const entry = p.reviewLog.find((r) => r.id === entryId);
       if (!entry) return p;
+      const axis = entry.axis || evidenceAxis(entry.evidenceType);
       return {
         ...p,
         chapters: p.chapters.map((c) => (c.id === entry.chapterId
-          ? { ...c, stability: entry.before.stability, difficulty: entry.before.difficulty, lastReviewed: entry.before.lastReviewed }
-          : c)),
+          ? { ...c, [axis]: { ...entry.before } } : c)),
         reviewLog: p.reviewLog.filter((r) => r.id !== entryId),
       };
     });
@@ -788,10 +897,16 @@ export default function Cadence() {
     return { ...p, parallelLog: log };
   });
 
-  // Import : validation stricte + confirmation avant écrasement.
+  // Import : validation stricte (liste d'erreurs) + confirmation avant
+  // écrasement. En cas d'erreur, AUCUNE donnée existante n'est modifiée.
   const importState = (obj) => {
     const v = validateImport(obj);
-    if (!v.ok) { alert(`Import refusé — ${v.error}`); return; }
+    if (!v.ok) {
+      const list = v.errors.slice(0, 8).map((e) => `• ${e}`).join('\n');
+      const more = v.errors.length > 8 ? `\n…(+${v.errors.length - 8} autres)` : '';
+      alert(`Import refusé — le fichier n'a pas été appliqué.\n\n${list}${more}`);
+      return;
+    }
     const nb = (obj.chapters || []).length;
     if (!confirm(`Remplacer les données actuelles par ce fichier ?\n(${(obj.subjects || []).length} matières, ${nb} chapitres — l'état actuel sera écrasé.)`)) return;
     setState(normalize(obj));
@@ -815,43 +930,51 @@ export default function Cadence() {
   const coreSubjects = useMemo(() => subjects.filter((s) => s.type === 'core'), [subjects]);
   const parallelSubjects = useMemo(() => subjects.filter((s) => s.type === 'parallel'), [subjects]);
 
-  // Révisions du jour (pour l'état « fait » et la stabilité du plan).
+  // Notes du jour, groupées par chapitre (un chapitre peut avoir jusqu'à 3
+  // axes notés le même jour). Sert à l'état « fait » et à la stabilité du plan.
   const todayEntries = useMemo(
     () => reviewLog.filter((r) => r.date === today), [reviewLog, today]);
-  const doneByChapter = useMemo(
-    () => Object.fromEntries(todayEntries.map((r) => [r.chapterId, r])), [todayEntries]);
+  const doneByChapter = useMemo(() => {
+    const m = {};
+    for (const r of todayEntries) (m[r.chapterId] ||= []).push(r);
+    return m;
+  }, [todayEntries]);
 
-  // Classement courant (post-révisions).
+  // Classement courant (post-notes), métriques multi-axes.
   const ranked = useMemo(() => chapters
-    .map((ch) => ({ ...ch, ...chapterMetrics(ch, exams, settings, today) }))
+    .map((ch) => enrichChapter(ch, exams, settings, today))
     .sort((a, b) => b.priority - a.priority), [chapters, exams, settings, today]);
 
-  // Plan du jour STABLE : les chapitres déjà notés aujourd'hui sont replacés
-  // dans leur état d'avant révision, pour que la liste ne se réorganise pas.
-  // Les chapitres « reportés » aujourd'hui sortent du plan.
+  // Plan du jour STABLE : on planifie sur l'état d'AVANT les notes du jour
+  // (chaque axe noté aujourd'hui est temporairement rollback à son `before`),
+  // pour que noter un chapitre ne réorganise pas la liste. Les chapitres
+  // reportés aujourd'hui sortent du plan.
   const skippedToday = useMemo(
     () => Object.entries(skips || {}).filter(([, d]) => d === today).map(([id]) => id),
     [skips, today]);
   const planningRanked = useMemo(() => chapters
     .filter((ch) => skips?.[ch.id] !== today)
     .map((ch) => {
-      const e = doneByChapter[ch.id];
-      const base = e ? { ...ch, ...e.before } : ch;
-      return { ...base, ...chapterMetrics(base, exams, settings, today) };
+      let base = ch;
+      for (const e of doneByChapter[ch.id] || []) {
+        const axis = e.axis || evidenceAxis(e.evidenceType);
+        base = { ...base, [axis]: { ...e.before } };
+      }
+      return enrichChapter(base, exams, settings, today);
     })
     .sort((a, b) => b.priority - a.priority), [chapters, skips, doneByChapter, exams, settings, today]);
 
-  const overdueList = ranked.filter((c) => c.urgency >= 1 && !doneByChapter[c.id]);
-  const overdue = overdueList.length;
-  const overdueMinutes = overdueList.reduce((a, c) => a + chapterMinutes(c, settings), 0);
   // Capacité réelle du jour, en minutes (dérogation datée sinon défaut).
   const todayMinutes = todayCapacityMinutes(settings, capacityOverrides, today);
   const defaultMinutes = defaultDailyMinutes(settings);
-  // Plan honnête : seulement les chapitres qui valent la peine aujourd'hui
-  // (proches de l'échéance ou poussés par un examen) — jamais de remplissage.
+  // Plan honnête : uniquement les chapitres qui valent la peine aujourd'hui.
   const worthToday = useMemo(
     () => planningRanked.filter((c) => isWorthReviewing(c) || doneByChapter[c.id]),
     [planningRanked, doneByChapter]);
+  // Backlog = travail réellement dû aujourd'hui (en minutes, par axe dominant).
+  const backlogList = worthToday.filter((c) => !doneByChapter[c.id]);
+  const overdue = backlogList.length;
+  const overdueMinutes = backlogList.reduce((a, c) => a + c.minutes, 0);
   const sessions = useMemo(
     () => planDay(worthToday, subjects, {
       subjectsPerDay: settings.subjectsPerDay,
@@ -940,9 +1063,8 @@ export default function Cadence() {
               skippedToday={skippedToday} readinessByExam={readinessByExam}
               todayMinutes={todayMinutes} defaultMinutes={defaultMinutes}
               hasCoreChapters={hasCoreChapters} exportStale={exportStale}
-              evidence={evidence} onSetEvidence={setEvidence}
               parallelSubjects={parallelSubjects} parallelLog={parallelLog} settings={settings}
-              onGrade={gradeChapter} onUndo={undoReview} onSkip={skipChapter} onUnskip={unskipToday}
+              onGrade={gradeEvidence} onUndo={undoReview} onSkip={skipChapter} onUnskip={unskipToday}
               onSetTodayCapacity={setTodayCapacity}
               onAdjustParallel={adjustParallel}
               onGoSubjects={() => setTab('subjects')}
@@ -958,15 +1080,16 @@ export default function Cadence() {
             <SubjectsView
               subjects={subjects} chapters={chapters} exams={exams} settings={settings} today={today}
               onAddSubject={addSubject} onUpdateSubject={updateSubject} onDeleteSubject={deleteSubject}
-              onAddChapter={addChapter} onUpdateChapter={updateChapter} onDeleteChapter={deleteChapter}
-              onSetLevel={setChapterLevel} onSetMinutes={setChapterMinutes}
+              onAddChapter={addChapter} onAddChaptersBulk={addChaptersBulk}
+              onUpdateChapter={updateChapter} onDeleteChapter={deleteChapter}
+              onSetLevel={setChapterLevel} onSetAxisMinutes={setChapterAxisMinutes}
               onAddExam={addExam} onUpdateExam={updateExam} onDeleteExam={deleteExam}
               onToggleExamChapter={toggleExamChapter}
             />
           )}
           {tab === 'progress' && (
             <ProgressView reviewLog={reviewLog} ranked={ranked} today={today}
-              subjects={subjects} settings={settings} />
+              subjects={subjects} settings={settings} chapters={chapters} />
           )}
           {tab === 'settings' && (
             <SettingsView settings={settings} state={state} chapters={chapters}
@@ -999,7 +1122,7 @@ const CAPACITY_PRESETS = [0, 120, 240, 360];
 function TodayView({
   today, overdue, overdueMinutes, nextExam, subjectById, annalesBanners, sessions, ranked,
   plannedCount, plannedMinutes, doneCount, doneByChapter, skippedToday, readinessByExam,
-  todayMinutes, defaultMinutes, hasCoreChapters, exportStale, evidence, onSetEvidence,
+  todayMinutes, defaultMinutes, hasCoreChapters, exportStale,
   parallelSubjects, parallelLog, settings,
   onGrade, onUndo, onSkip, onUnskip, onSetTodayCapacity,
   onAdjustParallel, onGoSubjects, onSetSimpleMode,
@@ -1022,7 +1145,8 @@ function TodayView({
           </div>
         </div>
         <div style={{ display: 'flex', gap: 10, marginLeft: 'auto', flexWrap: 'wrap' }}>
-          <Stat label="en retard" value={overdue} unit="chap." tone={overdue ? C.warn : C.good} />
+          <Stat label="en retard" value={overdue ? `~${fmtMinutes(overdueMinutes)}` : '0'}
+            unit={`${overdue} chap.`} tone={overdue ? C.warn : C.good} />
           {nextExam ? (
             <Stat label="prochaine épreuve" value={`J−${nextExam.days}`} unit={nextExam.name} tone={C.accent} />
           ) : (
@@ -1117,10 +1241,11 @@ function TodayView({
           <span style={{ fontFamily: SANS, fontSize: 13 }}>
             <b>Surcharge</b> · ~{fmtMinutes(overdueMinutes)} de retard ({overdue} chap.)
             pour {fmtMinutes(todayMinutes)} aujourd’hui
-            (≈ {Math.ceil(overdueMinutes / Math.max(30, defaultMinutes))} j pour résorber)
+            (≈ {Math.ceil(overdueMinutes / Math.max(30, defaultMinutes))} j à capacité par défaut pour résorber)
           </span>
-          <span style={{ fontFamily: SANS, fontSize: 11.5, color: C.dim, marginLeft: 'auto' }}>
-            options : augmenter le temps quelques jours, ou rétention cible à 85 %
+          <span style={{ fontFamily: SANS, fontSize: 11.5, color: C.dim, marginLeft: 'auto', flex: '1 1 260px' }}>
+            Tout ne tiendra pas : <b>reporte les moins urgents</b> ou <b>augmente le temps</b> quelques jours.
+            Baisser la rétention cible reste possible, mais c’est un compromis conscient (Réglages), pas un réglage à subir.
           </span>
         </div>
       )}
@@ -1183,33 +1308,20 @@ function TodayView({
           )
         ) : (
           <>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 6px', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 8px', flexWrap: 'wrap' }}>
               <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>affichage</span>
               <Segmented value={settings.simpleMode ? 'simple' : 'full'} ariaLabel="Affichage des cartes"
                 onChange={(v) => onSetSimpleMode(v === 'simple')}
                 options={[{ value: 'simple', label: 'Simple' }, { value: 'full', label: 'Détaillé' }]} />
+              <Mono style={{ fontSize: 11, color: C.dim }}>
+                plan ≈ {fmtMinutes(plannedMinutes)} / {fmtMinutes(todayMinutes)}
+              </Mono>
               <div style={{ flex: 1 }} />
               <ThermalLegend />
             </div>
-            {/* Type de preuve : comment tu vas te tester (les 4 issues s'adaptent) */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 0 14px', flexWrap: 'wrap' }}>
-              <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}
-                title="La note décrit le résultat d'un test sans correction sous les yeux — pas le temps passé ni l'impression d'avoir compris.">
-                preuve
-              </span>
-              <Segmented value={evidence} ariaLabel="Type de preuve"
-                onChange={onSetEvidence}
-                options={[
-                  { value: 'recall', label: EVIDENCE.recall.short },
-                  { value: 'exercise', label: EVIDENCE.exercise.short },
-                  { value: 'problem', label: EVIDENCE.problem.short },
-                ]} />
-              <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>
-                {EVIDENCE[evidence]?.hint}
-              </span>
-              <Mono style={{ marginLeft: 'auto', fontSize: 11, color: C.dim }}>
-                plan ≈ {fmtMinutes(plannedMinutes)} / {fmtMinutes(todayMinutes)}
-              </Mono>
+            <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint, margin: '0 0 14px' }}>
+              Sur chaque carte : choisis l’<b>axe</b> à travailler (rappel · exercice · problème/annale),
+              teste-toi <b>sans correction</b>, puis note le résultat. Chaque axe est indépendant — tu peux en noter plusieurs le même jour.
             </div>
             {!showAll ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -1239,7 +1351,7 @@ function TodayView({
                         {session.chapters.map((ch, i) => (
                           <QueueCard key={ch.id} idx={i} ch={ch} subject={session.subject}
                             simpleMode={settings.simpleMode} done={doneByChapter[ch.id]}
-                            today={today} settings={settings} evidence={evidence}
+                            today={today} settings={settings}
                             onGrade={onGrade} onUndo={onUndo} onSkip={onSkip} />
                         ))}
                       </div>
@@ -1307,11 +1419,12 @@ function TodayView({
             Des minimums à protéger si possible — une semaine d’examen majeur ou une
             capacité réduite peuvent légitimement passer devant.
           </div>
-          {exportStale && (
-            <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint, marginTop: 10 }}>
-              💾 Aucun export récent de tes données — pense à <b>Réglages → Exporter (JSON)</b> (les instantanés locaux ne survivent pas à ce navigateur).
-            </div>
-          )}
+        </div>
+      )}
+
+      {exportStale && (
+        <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>
+          💾 Aucun export récent de tes données — pense à <b>Réglages → Exporter (JSON)</b> (les instantanés locaux ne survivent pas à ce navigateur).
         </div>
       )}
     </div>
@@ -1348,7 +1461,7 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
     return map;
   }, [exams]);
 
-  const maxDue = Math.max(1, ...Object.values(dueForecast));
+  const maxDue = Math.max(1, ...Object.values(dueForecast).map((v) => v.minutes || 0));
 
   function annalesShade(iso) {
     let best = null;
@@ -1367,12 +1480,13 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
     return { y: d.getFullYear(), m: d.getMonth() };
   });
 
-  // Charge des 14 prochains jours (liste latérale).
+  // Charge des 14 prochains jours (liste latérale) — en minutes de rappel.
   const nextDays = Array.from({ length: 14 }, (_, i) => {
     const iso = addDays(today, i);
-    return { iso, count: dueForecast[iso] || 0 };
+    const cell = dueForecast[iso] || { count: 0, minutes: 0 };
+    return { iso, count: cell.count, minutes: cell.minutes };
   });
-  const maxNext = Math.max(1, ...nextDays.map((d) => d.count));
+  const maxNext = Math.max(1, ...nextDays.map((d) => d.minutes));
 
   return (
     <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', alignItems: 'flex-start' }}>
@@ -1395,10 +1509,12 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
             const isToday = iso === today;
             const dayExams = examsByDay[iso] || [];
             const shade = annalesShade(iso);
-            const due = dueForecast[iso] || 0;
+            const cell0 = dueForecast[iso] || { count: 0, minutes: 0 };
+            const dueMin = cell0.minutes;
+            const dueCount = cell0.count;
             const titleParts = [
               ...dayExams.map((e) => `${e.name} (${(e.chapterIds || []).length} chap.)`),
-              due ? `${due} chapitre${due > 1 ? 's' : ''} à revoir` : null,
+              dueMin ? `${dueCount} chapitre${dueCount > 1 ? 's' : ''} à revoir · ~${fmtMinutes(dueMin)} de rappel` : null,
             ].filter(Boolean);
             return (
               <div key={i} className="cad-cell" title={titleParts.join('\n')}
@@ -1409,8 +1525,8 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
                   display: 'flex', flexDirection: 'column', gap: 3, position: 'relative', overflow: 'hidden',
                 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-                  {due > 0 && (
-                    <Mono style={{ fontSize: 9, color: thermal((due / maxDue) * 4) }}>{due}</Mono>
+                  {dueMin > 0 && (
+                    <Mono style={{ fontSize: 9, color: thermal((dueMin / maxDue) * 4) }} title={`${dueCount} chap.`}>{dueCount}</Mono>
                   )}
                   <Mono style={{
                     fontSize: 11, color: isToday ? C.accent : C.dim, marginLeft: 'auto',
@@ -1418,11 +1534,11 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
                   }}>{cell.getDate()}</Mono>
                 </div>
                 <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 3 }}>
-                  {due > 0 && (
+                  {dueMin > 0 && (
                     <div style={{ height: 3, borderRadius: 2, background: C.inset, overflow: 'hidden' }}>
                       <div className="cad-bar" style={{
-                        width: `${clamp((due / maxDue) * 100, 8, 100)}%`, height: '100%',
-                        background: thermal((due / maxDue) * 4), opacity: .85,
+                        width: `${clamp((dueMin / maxDue) * 100, 8, 100)}%`, height: '100%',
+                        background: thermal((dueMin / maxDue) * 4), opacity: .85,
                       }} />
                     </div>
                   )}
@@ -1444,7 +1560,7 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
             <span style={{ width: 18, height: 10, borderRadius: 3, background: '#fbbf241f', border: `1px solid ${C.line}` }} /> fenêtre « examen proche »
           </span>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            <span style={{ width: 18, height: 4, borderRadius: 2, background: thermal(2.5) }} /> chapitres à revoir ce jour-là
+            <span style={{ width: 18, height: 4, borderRadius: 2, background: thermal(2.5) }} /> minutes de rappel dues ce jour-là
           </span>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <span style={{ width: 10, height: 10, borderRadius: 3, border: `1px solid ${C.accent}` }} /> aujourd’hui
@@ -1495,6 +1611,19 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
                               </span>
                             </div>
                           )}
+                          {/* Couverture honnête des trois axes (testé / total) */}
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
+                            {AXIS_KEYS.map((ax) => {
+                              const cov = r.coverage[ax];
+                              const full = cov.tested === cov.total;
+                              return (
+                                <Chip key={ax} color={full ? C.good : cov.tested ? C.dim : C.warn}
+                                  title={`${AXES[ax].long} : ${cov.tested}/${cov.total} chapitres testés`}>
+                                  {AXES[ax].label} {cov.tested}/{cov.total}
+                                </Chip>
+                              );
+                            })}
+                          </div>
                           {r.avgR != null ? (() => {
                             const col = thermal((1 - r.avgR) * 4);
                             return (
@@ -1536,25 +1665,29 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
         </div>
 
         <div>
-          <SectionTitle icon={TrendingUp}>Charge à venir (14 j)</SectionTitle>
+          <SectionTitle icon={TrendingUp}>Charge de rappel à venir (14 j)</SectionTitle>
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 12, display: 'flex', flexDirection: 'column', gap: 5 }}>
             {nextDays.map((d, i) => (
               <div key={d.iso} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <Mono style={{ fontSize: 10.5, color: i === 0 ? C.accent : C.faint, width: 64 }}>
                   {i === 0 ? 'auj.' : fmtShortDate(d.iso)}
                 </Mono>
-                <div style={{ flex: 1, height: 7, background: C.inset, borderRadius: 4, overflow: 'hidden', border: `1px solid ${C.line}` }}>
+                <div style={{ flex: 1, height: 7, background: C.inset, borderRadius: 4, overflow: 'hidden', border: `1px solid ${C.line}` }}
+                  title={d.count ? `${d.count} chap.` : ''}>
                   <div className="cad-bar" style={{
-                    width: `${(d.count / maxNext) * 100}%`, height: '100%',
-                    background: d.count ? thermal((d.count / maxNext) * 4) : 'transparent', opacity: .85,
+                    width: `${(d.minutes / maxNext) * 100}%`, height: '100%',
+                    background: d.minutes ? thermal((d.minutes / maxNext) * 4) : 'transparent', opacity: .85,
                   }} />
                 </div>
-                <Mono style={{ fontSize: 10.5, color: d.count ? C.dim : C.faint, width: 18, textAlign: 'right' }}>{d.count || '·'}</Mono>
+                <Mono style={{ fontSize: 10.5, color: d.minutes ? C.dim : C.faint, width: 52, textAlign: 'right' }}>
+                  {d.minutes ? fmtMinutes(d.minutes) : '·'}
+                </Mono>
               </div>
             ))}
           </div>
           <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint, marginTop: 7 }}>
-            Nombre de chapitres qui arrivent à échéance chaque jour (rétention cible {Math.round(settings.requestRetention * 100)} %).
+            Minutes de rappel qui arrivent à échéance chaque jour (rétention cible {Math.round(settings.requestRetention * 100)} %).
+            Le travail d’exercices et d’annales, lui, est piloté par les épreuves — pas par un cycle périodique.
           </div>
         </div>
       </div>
@@ -1593,7 +1726,7 @@ function LevelPicker({ current, onPick, compact }) {
 function SubjectsView({
   subjects, chapters, exams, settings, today,
   onAddSubject, onUpdateSubject, onDeleteSubject,
-  onAddChapter, onUpdateChapter, onDeleteChapter, onSetLevel, onSetMinutes,
+  onAddChapter, onAddChaptersBulk, onUpdateChapter, onDeleteChapter, onSetLevel, onSetAxisMinutes,
   onAddExam, onUpdateExam, onDeleteExam, onToggleExamChapter,
 }) {
   const [open, setOpen] = useState({});
@@ -1664,9 +1797,10 @@ function SubjectsView({
                     {subChapters.map((c) => {
                       const m = chapterMetrics(c, exams, settings, today);
                       const tcol = thermal(m.priority);
-                      const since = c.lastReviewed
-                        ? (m.since === 0 ? 'revu aujourd’hui' : `revu il y a ${m.since} j`)
-                        : 'jamais testé';
+                      const since = c.recall?.lastReviewed
+                        ? (m.since === 0 ? 'rappel revu aujourd’hui' : `rappel revu il y a ${m.since} j`)
+                        : 'rappel jamais testé';
+                      const info = axisInfoOf(m, c);
                       return (
                         <div key={c.id} className="cad-card" style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 10, background: C.panel2, border: `1px solid ${C.line}`, borderLeft: `3px solid ${tcol}`, borderRadius: 8 }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1677,34 +1811,40 @@ function SubjectsView({
                           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', paddingLeft: 34 }}>
                             <Pencil size={12} color={C.faint} />
                             <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}
-                              title="Recalibrer : le chapitre repart de ce niveau (date de test effacée, historique archivé).">
+                              title="Recalibrer : le chapitre repart de ce niveau sur les trois axes (dates de test effacées, historique archivé).">
                               niveau
                             </span>
-                            <LevelPicker compact current={c.difficulty} onPick={(l) => onSetLevel(c.id, l)} />
+                            <LevelPicker compact current={c.recall?.difficulty ?? 5} onPick={(l) => onSetLevel(c.id, l)} />
                             <Mono style={{ fontSize: 11, color: C.faint }}>
-                              · {since} · prochain test {m.dueIn <= 0 ? 'auj.' : `dans ~${m.dueIn} j`} · solidité {round1(m.stability)} j
+                              · {since} · prochain test {m.dueIn <= 0 ? 'auj.' : `dans ~${m.dueIn} j`} · solidité {round1(c.recall?.stability ?? 0)} j
                             </Mono>
                           </div>
+                          {/* Maîtrise observée des axes pratiques (score heuristique, pas une proba) */}
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', paddingLeft: 34 }}>
+                            {['exercise', 'problem'].map((ax) => (
+                              <Chip key={ax} color={info[ax].tested ? thermal((1 - info[ax].pct / 100) * 4) : C.faint}
+                                title={`${AXES[ax].long} : maîtrise observée (score heuristique)`}>
+                                {AXES[ax].label} {info[ax].tested ? `${info[ax].pct} %` : 'non testé'}
+                              </Chip>
+                            ))}
+                          </div>
+                          {/* Durées estimées PAR AXE (min) — le plan utilise la durée de l'axe travaillé */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', paddingLeft: 34 }}>
                             <Clock3 size={12} color={C.faint} />
-                            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>taille</span>
-                            <div style={{ display: 'flex', gap: 5 }}>
-                              {CHAPTER_SIZES.map((mn) => {
-                                const on = (c.estimatedMinutes ?? 30) === mn;
-                                return (
-                                  <button key={mn} type="button" onClick={() => onSetMinutes(c.id, mn)}
-                                    title="temps de travail estimé pour une séance sur ce chapitre"
-                                    style={{
-                                      fontFamily: MONO, fontSize: 11, padding: '3px 8px', borderRadius: 999, cursor: 'pointer',
-                                      border: `1px solid ${on ? 'rgba(94,169,255,.5)' : C.line2}`,
-                                      background: on ? 'rgba(94,169,255,.14)' : 'transparent',
-                                      color: on ? '#dbeafe' : C.dim,
-                                    }}>
-                                    {fmtMinutes(mn)}
-                                  </button>
-                                );
-                              })}
-                            </div>
+                            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>durées</span>
+                            {AXIS_KEYS.map((ax) => (
+                              <label key={ax} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>{AXES[ax].label}</span>
+                                <select value={c.minutes?.[ax] ?? AXIS_MINUTES[ax]}
+                                  aria-label={`durée ${AXES[ax].long}`}
+                                  onChange={(e) => onSetAxisMinutes(c.id, ax, Number(e.target.value))}
+                                  style={{ fontFamily: MONO, fontSize: 11, color: C.text, background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 6, padding: '3px 5px', cursor: 'pointer' }}>
+                                  {MINUTE_CHOICES.map((mn) => (
+                                    <option key={mn} value={mn}>{fmtMinutes(mn)}</option>
+                                  ))}
+                                </select>
+                              </label>
+                            ))}
                           </div>
                           <div style={{ paddingLeft: 34 }}>
                             <PriorityReader m={m} compact />
@@ -1713,7 +1853,8 @@ function SubjectsView({
                       );
                     })}
                   </div>
-                  <AddRow placeholder="Nouveau chapitre (ex. Réduction des endomorphismes)" cta="Chapitre" onAdd={(name) => onAddChapter(s.id, name)} />
+                  <ChapterAdder onAdd={(name) => onAddChapter(s.id, name)}
+                    onAddMany={(names) => onAddChaptersBulk(s.id, names)} />
                 </div>
 
                 {/* Épreuves */}
@@ -1796,6 +1937,55 @@ function SubjectsView({
   );
 }
 
+// Ajout de chapitres : un par un, ou EN LOT (un nom par ligne). Les chapitres
+// créés partent au niveau « Jamais vu » (recalibrables ensuite) avec les
+// durées par défaut par axe.
+function ChapterAdder({ onAdd, onAddMany }) {
+  const [bulk, setBulk] = useState(false);
+  const [text, setText] = useState('');
+  const names = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const addBulk = () => {
+    if (!names.length) return;
+    onAddMany(names);
+    setText('');
+    setBulk(false);
+  };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {!bulk ? (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ flex: '1 1 260px' }}>
+            <AddRow placeholder="Nouveau chapitre (ex. Réduction des endomorphismes)" cta="Chapitre" onAdd={onAdd} />
+          </div>
+          <Btn variant="bare" onClick={() => setBulk(true)} style={{ color: C.dim, fontSize: 12 }}>
+            <Plus size={13} /> en lot (un par ligne)
+          </Btn>
+        </div>
+      ) : (
+        <>
+          <textarea value={text} onChange={(e) => setText(e.target.value)}
+            aria-label="chapitres en lot (un par ligne)" rows={5}
+            placeholder={'Un chapitre par ligne, ex. :\nEspaces vectoriels\nRéduction des endomorphismes\nDéterminants'}
+            style={{
+              fontFamily: SANS, fontSize: 13, color: C.text, background: C.inset,
+              border: `1px solid ${C.line2}`, borderRadius: 7, padding: '8px 10px',
+              width: '100%', boxSizing: 'border-box', resize: 'vertical',
+            }} />
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <Btn variant="primary" onClick={addBulk} disabled={!names.length}>
+              <Plus size={14} /> Ajouter {names.length || ''} chapitre{names.length > 1 ? 's' : ''}
+            </Btn>
+            <Btn variant="bare" onClick={() => setBulk(false)} style={{ color: C.faint, fontSize: 12 }}>annuler</Btn>
+            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>
+              niveau « Jamais vu » par défaut — recalibre ensuite ceux que tu connais déjà
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function AddExam({ subjectId, today, onAdd }) {
   const [name, setName] = useState('');
   const [date, setDate] = useState(addDays(today, 14));
@@ -1821,70 +2011,105 @@ function AddExam({ subjectId, today, onAdd }) {
  *  Vue 4 — Progrès (statistiques dérivées du journal)
  * ================================================================== */
 
-function ProgressView({ reviewLog, ranked, today, subjects, settings }) {
+function ProgressView({ reviewLog, ranked, today, subjects, settings, chapters }) {
   // Révisions par jour (30 derniers jours).
   const days = Array.from({ length: 30 }, (_, i) => addDays(today, i - 29));
   const byDay = {};
   for (const r of reviewLog) byDay[r.date] = (byDay[r.date] || 0) + 1;
   const maxDay = Math.max(1, ...days.map((d) => byDay[d] || 0));
 
-  // Série de jours consécutifs avec au moins une révision.
-  let streak = 0;
-  for (let i = 0; ; i++) {
-    const iso = addDays(today, -i);
-    if (byDay[iso]) streak++;
-    else if (i === 0) continue; // aujourd'hui pas encore fait ne casse pas la série
-    else break;
-    if (i > 3650) break;
-  }
-
-  const reviewed = ranked.filter((c) => c.R != null);
-  const avgR = reviewed.length
-    ? reviewed.reduce((a, c) => a + c.R, 0) / reviewed.length : null;
-  const fresh = ranked.filter((c) => c.urgency < 1).length;
-  const untestedCount = ranked.length - reviewed.length;
+  // Trois axes SÉPARÉS — jamais fondus en un « score de réussite » unique.
+  const axes = axisSummary(chapters || [], settings, today);
   const calib = observedRetention(reviewLog);
 
-  const gradeCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
-  for (const r of reviewLog) gradeCounts[r.grade] = (gradeCounts[r.grade] || 0) + 1;
-  const totalGrades = Math.max(1, reviewLog.length);
+  // Notes par axe (rappel + legacy comptés ensemble côté rappel).
+  const byAxis = { recall: { 1: 0, 2: 0, 3: 0, 4: 0, n: 0 }, exercise: { 1: 0, 2: 0, 3: 0, 4: 0, n: 0 }, problem: { 1: 0, 2: 0, 3: 0, 4: 0, n: 0 } };
+  for (const r of reviewLog) {
+    const ax = evidenceAxis(r.evidenceType || 'legacy');
+    if (byAxis[ax] && r.grade >= 1 && r.grade <= 4) { byAxis[ax][r.grade]++; byAxis[ax].n++; }
+  }
 
-  // Mémoire moyenne par matière (chapitres déjà revus).
+  const fresh = ranked.filter((c) => c.risks.recall < 1).length;
+
+  // Rappel moyen estimé par matière (chapitres au rappel testé).
   const bySubject = (subjects || []).filter((s) => s.type === 'core').map((s) => {
     const chs = ranked.filter((c) => c.subjectId === s.id);
     const revued = chs.filter((c) => c.R != null);
     const avg = revued.length ? revued.reduce((a, c) => a + c.R, 0) / revued.length : null;
-    const late = chs.filter((c) => c.urgency >= 1).length;
+    const late = chs.filter((c) => c.risks.recall >= 1).length;
     return { subject: s, avg, late, total: chs.length };
   }).filter((x) => x.total > 0).sort((a, b) => (a.avg ?? 0) - (b.avg ?? 0));
+
+  const AXIS_CARDS = [
+    {
+      ax: 'recall', title: 'Rappel du cours', desc: 'rappel moyen estimé (modèle) sur les chapitres testés',
+      icon: BookOpen,
+    },
+    {
+      ax: 'exercise', title: 'Exercices — autonomie', desc: 'maîtrise observée (score heuristique, pas une probabilité)',
+      icon: Pencil,
+    },
+    {
+      ax: 'problem', title: 'Problèmes / annales — transfert', desc: 'maîtrise observée (score heuristique, pas une probabilité)',
+      icon: FlaskConical,
+    },
+  ];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       <SectionTitle icon={TrendingUp}>Progrès</SectionTitle>
 
+      {/* Trois indicateurs SÉPARÉS — pas de « probabilité de réussite » unique */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-        <Stat label="série" value={streak} unit={`jour${streak > 1 ? 's' : ''} d’affilée`} tone={streak > 0 ? C.warn : C.faint} />
-        <Stat label="tests (total)" value={reviewLog.length} unit="notés" tone={C.accent} />
-        <Stat label="rappel moyen estimé" value={avgR != null ? `${Math.round(avgR * 100)}%` : '—'}
-          unit={`sur ${reviewed.length}/${ranked.length} chap. testés`} tone={avgR != null ? thermal((1 - avgR) * 4) : C.faint} />
-        <Stat label="couverture" value={`${reviewed.length}/${ranked.length}`}
-          unit={untestedCount > 0 ? `${untestedCount} jamais testé${untestedCount > 1 ? 's' : ''}` : 'tout est testé'}
-          tone={untestedCount > 0 ? C.warn : C.good} />
-        <Stat label="à jour" value={`${fresh}/${ranked.length}`} unit="chapitres" tone={ranked.length && fresh === ranked.length ? C.good : C.dim} />
+        {AXIS_CARDS.map(({ ax, title, desc, icon: Icon }) => {
+          const a = axes[ax];
+          const col = a.avg != null ? thermal((1 - a.avg) * 4) : C.faint;
+          return (
+            <div key={ax} className="cad-card" style={{
+              flex: '1 1 220px', minWidth: 210, background: C.panel,
+              border: `1px solid ${C.line}`, borderRadius: 10, padding: 13,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                <Icon size={13} color={C.dim} />
+                <span style={{ fontFamily: SANS, fontSize: 12, fontWeight: 600, color: C.text }}>{title}</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 8 }}>
+                <Mono style={{ fontSize: 22, color: col }}>
+                  {a.avg != null ? `${Math.round(a.avg * 100)}%` : '—'}
+                </Mono>
+                <span style={{ fontFamily: SANS, fontSize: 11, color: C.dim }}>
+                  {a.tested}/{a.total} testé{a.tested > 1 ? 's' : ''}
+                </span>
+              </div>
+              <div style={{ height: 5, background: C.inset, borderRadius: 3, margin: '8px 0 6px', overflow: 'hidden', border: `1px solid ${C.line}` }}>
+                <div className="cad-bar" style={{ width: `${a.avg != null ? a.avg * 100 : 0}%`, height: '100%', background: col, opacity: .8 }} />
+              </div>
+              <div style={{ fontFamily: SANS, fontSize: 10.5, color: a.untested ? C.warn : C.faint }}>
+                {a.untested > 0 ? `${a.untested} jamais testé${a.untested > 1 ? 's' : ''} sur cet axe` : 'tous testés sur cet axe'}
+              </div>
+              <div style={{ fontFamily: SANS, fontSize: 10, color: C.faint, marginTop: 4 }}>{desc}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, marginTop: -8 }}>
+        Trois axes indépendants : savoir son cours, réussir les exercices types, tenir sur une annale.
+        Aucun de ces chiffres n’est une probabilité de réussir un examen.
+      </div>
+
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <Stat label="tests (total)" value={reviewLog.length} unit="notés, tous axes" tone={C.accent} />
+        <Stat label="rappel à jour" value={`${fresh}/${ranked.length}`} unit="chapitres" tone={ranked.length && fresh === ranked.length ? C.good : C.dim} />
         {calib.n >= 5 && (
           <Stat label="rétention observée" value={`${Math.round(calib.rate * 100)}%`}
-            unit={`cible ${Math.round((settings?.requestRetention ?? 0.9) * 100)} % · ${calib.n} tests`}
+            unit={`cible ${Math.round((settings?.requestRetention ?? 0.9) * 100)} % · ${calib.n} tests de rappel`}
             tone={calib.rate >= (settings?.requestRetention ?? 0.9) - 0.05 ? C.good : C.warn} />
         )}
       </div>
-      <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, marginTop: -8 }}>
-        Le « rappel estimé » est une estimation du modèle sur les chapitres testés —
-        pas une probabilité de réussir un examen. Les chapitres jamais testés n’entrent pas dans la moyenne.
-      </div>
       {calib.n >= 5 && calib.rate < (settings?.requestRetention ?? 0.9) - 0.07 && (
         <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.warn }}>
-          Tu retiens moins que la cible : resserre les révisions (monte la rétention cible)
-          ou allège les chapitres trop denses en les découpant.
+          Tu retiens moins que la cible (calculé sur les seuls tests de rappel) : resserre les
+          révisions (monte la rétention cible) ou découpe les chapitres trop denses.
         </div>
       )}
 
@@ -1947,25 +2172,47 @@ function ProgressView({ reviewLog, ranked, today, subjects, settings }) {
 
       {reviewLog.length > 0 && (
         <div>
-          <SectionTitle icon={Check}>Répartition des notes</SectionTitle>
-          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {[1, 2, 3, 4].map((g) => {
-              const G = GRADES[g];
-              const n = gradeCounts[g] || 0;
-              return (
-                <div key={g} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <span style={{ fontFamily: SANS, fontSize: 12, color: G.color, width: 70, fontWeight: 600 }}>{G.label}</span>
-                  <div style={{ flex: 1, height: 9, background: C.inset, borderRadius: 5, overflow: 'hidden', border: `1px solid ${C.line}` }}>
-                    <div className="cad-bar" style={{ width: `${(n / totalGrades) * 100}%`, height: '100%', background: G.color, opacity: .75 }} />
+          <SectionTitle icon={Check}>Répartition des notes — par type de preuve</SectionTitle>
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {AXIS_KEYS.map((ax) => {
+              const dist = byAxis[ax];
+              if (!dist.n) {
+                return (
+                  <div key={ax} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span style={{ fontFamily: SANS, fontSize: 12, color: C.dim, width: 130, fontWeight: 600 }}>{AXES[ax].label}</span>
+                    <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>aucun test noté sur cet axe</span>
                   </div>
-                  <Mono style={{ fontSize: 11, color: C.dim, width: 56, textAlign: 'right' }}>
-                    {n} · {Math.round((n / totalGrades) * 100)}%
+                );
+              }
+              return (
+                <div key={ax} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontFamily: SANS, fontSize: 12, color: C.text, width: 130, fontWeight: 600 }}>
+                    {AXES[ax].label}
+                    <Mono style={{ fontSize: 10.5, color: C.faint }}> · {dist.n}</Mono>
+                  </span>
+                  <div style={{ flex: 1, display: 'flex', height: 10, background: C.inset, borderRadius: 5, overflow: 'hidden', border: `1px solid ${C.line}` }}
+                    title={[1, 2, 3, 4].map((g) => `${gradeLabel(ax, g)} : ${dist[g]}`).join(' · ')}>
+                    {[1, 2, 3, 4].map((g) => (
+                      <div key={g} className="cad-bar" style={{ width: `${(dist[g] / dist.n) * 100}%`, height: '100%', background: GRADES[g].color, opacity: .75 }} />
+                    ))}
+                  </div>
+                  <Mono style={{ fontSize: 10.5, color: C.dim, width: 88, textAlign: 'right' }}
+                    title="part de réussites (notes 3–4)">
+                    {Math.round(((dist[3] + dist[4]) / dist.n) * 100)}% réussis
                   </Mono>
                 </div>
               );
             })}
-            <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint, marginTop: 4 }}>
-              Beaucoup de « Facile » ? Espace davantage (baisse la rétention cible). Beaucoup d’« Oublié » ? Resserre (monte-la).
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 2 }}>
+              {[1, 2, 3, 4].map((g) => (
+                <span key={g} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: SANS, fontSize: 10.5, color: C.faint }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 2, background: GRADES[g].color, opacity: .75 }} />
+                  {GRADES[g].label}
+                </span>
+              ))}
+              <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, marginLeft: 'auto' }}>
+                les anciennes notes (avant la séparation des axes) comptent côté rappel
+              </span>
             </div>
           </div>
         </div>
@@ -1994,7 +2241,6 @@ const ADVANCED_SLIDERS = [
   { key: 'examModeThreshold', label: 'Seuil « examen proche »', min: 3, max: 45, step: 1, unit: ' j', help: 'à partir de combien de jours une UE est signalée' },
   { key: 'minInterval', label: 'Stabilité initiale « Jamais vu »', min: 1, max: 7, step: 1, unit: ' j', help: 'point de départ des nouveaux chapitres' },
   { key: 'maxInterval', label: 'Stabilité initiale « Solide »', min: 7, max: 60, step: 1, unit: ' j', help: 'point de départ d’un chapitre déjà maîtrisé' },
-  { key: 'minutesPerChapter', label: 'Taille par défaut d’un chapitre', min: 15, max: 60, step: 15, unit: ' min', help: 'appliquée aux nouveaux chapitres (modifiable chapitre par chapitre)' },
 ];
 
 function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, today, listBackups, onRestore, lastExportAt, onExported }) {
@@ -2003,8 +2249,9 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
   const backups = listBackups ? listBackups() : [];
 
   // Compromis rétention <-> travail, calculé sur TES chapitres (live).
+  // cruiseLoad = minutes de RAPPEL par jour en régime de croisière.
   const load = chapters?.length ? cruiseLoad(chapters, settings) : null;
-  const dailyCap = Math.max(1, Math.round(defaultDailyMinutes(settings) / 30));
+  const dailyCap = defaultDailyMinutes(settings);
 
   const exportJSON = () => {
     try {
@@ -2060,9 +2307,9 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
           fontFamily: MONO, fontSize: 11.5, marginTop: 5,
           color: load > dailyCap ? C.warn : C.good,
         }}>
-          charge de croisière ≈ {load < 0.95 ? round1(load) : Math.round(load)} chap./jour
-          <span style={{ color: C.faint }}> · ta capacité : ≈ {dailyCap} chap. de 30 min/jour</span>
-          {load > dailyCap ? ' — trop haut, baisse la rétention' : ''}
+          entretien du rappel ≈ {load < 10 ? round1(load) : Math.round(load)} min/jour
+          <span style={{ color: C.faint }}> · ta capacité par défaut : {fmtMinutes(dailyCap)}/jour (exercices et annales en plus)</span>
+          {load > dailyCap ? ' — dépasse ta capacité : réduis le périmètre ou augmente le temps ; baisser la cible reste un compromis conscient' : ''}
         </div>
       )}
     </div>
@@ -2087,9 +2334,9 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
         </div>
         <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.dim, marginTop: 10, lineHeight: 1.55, maxWidth: 640 }}>
           <b>Comment noter :</b> la note décrit le <b>résultat d’un test sans correction sous
-          les yeux</b> (rappel de tête, exercice ou annale selon la « preuve » choisie sur
-          l’accueil) — jamais le temps passé ni l’impression d’avoir compris. Relire
-          passivement n’est pas un test.
+          les yeux</b> (rappel de tête, exercice ou annale selon l’<b>axe choisi sur la carte</b>)
+          — jamais le temps passé ni l’impression d’avoir compris. Relire passivement n’est pas
+          un test. Chaque axe est indépendant : noter un exercice ne change pas le rappel.
         </div>
       </div>
 
@@ -2115,8 +2362,10 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
                   {ADVANCED_SLIDERS.map(renderSlider)}
                   <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>
                     Le modèle de rappel (équations FSRS-4.5, poids par défaut publiés,
-                    non personnalisés) ajuste ensuite la stabilité et la difficulté de
-                    chaque chapitre à partir de tes notes de test.
+                    non personnalisés) n’ajuste que l’axe <b>rappel</b>, à partir de tes
+                    notes de rappel. Les axes exercice et problème utilisent un score
+                    heuristique transparent (résultats observés, récence, échecs répétés)
+                    — pas une probabilité FSRS.
                   </div>
                 </div>
               </div>
