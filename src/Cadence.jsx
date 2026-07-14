@@ -27,6 +27,7 @@ import {
   retrievability, optimalInterval, applyEvidence, targetInterval, levelSeed,
   examMultiplier, chapterMetrics, recallInfo, practiceRisk, nextFutureExam,
   annalesModeFor, reasonPhrase, isWorthReviewing, axisMinutes, axisSummary,
+  pendingDebriefs,
   defaultDailyMinutes, todayCapacityMinutes, planDay,
   cruiseLoad, observedRetention, forecastDue, examReadiness,
   pruneBackups, validateImport, normalize, migrateV1, seedState, newChapter,
@@ -411,7 +412,7 @@ function AxisPicker({ ch, axis, onPick, doneAxes }) {
 // Trois axes indépendants : on choisit l'axe (défaut = axe dominant), on note
 // le RÉSULTAT du test ; seul cet axe est modifié. On peut noter plusieurs axes
 // le même jour. Clavier : Tab pour sélectionner la carte, 1–4 pour noter.
-function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrade, onUndo, onSkip }) {
+function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrade, onUndo, onSkip, onSetAxisMinutes }) {
   const [expanded, setExpanded] = useState(false);
   const doneEntries = done || [];
   const doneAxes = useMemo(
@@ -445,16 +446,19 @@ function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrad
     return `résultat du test → maîtrise observée ~${Math.round(after.score * 100)} %`;
   };
 
+  // Clavier : 1–4 note l'axe choisi ; r / e / p change d'axe.
+  const AXIS_KEYBOARD = { r: 'recall', e: 'exercise', p: 'problem' };
   const onKey = (e) => {
     if (e.target !== e.currentTarget) return;
     if (['1', '2', '3', '4'].includes(e.key) && !axisDone) { onGrade(ch.id, axis, Number(e.key)); e.preventDefault(); }
+    else if (AXIS_KEYBOARD[e.key]) { setAxis(AXIS_KEYBOARD[e.key]); e.preventDefault(); }
   };
 
   const rec = ch.recall; // info rappel : { risk, ti, since, R, dueIn, tested }
 
   return (
     <div className={`cad-card${allDone ? ' cad-done' : ''}`} tabIndex={0} onKeyDown={onKey}
-      title={allDone ? undefined : 'Tab pour sélectionner · touches 1–4 pour noter l’axe choisi'}
+      title={allDone ? undefined : 'Tab pour sélectionner · 1–4 pour noter · r/e/p pour changer d’axe'}
       style={{
       background: C.panel, border: `1px solid ${doneEntries.length ? `${accent}44` : C.line}`,
       borderLeft: `3px solid ${accent}`,
@@ -507,6 +511,22 @@ function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrad
                   : `${AXES[axis].long} : jamais testé (score heuristique, pas une probabilité)`
               )}
             </Mono>
+            {onSetAxisMinutes && (
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}
+                  title="Si cet axe te prend en réalité plus ou moins de temps, ajuste ici : le plan utilisera la durée corrigée.">
+                  durée réelle de cet axe
+                </span>
+                <select value={ch.axisInfo[axis].minutes}
+                  aria-label={`durée ${AXES[axis].long}`}
+                  onChange={(e) => onSetAxisMinutes(ch.id, axis, Number(e.target.value))}
+                  style={{ fontFamily: MONO, fontSize: 11, color: C.text, background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 6, padding: '3px 5px', cursor: 'pointer' }}>
+                  {MINUTE_CHOICES.map((mn) => (
+                    <option key={mn} value={mn}>{fmtMinutes(mn)}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             <PriorityReader m={ch} compact />
           </div>
         </div>
@@ -741,7 +761,7 @@ export default function Cadence() {
   const today = todayISO();
   const {
     subjects, chapters, exams, settings, parallelLog, reviewLog, skips,
-    capacityOverrides, lastExportAt,
+    capacityOverrides, examDebriefs, lastExportAt,
   } = state;
 
   /* ----- Mutations ----- */
@@ -844,6 +864,10 @@ export default function Cadence() {
 
   // Reporter un chapitre : il sort du plan d'aujourd'hui, un autre le remplace.
   const skipChapter = (id) => patch((p) => ({ ...p, skips: { ...p.skips, [id]: today } }));
+  // Masquer le bilan d'une épreuve passée (il expire de lui-même après 3 j).
+  const dismissDebrief = (examId) => patch((p) => ({
+    ...p, examDebriefs: { ...(p.examDebriefs || {}), [examId]: today },
+  }));
   const unskipToday = () => patch((p) => ({
     ...p,
     skips: Object.fromEntries(Object.entries(p.skips || {}).filter(([, d]) => d !== today)),
@@ -905,11 +929,12 @@ export default function Cadence() {
       const list = v.errors.slice(0, 8).map((e) => `• ${e}`).join('\n');
       const more = v.errors.length > 8 ? `\n…(+${v.errors.length - 8} autres)` : '';
       alert(`Import refusé — le fichier n'a pas été appliqué.\n\n${list}${more}`);
-      return;
+      return false;
     }
     const nb = (obj.chapters || []).length;
-    if (!confirm(`Remplacer les données actuelles par ce fichier ?\n(${(obj.subjects || []).length} matières, ${nb} chapitres — l'état actuel sera écrasé.)`)) return;
+    if (!confirm(`Remplacer les données actuelles par ce fichier ?\n(${(obj.subjects || []).length} matières, ${nb} chapitres — l'état actuel sera écrasé.)`)) return false;
     setState(normalize(obj));
+    return true;
   };
   const markExported = () => patch((p) => ({ ...p, lastExportAt: today }));
   const resetAll = () => {
@@ -994,6 +1019,11 @@ export default function Cadence() {
     .map((s) => ({ subject: s, info: annalesModeFor(s.id, exams, settings, today) }))
     .filter((x) => x.info), [coreSubjects, exams, settings, today]);
 
+  // Épreuves récemment passées à débriefer (constat = axe problème/annale).
+  const debriefs = useMemo(
+    () => pendingDebriefs(exams, chapters, reviewLog, examDebriefs, today),
+    [exams, chapters, reviewLog, examDebriefs, today]);
+
   const upcomingExams = useMemo(() => exams
     .map((e) => ({ ...e, days: daysBetween(today, e.date) }))
     .filter((e) => e.days >= 0)
@@ -1057,7 +1087,7 @@ export default function Cadence() {
             <TodayView
               today={today} overdue={overdue} overdueMinutes={overdueMinutes}
               nextExam={nextExam} subjectById={subjectById}
-              annalesBanners={annalesBanners} sessions={sessions} ranked={ranked}
+              annalesBanners={annalesBanners} debriefs={debriefs} sessions={sessions} ranked={ranked}
               plannedCount={plannedCount} plannedMinutes={plannedMinutes}
               doneCount={doneCount} doneByChapter={doneByChapter}
               skippedToday={skippedToday} readinessByExam={readinessByExam}
@@ -1065,7 +1095,8 @@ export default function Cadence() {
               hasCoreChapters={hasCoreChapters} exportStale={exportStale}
               parallelSubjects={parallelSubjects} parallelLog={parallelLog} settings={settings}
               onGrade={gradeEvidence} onUndo={undoReview} onSkip={skipChapter} onUnskip={unskipToday}
-              onSetTodayCapacity={setTodayCapacity}
+              onDismissDebrief={dismissDebrief}
+              onSetTodayCapacity={setTodayCapacity} onSetAxisMinutes={setChapterAxisMinutes}
               onAdjustParallel={adjustParallel}
               onGoSubjects={() => setTab('subjects')}
               onSetSimpleMode={(v) => updateSetting('simpleMode', v)}
@@ -1120,11 +1151,11 @@ export default function Cadence() {
 const CAPACITY_PRESETS = [0, 120, 240, 360];
 
 function TodayView({
-  today, overdue, overdueMinutes, nextExam, subjectById, annalesBanners, sessions, ranked,
+  today, overdue, overdueMinutes, nextExam, subjectById, annalesBanners, debriefs, sessions, ranked,
   plannedCount, plannedMinutes, doneCount, doneByChapter, skippedToday, readinessByExam,
   todayMinutes, defaultMinutes, hasCoreChapters, exportStale,
   parallelSubjects, parallelLog, settings,
-  onGrade, onUndo, onSkip, onUnskip, onSetTodayCapacity,
+  onGrade, onUndo, onSkip, onUnskip, onDismissDebrief, onSetTodayCapacity, onSetAxisMinutes,
   onAdjustParallel, onGoSubjects, onSetSimpleMode,
 }) {
   const [showAll, setShowAll] = useState(false);
@@ -1202,6 +1233,49 @@ function TodayView({
         )}
       </div>
 
+      {/* Bilan d'épreuve : une épreuve vient de passer — c'était un test en
+          conditions réelles. Noter le constat par chapitre (axe problème). */}
+      {debriefs.map(({ exam, daysAgo, items }) => {
+        const sub = subjectById[exam.subjectId];
+        const left = items.filter((it) => !it.done).length;
+        return (
+          <div key={exam.id} className="cad-in cad-card" style={{
+            display: 'flex', flexDirection: 'column', gap: 9, padding: '11px 13px', borderRadius: 9,
+            background: 'rgba(94,169,255,.07)', border: '1px solid rgba(94,169,255,.3)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <FlaskConical size={16} color={C.accent} />
+              {sub && <Pastille color={sub.color} />}
+              <span style={{ fontFamily: SANS, fontSize: 13.5 }}>
+                <b>{exam.name}</b> passée {daysAgo === 1 ? 'hier' : `il y a ${daysAgo} j`} —
+                {' '}note ce que tu as <b>constaté</b> pendant l’épreuve
+              </span>
+              <Chip color={C.dim} title="Une épreuve est le test en conditions réelles le plus fiable : le constat alimente l'axe problème/annale du chapitre — rappel et exercices ne bougent pas.">
+                axe problème/annale · {left} à noter
+              </Chip>
+              <Btn variant="bare" onClick={() => onDismissDebrief(exam.id)}
+                title="Masquer ce bilan (il disparaît de lui-même après 3 jours)"
+                style={{ marginLeft: 'auto', color: C.faint, fontSize: 12 }}>
+                masquer
+              </Btn>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7, paddingLeft: 26 }}>
+              {items.map(({ chapter, done }) => (
+                <div key={chapter.id} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <span style={{ fontFamily: SANS, fontSize: 12.5, color: C.text, minWidth: 140 }}>{chapter.name}</span>
+                  {done ? (
+                    <Chip color={C.good} bg="rgba(52,211,153,.12)"><Check size={11} /> constat noté</Chip>
+                  ) : (
+                    <GradeButtons compact evidenceType="problem"
+                      onGrade={(g) => onGrade(chapter.id, 'problem', g)} />
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+
       {/* Bannières « examen proche » */}
       {annalesBanners.map(({ subject, info }, bi) => (
         <div key={subject.id} className="cad-in cad-card" style={{
@@ -1221,10 +1295,19 @@ function TodayView({
             </Chip>
           )}
           {readinessByExam[info.exam.id]?.untested.length > 0 && (
-            <Chip color={C.warn} title="Chapitres couverts par l'épreuve mais jamais testés — à traiter en priorité.">
-              <AlertTriangle size={11} /> {readinessByExam[info.exam.id].untested.length} jamais testé{readinessByExam[info.exam.id].untested.length > 1 ? 's' : ''}
+            <Chip color={C.warn} title="Chapitres couverts par l'épreuve mais dont le rappel n'a jamais été testé — à traiter en priorité.">
+              <AlertTriangle size={11} /> {readinessByExam[info.exam.id].untested.length} rappel{readinessByExam[info.exam.id].untested.length > 1 ? 's' : ''} jamais testé{readinessByExam[info.exam.id].untested.length > 1 ? 's' : ''}
             </Chip>
           )}
+          {readinessByExam[info.exam.id] && (() => {
+            const cov = readinessByExam[info.exam.id].coverage;
+            return (
+              <Chip color={cov.problem.untested ? C.warn : C.good}
+                title={`Couverture des axes pratiques sur les chapitres de l'épreuve — exercices : ${cov.exercise.tested}/${cov.exercise.total} testés, problèmes/annales : ${cov.problem.tested}/${cov.problem.total}.`}>
+                exos {cov.exercise.tested}/{cov.exercise.total} · annales {cov.problem.tested}/{cov.problem.total}
+              </Chip>
+            );
+          })()}
           <Mono style={{ marginLeft: 'auto', color: C.warn, fontSize: 12 }}>
             {info.exam.name} · J−{info.days}
           </Mono>
@@ -1352,7 +1435,8 @@ function TodayView({
                           <QueueCard key={ch.id} idx={i} ch={ch} subject={session.subject}
                             simpleMode={settings.simpleMode} done={doneByChapter[ch.id]}
                             today={today} settings={settings}
-                            onGrade={onGrade} onUndo={onUndo} onSkip={onSkip} />
+                            onGrade={onGrade} onUndo={onUndo} onSkip={onSkip}
+                            onSetAxisMinutes={onSetAxisMinutes} />
                         ))}
                       </div>
                     </div>
@@ -1644,7 +1728,8 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
                                 </div>
                                 {r.weak > 0 && (
                                   <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, marginTop: 4 }}>
-                                    le plus fragile : {r.per[0].chapter.name} (~{Math.round(r.per[0].projR * 100)} %)
+                                    les plus fragiles : {r.per.slice(0, Math.min(3, r.weak))
+                                      .map((x) => `${x.chapter.name} (~${Math.round(x.projR * 100)} %)`).join(' · ')}
                                   </div>
                                 )}
                               </>
@@ -2246,6 +2331,9 @@ const ADVANCED_SLIDERS = [
 function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, today, listBackups, onRestore, lastExportAt, onExported }) {
   const fileRef = useRef(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState('');
   const backups = listBackups ? listBackups() : [];
 
   // Compromis rétention <-> travail, calculé sur TES chapitres (live).
@@ -2274,6 +2362,25 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
     };
     reader.readAsText(file);
     e.target.value = '';
+  };
+
+  // Voie fiable sur PWA mobile (où le téléchargement de fichier échoue
+  // parfois en silence) : copier l'export dans le presse-papiers.
+  const copyJSON = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(state));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 3000);
+      onExported?.();
+    } catch (e) {
+      alert('Copie impossible dans cet environnement — utilise « Exporter (JSON) ».');
+    }
+  };
+  const importPaste = () => {
+    let obj;
+    try { obj = JSON.parse(pasteText); }
+    catch (e) { alert('Import impossible : le texte collé n’est pas du JSON valide.'); return; }
+    if (onImport(obj)) { setPasteText(''); setPasteOpen(false); }
   };
 
   // Aperçus live.
@@ -2329,7 +2436,9 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
           </span>
         </div>
         <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, marginTop: 8 }}>
-          Astuce clavier : <Mono color={C.dim}>Tab</Mono> pour sélectionner une carte, puis
+          Astuce clavier : <Mono color={C.dim}>Tab</Mono> pour sélectionner une carte,
+          <Mono color={C.dim}> r</Mono>/<Mono color={C.dim}>e</Mono>/<Mono color={C.dim}>p</Mono> pour
+          changer d’axe (rappel / exercice / problème), puis
           <Mono color={C.dim}> 1</Mono>–<Mono color={C.dim}>4</Mono> pour noter.
         </div>
         <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.dim, marginTop: 10, lineHeight: 1.55, maxWidth: 640 }}>
@@ -2430,12 +2539,38 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
 
       <div>
         <SectionTitle icon={Download}>Données &amp; sauvegarde</SectionTitle>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
           <Btn onClick={exportJSON}><Download size={14} /> Exporter (JSON)</Btn>
+          <Btn onClick={copyJSON} title="Copie l'export JSON dans le presse-papiers — la voie fiable sur téléphone (colle-le dans une note ou un mail).">
+            {copied ? <Check size={14} color={C.good} /> : <Download size={14} />} {copied ? 'Copié ✓' : 'Copier l’export'}
+          </Btn>
           <Btn onClick={() => fileRef.current?.click()}><Upload size={14} /> Importer (JSON)</Btn>
+          <Btn onClick={() => setPasteOpen((v) => !v)} title="Importer en collant le contenu d'un export JSON — pratique sur téléphone.">
+            <Upload size={14} /> Importer par collage
+          </Btn>
           <input ref={fileRef} type="file" accept="application/json,.json" onChange={onFile} style={{ display: 'none' }} />
           <Btn variant="danger" onClick={onReset}><RotateCcw size={14} /> Réinitialiser</Btn>
         </div>
+        {pasteOpen && (
+          <div className="cad-in" style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <textarea value={pasteText} onChange={(e) => setPasteText(e.target.value)} rows={5}
+              aria-label="export JSON à coller"
+              placeholder='Colle ici le contenu d’un export CADENCE ({"version":4,"subjects":[…]}). Validation stricte avant tout remplacement.'
+              style={{
+                fontFamily: MONO, fontSize: 11.5, color: C.text, background: C.inset,
+                border: `1px solid ${C.line2}`, borderRadius: 7, padding: '8px 10px',
+                width: '100%', boxSizing: 'border-box', resize: 'vertical',
+              }} />
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <Btn variant="primary" onClick={importPaste} disabled={!pasteText.trim()}>
+                <Upload size={14} /> Valider l’import
+              </Btn>
+              <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>
+                mêmes règles que le fichier : validation stricte, confirmation, rien n’est modifié en cas d’erreur
+              </span>
+            </div>
+          </div>
+        )}
         <div style={{ marginTop: 10, fontFamily: SANS, fontSize: 11.5 }}>
           <span style={{ color: C.dim }}>Dernier export : </span>
           {lastExportAt ? (
@@ -2468,8 +2603,8 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
           </div>
         )}
         <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, marginTop: 10, lineHeight: 1.5, maxWidth: 620 }}>
-          Tout est stocké localement sur cet appareil (une seule clé <Mono color={C.dim}>{STORAGE_KEY}</Mono>),
-          avec repli en mémoire si le stockage est indisponible — rien n’est envoyé sur un serveur.
+          Tout est stocké localement sur cet appareil (une seule clé <Mono color={C.dim}>{STORAGE_KEY}</Mono>,
+          schéma v{state?.version ?? 4}), avec repli en mémoire si le stockage est indisponible — rien n’est envoyé sur un serveur.
           Les <b>instantanés locaux</b> quotidiens vivent dans le même stockage : ils réparent
           une fausse manip, pas la perte de l’appareil. Ta seule vraie sauvegarde externe,
           c’est <b>Exporter (JSON)</b>. L’appli est installable (« Ajouter à l’écran d’accueil »)

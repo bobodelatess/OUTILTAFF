@@ -79,6 +79,16 @@ Chaque note est journalisée avec son `evidenceType` et des instantanés
 avant/après de l'axe concerné (annulation exacte possible). Les anciennes
 notes migrées portent `legacy` et comptent côté rappel.
 
+### Bilan d'épreuve
+
+Une épreuve passée est le test en conditions réelles le plus fiable qui
+existe. Pendant **3 jours** après chaque épreuve, l'accueil propose de noter
+**ce qui a été constaté** pendant l'épreuve, chapitre par chapitre — ces
+constats alimentent l'axe problème/annale (rappel et exercices ne bougent
+pas). La bannière disparaît d'elle-même : tout noté, masquée, ou fenêtre
+écoulée. CADENCE n'enregistre pas la note /20 : ce serait suggérer une
+corrélation prédictive qu'il ne peut pas tenir.
+
 ## Niveaux initiaux réellement différenciés
 
 Un chapitre jamais testé est calibré par un niveau nommé : **Jamais vu 2.2 ·
@@ -94,9 +104,10 @@ du niveau choisi ; l'historique est **archivé**, jamais supprimé.
   6 h · personnalisé), stocké par date. À 0 h : pas de faux plan, pas de faux
   retard.
 - Chaque chapitre porte **une durée par axe** (modifiable : 15/30/45/60/90/120
-  min). Le plan se remplit **en minutes** avec la durée de l'axe proposé — un
-  chapitre de 90 min n'entre pas dans une capacité de 60 min, et le total
-  n'est jamais dépassé.
+  min, depuis Matières **ou directement depuis les détails de la carte** du
+  jour — « ça m'a pris 60 min » se corrige sur place). Le plan se remplit
+  **en minutes** avec la durée de l'axe proposé — un chapitre de 90 min
+  n'entre pas dans une capacité de 60 min, et le total n'est jamais dépassé.
 - Le retard, la charge de croisière (entretien du rappel) et la prévision du
   calendrier s'affichent **en minutes/heures d'abord**, en nombre de chapitres
   ensuite. L'estimation « jours pour résorber » suppose la capacité par défaut
@@ -126,10 +137,12 @@ entretenir un compteur.
 
 1. **Aujourd'hui** — capacité du jour, plan par séances (minutes réelles),
    axe proposé + choix d'axe par carte, notation 4 issues, annulation,
-   reporter, clavier (Tab puis 1–4), minimums hebdo *à protéger si possible*.
+   reporter, **bilan d'épreuve**, clavier (Tab, r/e/p pour l'axe, 1–4 pour
+   noter), minimums hebdo *à protéger si possible*.
 2. **Calendrier** — épreuves (importance), rappel estimé le jour J *sans
-   nouvelle révision* (testés seulement), **couverture des trois axes** par
-   épreuve, prévision de charge de rappel **en minutes**.
+   nouvelle révision* (testés seulement, top 3 des plus fragiles),
+   **couverture des trois axes** par épreuve, prévision de charge de rappel
+   **en minutes**.
 3. **Matières** — UE, chapitres (niveau, maîtrise observée par axe, durées
    par axe), ajout **en lot** (un par ligne), épreuves (date, importance,
    chapitres couverts).
@@ -155,9 +168,14 @@ entretenir un compteur.
   problème `max(60, ancienne)`.
 - Import JSON **strictement validé** avant tout remplacement : version
   connue, identifiants présents et uniques, références chapitre→matière et
-  épreuve→chapitres valides, dates ISO réelles, notes/scores/durées bornés,
-  nombres finis (NaN refusé). En cas d'erreur : **liste lisible des
-  problèmes, aucune donnée existante modifiée**.
+  épreuve→chapitres valides, dates ISO réelles, niveaux/enums connus,
+  notes/scores bornés, **durées d'axe (5–480 min), capacités datées
+  (0–1440 min) et minimums hebdo bornés**, nombres finis (NaN refusé). En
+  cas d'erreur : **liste lisible des problèmes, aucune donnée existante
+  modifiée**.
+- Export par **fichier JSON** ou par **presse-papiers** (« Copier
+  l'export »), import par fichier ou **par collage** — la voie fiable sur
+  téléphone, où le téléchargement de fichier échoue parfois en silence.
 - Rappel discret d'export si aucun export récent. Repli en mémoire si le
   stockage est indisponible. Hors-ligne via service worker ; installable.
 
@@ -178,8 +196,9 @@ entretenir un compteur.
 npm install
 npm run dev      # serveur de dev Vite
 npm run build    # build de production -> dist/
-npm test         # 87 tests : moteur (FSRS, heuristiques, plan, migrations,
-                 # validation d'import) + interactions réelles (RTL + jsdom)
+npm test         # 107 tests : moteur (FSRS, heuristiques, plan, migrations,
+                 # validation d'import, bilan d'épreuve) + interactions
+                 # réelles (RTL + jsdom)
 ```
 
 ## Architecture
@@ -187,7 +206,8 @@ npm test         # 87 tests : moteur (FSRS, heuristiques, plan, migrations,
 - `src/engine.js` — **fonctions pures** : modèle de rappel (axe rappel),
   heuristiques pratiques (axes exercice/problème), `applyEvidence` (un axe à
   la fois), priorité multi-axes, plan en minutes, préparation d'examen,
-  migrations v1→v2→v3→v4, validation d'import, recalibrage. Testé directement.
+  bilan d'épreuve, migrations v1→v2→v3→v4, validation d'import, recalibrage.
+  Testé directement.
 - `src/Cadence.jsx` — interface React (un composant par vue) + persistance.
 - `src/Cadence.test.js` — tests du moteur ; `src/Cadence.ui.test.jsx` — tests
   d'interaction (React Testing Library + jsdom) ; `src/Cadence.smoke.test.jsx`

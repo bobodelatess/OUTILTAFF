@@ -39,6 +39,10 @@ import {
   migrateV2,
   migrateV3,
   normalize,
+  ensureV4,
+  pendingDebriefs,
+  DEBRIEF_WINDOW,
+  IMPORT_BOUNDS,
   examReadiness,
   axisSummary,
   pruneBackups,
@@ -806,6 +810,127 @@ describe('axisSummary — indicateurs honnêtes par axe', () => {
     const sum = axisSummary([mkChapter({ initialLevel: 'new', recall: untestedRecall('new'), exercise: emptyPractice(), problem: emptyPractice() })], S, TODAY);
     expect(sum.recall.avg).toBeNull();
     expect(sum.exercise.avg).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ *  Bilan d'épreuve (épreuves récemment passées)
+ * ------------------------------------------------------------------ */
+
+describe('pendingDebriefs — proposer le constat après une épreuve', () => {
+  const chapters = [mkChapter({ id: 'c1', name: 'A' }), mkChapter({ id: 'c2', name: 'B' })];
+  const exam = (over = {}) => ({
+    id: 'e1', subjectId: 's1', name: 'CC', date: addDays(TODAY, -1), chapterIds: ['c1', 'c2'], ...over,
+  });
+
+  it('épreuve passée hier -> à débriefer ; aujourd’hui ou trop vieille -> non', () => {
+    expect(pendingDebriefs([exam()], chapters, [], {}, TODAY).length).toBe(1);
+    expect(pendingDebriefs([exam({ date: TODAY })], chapters, [], {}, TODAY).length).toBe(0);
+    expect(pendingDebriefs([exam({ date: addDays(TODAY, -DEBRIEF_WINDOW - 1) })], chapters, [], {}, TODAY).length).toBe(0);
+    expect(pendingDebriefs([exam({ date: addDays(TODAY, 3) })], chapters, [], {}, TODAY).length).toBe(0);
+  });
+  it('masquée -> exclue ; sans chapitre couvert -> exclue', () => {
+    expect(pendingDebriefs([exam()], chapters, [], { e1: TODAY }, TODAY).length).toBe(0);
+    expect(pendingDebriefs([exam({ chapterIds: [] })], chapters, [], {}, TODAY).length).toBe(0);
+  });
+  it('un constat = une note d’axe problème datée du jour de l’épreuve ou après', () => {
+    const log = [
+      { chapterId: 'c1', date: TODAY, grade: 3, evidenceType: 'problem' },
+      { chapterId: 'c2', date: addDays(TODAY, -5), grade: 3, evidenceType: 'problem' }, // AVANT l'épreuve
+      { chapterId: 'c2', date: TODAY, grade: 3, evidenceType: 'exercise' },             // mauvais axe
+    ];
+    const [d] = pendingDebriefs([exam()], chapters, log, {}, TODAY);
+    expect(d.items.find((it) => it.chapter.id === 'c1').done).toBe(true);
+    expect(d.items.find((it) => it.chapter.id === 'c2').done).toBe(false);
+  });
+  it('tout constaté -> plus rien à demander', () => {
+    const log = ['c1', 'c2'].map((id) => ({ chapterId: id, date: TODAY, grade: 3, evidenceType: 'problem' }));
+    expect(pendingDebriefs([exam()], chapters, log, {}, TODAY).length).toBe(0);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ *  Hygiène d'état (ensureV4) & bornes d'import supplémentaires
+ * ------------------------------------------------------------------ */
+
+describe('ensureV4 — bornes et purge (déterministe via `today` explicite)', () => {
+  const base = () => ({
+    version: 4,
+    subjects: [{ id: 's1', name: 'EM', type: 'core' }],
+    chapters: [mkChapter({ minutes: { recall: 2, exercise: 900, problem: 60 } })],
+    exams: [{ id: 'e1', subjectId: 's1', name: 'CC', date: EXAM_NEAR, chapterIds: [] }],
+    settings: { ...S }, parallelLog: {}, reviewLog: [], archivedReviews: [],
+    skips: { a: TODAY, b: addDays(TODAY, -1), c: addDays(TODAY, -5) },
+    capacityOverrides: {},
+    examDebriefs: { e1: TODAY, fantome: TODAY },
+    lastExportAt: null,
+  });
+  it('clampe les durées d’axe dans les bornes', () => {
+    const out = ensureV4(base(), TODAY);
+    expect(out.chapters[0].minutes.recall).toBe(IMPORT_BOUNDS.axisMinutes[0]);
+    expect(out.chapters[0].minutes.exercise).toBe(IMPORT_BOUNDS.axisMinutes[1]);
+    expect(out.chapters[0].minutes.problem).toBe(60);
+  });
+  it('purge les reports plus vieux qu’hier, garde aujourd’hui et hier', () => {
+    const out = ensureV4(base(), TODAY);
+    expect(Object.keys(out.skips).sort()).toEqual(['a', 'b']);
+  });
+  it('purge les bilans d’épreuves supprimées, garde les autres', () => {
+    const out = ensureV4(base(), TODAY);
+    expect(out.examDebriefs).toEqual({ e1: TODAY });
+  });
+  it('normalize applique la même hygiène après migration', () => {
+    const v3ish = { version: 3, subjects: [], chapters: [], exams: [], settings: {}, skips: { z: '2020-01-01' } };
+    expect(normalize(v3ish, TODAY).skips).toEqual({});
+    expect(normalize(v3ish, TODAY).examDebriefs).toEqual({});
+  });
+});
+
+describe('validateImport — bornes durées/capacités/niveaux/bilans', () => {
+  const valid = () => ({
+    version: 4,
+    subjects: [{ id: 's1', name: 'EM', color: '#fff', type: 'core' }],
+    chapters: [{
+      id: 'c1', subjectId: 's1', name: 'A', initialLevel: 'ok',
+      recall: { stability: 10, difficulty: 5, lastReviewed: FIVE_AGO },
+      exercise: { score: 0.8, attempts: 1, lastTested: FIVE_AGO, recentFails: 0 },
+      problem: { score: null, attempts: 0, lastTested: null, recentFails: 0 },
+      minutes: { recall: 15, exercise: 30, problem: 60 },
+    }],
+    exams: [{ id: 'e1', subjectId: 's1', name: 'CC', date: EXAM_NEAR, chapterIds: ['c1'], importance: 'major' }],
+    settings: { ...S },
+    capacityOverrides: { [TODAY]: 120 },
+    examDebriefs: { e1: TODAY },
+    reviewLog: [],
+  });
+  it('accepte capacités datées et bilans valides', () => {
+    expect(validateImport(valid())).toEqual({ ok: true, errors: [] });
+  });
+  it('durée d’axe hors bornes -> refus', () => {
+    const a = valid(); a.chapters[0].minutes.recall = 2;
+    expect(validateImport(a).ok).toBe(false);
+    const b = valid(); b.chapters[0].minutes.problem = 999;
+    expect(validateImport(b).ok).toBe(false);
+  });
+  it('capacité : date invalide ou valeur hors bornes -> refus', () => {
+    const a = valid(); a.capacityOverrides = { '2026-02-30': 120 };
+    expect(validateImport(a).ok).toBe(false);
+    const b = valid(); b.capacityOverrides = { [TODAY]: -10 };
+    expect(validateImport(b).ok).toBe(false);
+    const c = valid(); c.capacityOverrides = { [TODAY]: NaN };
+    expect(validateImport(c).ok).toBe(false);
+  });
+  it('niveau initial inconnu -> refus ; minimum hebdo délirant -> refus', () => {
+    const a = valid(); a.chapters[0].initialLevel = 'expert';
+    expect(validateImport(a).ok).toBe(false);
+    const b = valid(); b.subjects[0].weeklyFloor = 999;
+    expect(validateImport(b).ok).toBe(false);
+  });
+  it('examDebriefs malformé -> refus', () => {
+    const a = valid(); a.examDebriefs = 'oui';
+    expect(validateImport(a).ok).toBe(false);
+    const b = valid(); b.examDebriefs = { e1: 'pas-une-date' };
+    expect(validateImport(b).ok).toBe(false);
   });
 });
 

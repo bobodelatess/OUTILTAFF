@@ -140,6 +140,17 @@ export const RISK = {
 export const WORTH_RISK = 0.75;
 export const WORTH_EXAM_FACTOR = 1.15;
 
+// Bilan d'épreuve : pendant N jours après une épreuve, proposer d'enregistrer
+// ce qui a été constaté (axe problème/annale) — l'épreuve EST un test réel.
+export const DEBRIEF_WINDOW = 3;
+
+// Bornes acceptées à l'import (garde-fous, pas des réglages).
+export const IMPORT_BOUNDS = {
+  axisMinutes: [5, 480],   // durée d'un axe par chapitre
+  dayMinutes: [0, 1440],   // capacité d'une journée
+  weeklyFloor: [0, 50],    // minimum hebdo d'une matière parallèle
+};
+
 /* ================================================================== *
  *  Utilitaires
  * ================================================================== */
@@ -389,6 +400,33 @@ export function chapterMetrics(chapter, exams, s, today) {
   };
 }
 
+// Épreuves récemment passées à débriefer : pour chaque épreuve passée depuis
+// 1..DEBRIEF_WINDOW jours, non masquée, liste les chapitres couverts et si un
+// constat (note d'axe problème datée du jour de l'épreuve ou après) existe déjà.
+// Disparaît d'elle-même : tout noté, masquée, ou fenêtre écoulée.
+export function pendingDebriefs(exams, chapters, reviewLog, debriefs, today, window = DEBRIEF_WINDOW) {
+  const byId = new Map(chapters.map((c) => [c.id, c]));
+  const out = [];
+  for (const ex of exams) {
+    if (!isValidISODate(ex.date)) continue;
+    const daysAgo = daysBetween(ex.date, today);
+    if (daysAgo < 1 || daysAgo > window) continue;
+    if (debriefs && debriefs[ex.id]) continue;
+    const items = (ex.chapterIds || [])
+      .map((id) => byId.get(id))
+      .filter(Boolean)
+      .map((chapter) => ({
+        chapter,
+        done: (reviewLog || []).some((r) => r.chapterId === chapter.id
+          && evidenceAxis(r.evidenceType) === 'problem' && r.date >= ex.date),
+      }));
+    if (!items.length) continue;
+    if (items.every((it) => it.done)) continue; // tout constaté -> plus rien à demander
+    out.push({ exam: ex, daysAgo, items });
+  }
+  return out.sort((a, b) => a.daysAgo - b.daysAgo);
+}
+
 export function nextFutureExam(subjectId, exams, today) {
   let best = null;
   for (const ex of exams) {
@@ -621,7 +659,10 @@ export function validateImport(obj) {
     else subjectIds.add(su.id);
     if (typeof su.name !== 'string') push('Une matière n’a pas de nom.');
     if (su.type != null && su.type !== 'core' && su.type !== 'parallel') push(`Type de matière invalide : ${su.type}.`);
-    if (su.weeklyFloor != null && !Number.isFinite(su.weeklyFloor)) push('weeklyFloor non numérique.');
+    if (su.weeklyFloor != null && !(Number.isFinite(su.weeklyFloor)
+      && su.weeklyFloor >= IMPORT_BOUNDS.weeklyFloor[0] && su.weeklyFloor <= IMPORT_BOUNDS.weeklyFloor[1])) {
+      push(`Matière « ${su.name ?? su.id} » : minimum hebdo hors bornes.`);
+    }
   }
 
   const chapterIds = new Set();
@@ -632,6 +673,9 @@ export function validateImport(obj) {
     else chapterIds.add(c.id);
     if (typeof c.name !== 'string') push('Un chapitre n’a pas de nom.');
     if (!subjectIds.has(c.subjectId)) push(`Chapitre « ${c.name ?? c.id} » : matière introuvable (${c.subjectId}).`);
+    if (c.initialLevel != null && !LEVELS.some((l) => l.key === c.initialLevel)) {
+      push(`Chapitre « ${c.name ?? c.id} » : niveau initial inconnu (${c.initialLevel}).`);
+    }
     for (const ax of AXIS_KEYS) {
       const a = c[ax];
       if (a && typeof a === 'object') {
@@ -639,6 +683,10 @@ export function validateImport(obj) {
         if (a.score != null && (!Number.isFinite(a.score) || a.score < 0 || a.score > 1)) push(`Chapitre « ${c.name} » : score ${ax} hors [0,1].`);
         if (a.lastReviewed != null && !isValidISODate(a.lastReviewed)) push(`Chapitre « ${c.name} » : date rappel invalide.`);
         if (a.lastTested != null && !isValidISODate(a.lastTested)) push(`Chapitre « ${c.name} » : date ${ax} invalide.`);
+      }
+      const mn = c.minutes?.[ax];
+      if (mn != null && !(Number.isFinite(mn) && mn >= IMPORT_BOUNDS.axisMinutes[0] && mn <= IMPORT_BOUNDS.axisMinutes[1])) {
+        push(`Chapitre « ${c.name ?? c.id} » : durée ${ax} hors bornes (${IMPORT_BOUNDS.axisMinutes[0]}–${IMPORT_BOUNDS.axisMinutes[1]} min).`);
       }
     }
     if (c.stability != null && !Number.isFinite(c.stability)) push(`Chapitre « ${c.name} » : stability non numérique.`);
@@ -673,6 +721,25 @@ export function validateImport(obj) {
     if (typeof obj.settings !== 'object') push('« settings » doit être un objet.');
     else for (const [k, v] of Object.entries(obj.settings)) {
       if (typeof v === 'number' && !Number.isFinite(v)) push(`Réglage non fini : ${k}.`);
+    }
+  }
+
+  if (obj.capacityOverrides != null) {
+    if (typeof obj.capacityOverrides !== 'object' || Array.isArray(obj.capacityOverrides)) {
+      push('« capacityOverrides » doit être un objet { date: minutes }.');
+    } else for (const [d, v] of Object.entries(obj.capacityOverrides)) {
+      if (!isValidISODate(d)) push(`Capacité : date invalide (${d}).`);
+      if (!(Number.isFinite(v) && v >= IMPORT_BOUNDS.dayMinutes[0] && v <= IMPORT_BOUNDS.dayMinutes[1])) {
+        push(`Capacité du ${d} hors bornes (0–${IMPORT_BOUNDS.dayMinutes[1]} min).`);
+      }
+    }
+  }
+
+  if (obj.examDebriefs != null) {
+    if (typeof obj.examDebriefs !== 'object' || Array.isArray(obj.examDebriefs)) {
+      push('« examDebriefs » doit être un objet { épreuve: date }.');
+    } else for (const [, v] of Object.entries(obj.examDebriefs)) {
+      if (!isValidISODate(v)) push('Bilan d’épreuve : date invalide.');
     }
   }
   return { ok: errors.length === 0, errors };
@@ -791,13 +858,25 @@ export function migrateV3(v3) {
     archivedReviews: v3?.archivedReviews || [],
     skips: v3?.skips || {},
     capacityOverrides: v3?.capacityOverrides || {},
+    examDebriefs: v3?.examDebriefs || {},
     lastExportAt: v3?.lastExportAt ?? null,
   };
 }
 
 // S'assure qu'un état déjà v4 a tous les champs (idempotent, sans rejeu).
-export function ensureV4(s) {
+// `today` sert uniquement à l'hygiène (purge des vieux reports) — passer une
+// date fixe dans les tests garde la fonction déterministe.
+export function ensureV4(s, today = todayISO()) {
   const settings = { ...DEFAULT_SETTINGS, ...(s?.settings || {}) };
+  const exams = (Array.isArray(s.exams) ? s.exams : []).map((e) => ({ ...e, importance: e.importance ?? 'normal' }));
+  const examIds = new Set(exams.map((e) => e.id));
+  const clampMinutes = (v, fallback) => (Number.isFinite(v)
+    ? Math.round(clamp(v, IMPORT_BOUNDS.axisMinutes[0], IMPORT_BOUNDS.axisMinutes[1]))
+    : fallback);
+  // Un report ne concerne que « aujourd'hui » : les entrées plus vieilles
+  // qu'hier sont du poids mort.
+  const skips = Object.fromEntries(Object.entries(s.skips && typeof s.skips === 'object' ? s.skips : {})
+    .filter(([, d]) => typeof d === 'string' && d >= addDays(today, -1)));
   return {
     version: 4,
     subjects: Array.isArray(s.subjects) ? s.subjects : [],
@@ -816,19 +895,22 @@ export function ensureV4(s) {
         exercise: normPractice(c.exercise),
         problem: normPractice(c.problem),
         minutes: {
-          recall: c.minutes?.recall ?? AXIS_MINUTES.recall,
-          exercise: c.minutes?.exercise ?? AXIS_MINUTES.exercise,
-          problem: c.minutes?.problem ?? AXIS_MINUTES.problem,
+          recall: clampMinutes(c.minutes?.recall, AXIS_MINUTES.recall),
+          exercise: clampMinutes(c.minutes?.exercise, AXIS_MINUTES.exercise),
+          problem: clampMinutes(c.minutes?.problem, AXIS_MINUTES.problem),
         },
       };
     }),
-    exams: (Array.isArray(s.exams) ? s.exams : []).map((e) => ({ ...e, importance: e.importance ?? 'normal' })),
+    exams,
     settings,
     parallelLog: s.parallelLog && typeof s.parallelLog === 'object' ? s.parallelLog : {},
     reviewLog: Array.isArray(s.reviewLog) ? s.reviewLog : [],
     archivedReviews: Array.isArray(s.archivedReviews) ? s.archivedReviews : [],
-    skips: s.skips && typeof s.skips === 'object' ? s.skips : {},
+    skips,
     capacityOverrides: s.capacityOverrides && typeof s.capacityOverrides === 'object' ? s.capacityOverrides : {},
+    examDebriefs: Object.fromEntries(Object.entries(
+      s.examDebriefs && typeof s.examDebriefs === 'object' ? s.examDebriefs : {},
+    ).filter(([id]) => examIds.has(id))),
     lastExportAt: s.lastExportAt ?? null,
   };
 }
@@ -843,12 +925,13 @@ function normPractice(p) {
 }
 
 // Accepte v1, v2, v3 ou v4 -> renvoie toujours un état v4 sain.
-export function normalize(s) {
+// Tout passe par ensureV4 (bornes + hygiène), y compris après migration.
+export function normalize(s, today = todayISO()) {
   if (!s || typeof s !== 'object') return seedState();
-  if (s.version === 4) return ensureV4(s);
-  if (s.version === 3) return migrateV3(s);
-  if (s.version === 2) return migrateV3(migrateV2(s));
-  return migrateV3(migrateV2(migrateV1(s)));
+  if (s.version === 4) return ensureV4(s, today);
+  if (s.version === 3) return ensureV4(migrateV3(s), today);
+  if (s.version === 2) return ensureV4(migrateV3(migrateV2(s)), today);
+  return ensureV4(migrateV3(migrateV2(migrateV1(s))), today);
 }
 
 export function newChapter(subjectId, name, level, s) {
@@ -879,7 +962,8 @@ export function seedState() {
   return {
     version: 4, subjects: [...core, ...parallel], chapters: [], exams: [],
     settings: { ...DEFAULT_SETTINGS }, parallelLog: {}, reviewLog: [],
-    archivedReviews: [], skips: {}, capacityOverrides: {}, lastExportAt: null,
+    archivedReviews: [], skips: {}, capacityOverrides: {}, examDebriefs: {},
+    lastExportAt: null,
   };
 }
 

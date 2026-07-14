@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import React from 'react';
 import { render, screen, within, fireEvent, cleanup } from '@testing-library/react';
 import Cadence from './Cadence.jsx';
-import { STORAGE_KEY, AXIS_MINUTES, emptyPractice } from './engine.js';
+import { STORAGE_KEY, AXIS_MINUTES, emptyPractice, todayISO, addDays } from './engine.js';
 
 // Vrais tests d'interaction (jsdom) : on rend l'application complète, on
 // clique, et on vérifie l'état PERSISTÉ (localStorage) — pas seulement le DOM.
@@ -165,5 +165,107 @@ describe('Cadence — interactions réelles (jsdom)', () => {
     expect(screen.getAllByText(/1 jamais testé sur cet axe/).length).toBe(3);
     // pas de « série » (streak) qui pousse à tester facile tous les jours
     expect(screen.queryByText(/d’affilée/)).toBeNull();
+  });
+
+  it('clavier : r/e/p change l’axe de la carte sélectionnée', () => {
+    render(<Cadence />);
+    const c = card();
+    fireEvent.keyDown(c, { key: 'e' });
+    expect(within(card()).getByText('Autonome et propre')).toBeTruthy();
+    fireEvent.keyDown(card(), { key: 'p' });
+    expect(within(card()).getByText('Résolu proprement dans le temps')).toBeTruthy();
+    fireEvent.keyDown(card(), { key: 'r' });
+    expect(within(card()).getByText('Immédiat')).toBeTruthy();
+  });
+
+  it('la durée de l’axe est ajustable depuis les détails de la carte', () => {
+    render(<Cadence />);
+    const c = card();
+    fireEvent.click(within(c).getByRole('button', { name: /détails/ }));
+    fireEvent.change(within(card()).getByLabelText('durée rappel du cours'), { target: { value: '45' } });
+    expect(readState().chapters[0].minutes.recall).toBe(45);
+    expect(readState().chapters[0].minutes.exercise).toBe(30); // les autres axes ne bougent pas
+  });
+});
+
+describe('Bilan d’épreuve (épreuve passée hier)', () => {
+  const withPastExam = () => {
+    const st = baseState();
+    st.chapters.push({
+      id: 'c2', subjectId: 's1', name: 'Espaces euclidiens', initialLevel: 'new',
+      recall: { ...SEED_RECALL }, exercise: emptyPractice(), problem: emptyPractice(),
+      minutes: { ...AXIS_MINUTES },
+    });
+    st.exams = [{
+      id: 'e1', subjectId: 's1', name: 'Partiel A', date: addDays(todayISO(), -1),
+      chapterIds: ['c1', 'c2'], importance: 'normal',
+    }];
+    return st;
+  };
+  beforeEach(() => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(withPastExam()));
+  });
+
+  it('propose de noter le constat (axe problème) ; noter ne touche que cet axe', () => {
+    render(<Cadence />);
+    expect(screen.getByText(/passée hier/)).toBeTruthy();
+    const banner = screen.getByText(/passée hier/).closest('.cad-card');
+    // noter le constat du 1er chapitre : Résolu (note 3)
+    const row = within(banner).getByText('Endomorphismes').closest('div');
+    fireEvent.click(within(row).getByText('Résolu'));
+    const st = readState();
+    const c1 = st.chapters.find((c) => c.id === 'c1');
+    expect(c1.problem.attempts).toBe(1);
+    expect(c1.recall).toEqual(SEED_RECALL);       // rappel intact
+    expect(c1.exercise.attempts).toBe(0);          // exercice intact
+    // la ligne passe en « constat noté », l'autre chapitre reste à noter
+    expect(within(screen.getByText(/passée hier/).closest('.cad-card')).getByText('constat noté')).toBeTruthy();
+    expect(st.reviewLog[0]).toMatchObject({ evidenceType: 'problem', axis: 'problem' });
+  });
+
+  it('tout noter fait disparaître le bilan ; « masquer » le range définitivement', () => {
+    render(<Cadence />);
+    let banner = screen.getByText(/passée hier/).closest('.cad-card');
+    fireEvent.click(within(within(banner).getByText('Endomorphismes').closest('div')).getByText('Résolu'));
+    banner = screen.getByText(/passée hier/).closest('.cad-card');
+    fireEvent.click(within(within(banner).getByText('Espaces euclidiens').closest('div')).getByText('Bloqué'));
+    expect(screen.queryByText(/passée hier/)).toBeNull(); // tout constaté
+  });
+
+  it('« masquer » stocke le choix et retire la bannière', () => {
+    render(<Cadence />);
+    fireEvent.click(screen.getByRole('button', { name: 'masquer' }));
+    expect(screen.queryByText(/passée hier/)).toBeNull();
+    expect(readState().examDebriefs.e1).toBe(todayISO());
+  });
+});
+
+describe('Import par collage (Réglages)', () => {
+  it('texte non-JSON ou état invalide : refus, aucune donnée modifiée', () => {
+    render(<Cadence />);
+    fireEvent.click(screen.getByRole('button', { name: /Réglages/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Importer par collage/ }));
+    const area = screen.getByLabelText('export JSON à coller');
+    fireEvent.change(area, { target: { value: 'pas du json' } });
+    fireEvent.click(screen.getByRole('button', { name: /Valider l’import/ }));
+    expect(window.alert).toHaveBeenCalledWith(expect.stringContaining('JSON'));
+    expect(readState().chapters.length).toBe(1);
+    fireEvent.change(area, { target: { value: '{"subjects":"nope"}' } });
+    fireEvent.click(screen.getByRole('button', { name: /Valider l’import/ }));
+    expect(window.alert).toHaveBeenCalledWith(expect.stringContaining('Import refusé'));
+    expect(readState().chapters.length).toBe(1); // rien n'a bougé
+  });
+
+  it('état valide : confirmation puis remplacement complet', () => {
+    render(<Cadence />);
+    fireEvent.click(screen.getByRole('button', { name: /Réglages/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Importer par collage/ }));
+    fireEvent.change(screen.getByLabelText('export JSON à coller'),
+      { target: { value: '{"subjects":[]}' } });
+    fireEvent.click(screen.getByRole('button', { name: /Valider l’import/ }));
+    const st = readState();
+    expect(st.version).toBe(4);
+    expect(st.subjects.length).toBe(0);
+    expect(st.chapters.length).toBe(0);
   });
 });
