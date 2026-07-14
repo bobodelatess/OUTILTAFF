@@ -1,26 +1,14 @@
 /*
- * CADENCE v2 — planificateur d'étude piloté par les examens.
+ * CADENCE — planificateur d'étude piloté par les examens (interface).
  *
- * Répétition espacée au niveau CHAPITRE, moteur FSRS-4.5 (courbe d'oubli en
- * loi de puissance, stabilité + difficulté par chapitre, notation à 4 niveaux),
- * plus une couche examens (pression MULTIPLICATIVE), un plan du jour borné par
- * la capacité (N matières × H heures), une prévision de charge et des stats.
+ * Répond à une seule question : « parmi mes unités académiques, lesquelles
+ * travailler ou retester aujourd'hui, compte tenu de mon niveau constaté,
+ * des examens et du temps réellement disponible ? »
  *
- * Idée centrale : priorité = urgence_de_péremption × pression_d'examen.
- *
- * Modèle de données (v2)
- *   Subject  = { id, name, color, type: 'core'|'parallel', weeklyFloor? }
- *   Chapter  = { id, subjectId, name, difficulty: 1..10, stability: jours,
- *                lastReviewed: ISODate|null }
- *   Exam     = { id, subjectId, name, date: ISODate, chapterIds: string[] }
- *   Review   = { id, chapterId, date, grade: 1..4,
- *                before: { stability, difficulty, lastReviewed },
- *                after:  { stability, difficulty } }
- *   State    = { version: 2, subjects, chapters, exams, settings,
- *                parallelLog, reviewLog }
- *
- * Migration : les données v1 (mastery 0..100) sont converties automatiquement
- * (difficulté dérivée de la maîtrise, stabilité conservée ou dérivée).
+ * Tout le moteur (modèle de rappel inspiré des équations FSRS-4.5, priorité,
+ * plan en minutes, migrations v1→v2→v3, validation d'import) vit dans
+ * src/engine.js — fonctions pures, testées. Ce fichier ne contient que
+ * l'interface React et la persistance locale (PWA, hors-ligne).
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -28,29 +16,26 @@ import {
   Activity, CalendarDays, Layers, Settings as SettingsIcon, TrendingUp,
   Plus, Trash2, ChevronDown, ChevronRight, ChevronLeft, Check,
   Download, Upload, RotateCcw, AlertTriangle, Lock, Undo2,
-  BookOpen, FlaskConical, Flame, Pencil,
+  BookOpen, FlaskConical, Flame, Pencil, Clock3,
 } from 'lucide-react';
 
+import {
+  STORAGE_KEY, LEGACY_KEY, BACKUP_KEY,
+  DEFAULT_SETTINGS, GRADES, EVIDENCE, gradeLabel, LEVELS, IMPORTANCE,
+  CHAPTER_SIZES, INITIAL_URGENCY,
+  clamp, uid, parseISO, isoOf, todayISO, daysBetween, addDays, mondayOf,
+  retrievability, optimalInterval, applyGrade, targetInterval, levelSeed,
+  closestLevel, examMultiplier, chapterMetrics, nextFutureExam,
+  annalesModeFor, reasonPhrase, isWorthReviewing,
+  defaultDailyMinutes, todayCapacityMinutes, chapterMinutes, planDay,
+  cruiseLoad, observedRetention, forecastDue, examReadiness,
+  pruneBackups, validateImport, normalize, migrateV1, seedState,
+  stripChapterIds, recalibrateState, makeStore,
+} from './engine.js';
+
 /* ================================================================== *
- *  Constantes & thème
+ *  Thème & aides d'affichage
  * ================================================================== */
-
-const STORAGE_KEY = 'cadence.v2';
-const LEGACY_KEY = 'cadence.v1';
-const BACKUP_KEY = 'cadence.backups';
-
-export const DEFAULT_SETTINGS = {
-  requestRetention: 0.9, // rétention cible : on revoit quand R retombe à ce niveau
-  subjectsPerDay: 3,     // capacité : matières par jour
-  sessionHours: 2,       // durée d'une séance par matière
-  minutesPerChapter: 30, // -> nb de chapitres par séance
-  maxExamPressure: 5,
-  pressureHorizon: 35,
-  examModeThreshold: 21,
-  minInterval: 2,        // stabilité initiale « Jamais vu »
-  maxInterval: 30,       // stabilité initiale « Solide »
-  simpleMode: true,
-};
 
 const C = {
   bg: '#0a0e14',
@@ -80,60 +65,10 @@ const RAMP = [
   [1.0, [239, 68, 68]],
 ];
 
-// Notation d'une révision (FSRS) : 1 tape = 1 signal précis pour le modèle.
-export const GRADES = {
-  1: { key: 1, label: 'Oublié', hint: 'je ne savais plus', color: '#f87171' },
-  2: { key: 2, label: 'Difficile', hint: 'retrouvé avec effort', color: '#fbbf24' },
-  3: { key: 3, label: 'Bien', hint: 'retrouvé correctement', color: '#34d399' },
-  4: { key: 4, label: 'Facile', hint: 'trop facile', color: '#38bdf8' },
-};
-
-// Niveaux nommés pour calibrer un chapitre sans historique.
-export const LEVELS = [
-  { key: 'new', label: 'Jamais vu', m: 0, D: 8.5 },
-  { key: 'fragile', label: 'Fragile', m: 33, D: 6.8 },
-  { key: 'ok', label: 'Moyen', m: 66, D: 5.0 },
-  { key: 'solid', label: 'Solide', m: 100, D: 3.2 },
-];
-
-/* ================================================================== *
- *  Utilitaires
- * ================================================================== */
-
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const round1 = (x) => Math.round(x * 10) / 10;
 const f2 = (x) => x.toFixed(2);
+const fmtMinutes = (m) => (m >= 60 ? `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60}` : ''}` : `${m} min`);
 
-const uid = () =>
-  typeof crypto !== 'undefined' && crypto.randomUUID
-    ? crypto.randomUUID()
-    : 'id-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-
-function isoOf(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-function parseISO(iso) {
-  const [y, m, d] = iso.split('-').map(Number);
-  return new Date(y, m - 1, d);
-}
-export function todayISO() { return isoOf(new Date()); }
-export function daysBetween(aISO, bISO) {
-  return Math.round((parseISO(bISO) - parseISO(aISO)) / 86400000);
-}
-export function addDays(iso, n) {
-  const d = parseISO(iso);
-  d.setDate(d.getDate() + n);
-  return isoOf(d);
-}
-export function mondayOf(iso) {
-  const d = parseISO(iso);
-  const offset = (d.getDay() + 6) % 7;
-  d.setDate(d.getDate() - offset);
-  return isoOf(d);
-}
 function fmtLongDate(iso) {
   return parseISO(iso).toLocaleDateString('fr-FR', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
@@ -144,362 +79,6 @@ function fmtShortDate(iso) {
     weekday: 'short', day: '2-digit', month: 'short',
   });
 }
-
-/* ================================================================== *
- *  Moteur FSRS-4.5 (fonctions pures, testées)
- *  Réf. : algorithme FSRS (open-spaced-repetition), poids par défaut 4.5.
- * ================================================================== */
-
-export const FSRS_W = [
-  0.4872, 1.4003, 3.7145, 13.8206, 5.1618, 1.2298, 0.8975, 0.031,
-  1.6474, 0.1367, 1.0461, 2.1072, 0.0793, 0.3246, 1.587, 0.2272, 2.8755,
-];
-
-const DECAY = -0.5;
-const FACTOR = Math.pow(0.9, 1 / DECAY) - 1; // = 19/81, calé pour R(S) = 90 %
-const S_MIN = 0.2;
-const S_MAX = 730;
-
-// Rétrievabilité : probabilité de rappel après t jours (loi de puissance).
-export function retrievability(t, S) {
-  if (S <= 0) return 0;
-  return Math.pow(1 + FACTOR * Math.max(0, t) / S, DECAY);
-}
-
-// Intervalle qui ramène R à la rétention cible (= S quand cible = 90 %).
-export function optimalInterval(S, r = 0.9) {
-  const rt = clamp(r, 0.7, 0.99);
-  return (S / FACTOR) * (Math.pow(rt, 1 / DECAY) - 1);
-}
-
-// Difficulté initiale selon la première note (1..10 ; 1 = facile).
-export function initialDifficulty(grade) {
-  return clamp(FSRS_W[4] - FSRS_W[5] * (grade - 3), 1, 10);
-}
-
-// Mise à jour de la difficulté (dérive selon la note + rappel vers la moyenne).
-export function nextDifficulty(D, grade) {
-  const target = initialDifficulty(4);
-  return clamp(FSRS_W[7] * target + (1 - FSRS_W[7]) * (D - FSRS_W[6] * (grade - 3)), 1, 10);
-}
-
-// Croissance de stabilité après une révision réussie (grade 2..4).
-// Encode l'effet d'espacement : gain max quand R est bas (revu près du seuil).
-export function stabilityAfterSuccess(S, D, R, grade) {
-  let inc = Math.exp(FSRS_W[8]) * (11 - D) * Math.pow(S, -FSRS_W[9]) *
-    (Math.exp(FSRS_W[10] * (1 - R)) - 1);
-  if (grade === 2) inc *= FSRS_W[15]; // pénalité « Difficile »
-  if (grade === 4) inc *= FSRS_W[16]; // bonus « Facile »
-  return clamp(S * (1 + inc), S_MIN, S_MAX);
-}
-
-// Stabilité après un oubli (grade 1) : chute, jamais de gain.
-export function stabilityAfterFailure(S, D, R) {
-  const s2 = FSRS_W[11] * Math.pow(D, -FSRS_W[12]) *
-    (Math.pow(S + 1, FSRS_W[13]) - 1) * Math.exp(FSRS_W[14] * (1 - R));
-  return clamp(Math.min(s2, S), S_MIN, S_MAX);
-}
-
-// Applique une note à un chapitre -> nouvel état mémoire.
-// Jamais révisé : on suppose un retard important (t = 2.2 × S), cohérent avec
-// le modèle d'urgence.
-export function applyGrade(chapter, grade, today) {
-  const S = chapter.stability;
-  const D = chapter.difficulty ?? 5;
-  const since = chapter.lastReviewed ? daysBetween(chapter.lastReviewed, today) : null;
-  const elapsed = since != null ? since : S * 2.2;
-  const R = retrievability(elapsed, S);
-  const stability = grade === 1
-    ? stabilityAfterFailure(S, D, R)
-    : stabilityAfterSuccess(S, D, R, grade);
-  return { stability, difficulty: nextDifficulty(D, grade), R };
-}
-
-// Stabilité initiale d'un niveau nommé (interpolation géométrique min..max).
-export function targetInterval(m, s) {
-  const mm = clamp(m, 0, 100);
-  return s.minInterval * Math.pow(s.maxInterval / s.minInterval, mm / 100);
-}
-export function levelSeed(level, s) {
-  return { difficulty: level.D, stability: targetInterval(level.m, s) };
-}
-export function closestLevel(D) {
-  let best = LEVELS[0];
-  for (const l of LEVELS) if (Math.abs(l.D - D) < Math.abs(best.D - D)) best = l;
-  return best;
-}
-
-/* ------------------------------------------------------------------ *
- *  Couche examens (pression multiplicative) + priorité
- * ------------------------------------------------------------------ */
-
-export function examMultiplier(j, s) {
-  if (j < 0 || j > s.pressureHorizon) return 1;
-  const x = (s.pressureHorizon - j) / s.pressureHorizon;
-  return 1 + (s.maxExamPressure - 1) * x * x;
-}
-
-export function chapterExamFactor(chapter, exams, s, today) {
-  let factor = 1, exam = null, examDays = null;
-  for (const ex of exams) {
-    if (!ex.chapterIds || !ex.chapterIds.includes(chapter.id)) continue;
-    const j = daysBetween(today, ex.date);
-    if (j < 0) continue;
-    const mult = examMultiplier(j, s);
-    if (mult > factor) { factor = mult; exam = ex; examDays = j; }
-  }
-  return { factor, exam, examDays };
-}
-
-// Priorité + décomposition transparente d'un chapitre.
-export function chapterMetrics(chapter, exams, s, today) {
-  const S = chapter.stability;
-  const ti = Math.max(0.5, optimalInterval(S, s.requestRetention));
-  const since = chapter.lastReviewed ? daysBetween(chapter.lastReviewed, today) : null;
-  const elapsed = since != null ? since : ti * 2.2;
-  const urgency = Math.max(0, elapsed) / ti;
-  const R = since != null ? retrievability(since, S) : null;
-  const { factor, exam, examDays } = chapterExamFactor(chapter, exams, s, today);
-  const dueIn = since == null ? 0 : Math.max(0, Math.round(ti - since));
-  return {
-    ti, stability: S, difficulty: chapter.difficulty ?? 5,
-    since, R, urgency, factor, exam, examDays, dueIn,
-    priority: urgency * factor,
-  };
-}
-
-export function nextFutureExam(subjectId, exams, today) {
-  let best = null;
-  for (const ex of exams) {
-    if (ex.subjectId !== subjectId) continue;
-    const j = daysBetween(today, ex.date);
-    if (j < 0) continue;
-    if (!best || j < best.days) best = { exam: ex, days: j };
-  }
-  return best;
-}
-
-export function annalesModeFor(subjectId, exams, s, today) {
-  const n = nextFutureExam(subjectId, exams, today);
-  return n && n.days <= s.examModeThreshold ? n : null;
-}
-
-// Raison en langage clair : pourquoi ce chapitre maintenant.
-export function reasonPhrase(m) {
-  if (m.exam && m.examDays != null) {
-    const d = m.examDays;
-    const when = d <= 0 ? 'aujourd’hui' : d === 1 ? 'demain' : `dans ${d} j`;
-    return { text: `Examen ${m.exam.name} ${when}`, tone: 'exam' };
-  }
-  if (m.urgency >= 1) {
-    if (m.since == null) return { text: 'Jamais révisé', tone: 'late' };
-    const over = Math.round(m.since - m.ti);
-    return { text: over <= 0 ? 'À revoir maintenant' : `En retard de ${over} j`, tone: 'late' };
-  }
-  const inDays = Math.max(0, Math.round(m.ti - (m.since ?? 0)));
-  return { text: inDays <= 1 ? 'Pas urgent' : `Pas urgent · à revoir dans ~${inDays} j`, tone: 'calm' };
-}
-
-// Pertinence : vaut-il la peine de réviser ce chapitre AUJOURD'HUI ?
-// Réviser trop tôt consolide peu (effet d'espacement) et gaspille du temps :
-// on ne planifie un chapitre que s'il approche de son échéance (≥ 75 % de
-// l'intervalle écoulé) ou si un examen le pousse réellement.
-export function isWorthReviewing(m) {
-  return m.urgency >= 0.75 || m.factor > 1.15;
-}
-
-// Charge de croisière : nombre moyen de chapitres/jour qu'exige la rétention
-// cible en régime établi (Σ 1/intervalle). Sert d'aperçu au réglage.
-export function cruiseLoad(chapters, s) {
-  let sum = 0;
-  for (const c of chapters) {
-    sum += 1 / Math.max(1, optimalInterval(c.stability, s.requestRetention));
-  }
-  return sum;
-}
-
-// Calibration : rétention observée (taux de réussite, note > Oublié) vs
-// prévue par le modèle au moment de chaque révision. Ignore les premières
-// révisions (pas d'historique -> pas de prédiction honnête).
-export function observedRetention(reviewLog) {
-  const entries = (reviewLog || []).filter((r) => r.before && r.before.lastReviewed);
-  if (!entries.length) return { n: 0, rate: null, predicted: null };
-  let ok = 0, pred = 0;
-  for (const r of entries) {
-    if (r.grade > 1) ok++;
-    pred += retrievability(daysBetween(r.before.lastReviewed, r.date), r.before.stability);
-  }
-  return { n: entries.length, rate: ok / entries.length, predicted: pred / entries.length };
-}
-
-// Plan du jour sous contrainte de capacité : les `subjectsPerDay` matières
-// (core) les plus sous pression, chacune avec ses chapitres prioritaires.
-export function planDay(ranked, subjects, subjectsPerDay, chaptersPerSession) {
-  const core = new Map(subjects.filter((s) => s.type === 'core').map((s) => [s.id, s]));
-  const bySubject = new Map();
-  for (const ch of ranked) {
-    if (!core.has(ch.subjectId)) continue;
-    if (!bySubject.has(ch.subjectId)) bySubject.set(ch.subjectId, []);
-    bySubject.get(ch.subjectId).push(ch);
-  }
-  const sessions = [];
-  for (const [sid, chs] of bySubject) {
-    const chapters = chs.slice(0, Math.max(1, chaptersPerSession));
-    const score = chapters.reduce((a, c) => a + c.priority, 0);
-    sessions.push({ subject: core.get(sid), chapters, score, total: chs.length });
-  }
-  sessions.sort((a, b) => b.score - a.score);
-  return sessions.slice(0, Math.max(1, subjectsPerDay));
-}
-
-// Prévision de charge : combien de chapitres arrivent à échéance chaque jour.
-export function forecastDue(chapters, s, today, horizon = 28) {
-  const map = {};
-  for (const c of chapters) {
-    const interval = Math.max(1, Math.round(optimalInterval(c.stability, s.requestRetention)));
-    const since = c.lastReviewed ? daysBetween(c.lastReviewed, today) : null;
-    const dueIn = since == null ? 0 : Math.max(0, interval - since);
-    if (dueIn <= horizon) {
-      const iso = addDays(today, dueIn);
-      map[iso] = (map[iso] || 0) + 1;
-    }
-  }
-  return map;
-}
-
-// Préparation d'examen : mémoire PRÉVUE le jour J pour chaque chapitre couvert
-// (projection « si tu ne revois rien d'ici là »). Trie du plus fragile au plus
-// solide ; `weak` = chapitres sous 70 % prévus.
-export function examReadiness(exam, chapters, s, today) {
-  const j = daysBetween(today, exam.date);
-  if (j < 0) return null;
-  const covered = chapters.filter((c) => (exam.chapterIds || []).includes(c.id));
-  if (!covered.length) return null;
-  const per = covered.map((c) => {
-    const elapsed = c.lastReviewed
-      ? daysBetween(c.lastReviewed, exam.date)
-      : c.stability * 2.2 + j;
-    return { chapter: c, projR: retrievability(elapsed, c.stability) };
-  }).sort((a, b) => a.projR - b.projR);
-  const avgR = per.reduce((a, x) => a + x.projR, 0) / per.length;
-  return { days: j, avgR, per, weak: per.filter((x) => x.projR < 0.7).length };
-}
-
-// Sauvegardes quotidiennes : garde les `keep` plus récentes (≤ today).
-export function pruneBackups(backups, today, keep = 7) {
-  const dates = Object.keys(backups || {})
-    .filter((d) => d <= today)
-    .sort()
-    .slice(-keep);
-  const out = {};
-  for (const d of dates) out[d] = backups[d];
-  return out;
-}
-
-/* ================================================================== *
- *  Persistance, migration & seed
- * ================================================================== */
-
-function makeStore() {
-  try {
-    if (typeof window !== 'undefined' && window.storage &&
-        typeof window.storage.getItem === 'function') return window.storage;
-  } catch (e) { /* ignore */ }
-  try {
-    if (typeof localStorage !== 'undefined') {
-      const k = '__cadence_probe__';
-      localStorage.setItem(k, '1');
-      localStorage.removeItem(k);
-      return localStorage;
-    }
-  } catch (e) { /* ignore */ }
-  const mem = {};
-  return {
-    getItem: (k) => (k in mem ? mem[k] : null),
-    setItem: (k, v) => { mem[k] = String(v); },
-    removeItem: (k) => { delete mem[k]; },
-  };
-}
-
-// v1 -> v2 : mastery (0..100) devient difficulté (10..1) ; stabilité conservée
-// ou dérivée de la maîtrise ; journal vide.
-export function migrateV1(v1) {
-  const settings = { ...DEFAULT_SETTINGS, ...(v1?.settings || {}) };
-  delete settings.blocksPerDay;
-  const chapters = (v1?.chapters || []).map((c) => {
-    const m = clamp(c.mastery ?? 50, 0, 100);
-    return {
-      id: c.id, subjectId: c.subjectId, name: c.name,
-      difficulty: c.difficulty ?? clamp(1 + 9 * (1 - m / 100), 1, 10),
-      stability: c.stability ?? targetInterval(m, settings),
-      lastReviewed: c.lastReviewed ?? null,
-    };
-  });
-  return {
-    version: 2,
-    subjects: v1?.subjects || [],
-    chapters,
-    exams: v1?.exams || [],
-    settings,
-    parallelLog: v1?.parallelLog || {},
-    reviewLog: [],
-    skips: {},
-  };
-}
-
-function normalize(s) {
-  if (!s || typeof s !== 'object') return seedState();
-  if (s.version !== 2) return migrateV1(s);
-  return {
-    version: 2,
-    subjects: Array.isArray(s.subjects) ? s.subjects : [],
-    chapters: (Array.isArray(s.chapters) ? s.chapters : []).map((c) => ({
-      ...c,
-      difficulty: clamp(c.difficulty ?? 5, 1, 10),
-      stability: Math.max(S_MIN, c.stability ?? 2),
-      lastReviewed: c.lastReviewed ?? null,
-    })),
-    exams: Array.isArray(s.exams) ? s.exams : [],
-    settings: { ...DEFAULT_SETTINGS, ...(s.settings || {}) },
-    parallelLog: s.parallelLog && typeof s.parallelLog === 'object' ? s.parallelLog : {},
-    reviewLog: Array.isArray(s.reviewLog) ? s.reviewLog : [],
-    skips: s.skips && typeof s.skips === 'object' ? s.skips : {},
-  };
-}
-
-export function seedState() {
-  const core = [
-    ['Algèbre linéaire 2', '#7c9cf5'],
-    ['Outils Mathématiques 2', '#a78bfa'],
-    ['Optique ondulatoire', '#38bdf8'],
-    ['Mécanique du solide', '#fbbf24'],
-    ['Électromagnétisme 1', '#f472b6'],
-    ['Atomistique 2', '#34d399'],
-  ].map(([name, color]) => ({ id: uid(), name, color, type: 'core' }));
-  const parallel = [
-    { id: uid(), name: 'Anglais / TOEIC', color: '#5eead4', type: 'parallel', weeklyFloor: 4 },
-    { id: uid(), name: 'Anki', color: '#fca5a5', type: 'parallel', weeklyFloor: 6 },
-  ];
-  return {
-    version: 2,
-    subjects: [...core, ...parallel],
-    chapters: [],
-    exams: [],
-    settings: { ...DEFAULT_SETTINGS },
-    parallelLog: {},
-    reviewLog: [],
-    skips: {},
-  };
-}
-
-function stripChapterIds(exams, ids) {
-  const set = new Set(ids);
-  return exams.map((e) => ({
-    ...e,
-    chapterIds: (e.chapterIds || []).filter((cid) => !set.has(cid)),
-  }));
-}
-
 /* ================================================================== *
  *  Rampe thermique
  * ================================================================== */
@@ -648,7 +227,7 @@ function AddRow({ placeholder, onAdd, cta = 'Ajouter' }) {
 }
 
 /* ------------------------------------------------------------------ *
- *  Visuels : anneaux SVG (progression du jour, jauge mémoire)
+ *  Visuels : anneaux SVG (progression du jour, jauge de rappel)
  * ------------------------------------------------------------------ */
 
 function Ring({ value, total, size = 54, label }) {
@@ -673,14 +252,14 @@ function Ring({ value, total, size = 54, label }) {
   );
 }
 
-// Jauge mémoire compacte : R (%) en anneau thermique. Tiret si jamais révisé.
+// Jauge de rappel estimé : R (%) en anneau thermique. Tiret si jamais testé.
 function MemGauge({ R, size = 30 }) {
   const stroke = 3.5;
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
   if (R == null) {
     return (
-      <svg width={size} height={size} role="img" aria-label="jamais révisé" style={{ flex: '0 0 auto' }}>
+      <svg width={size} height={size} role="img" aria-label="jamais testé" style={{ flex: '0 0 auto' }}>
         <circle cx={size / 2} cy={size / 2} r={r} stroke={C.line2} strokeWidth={stroke}
           fill="none" strokeDasharray="3 4" />
         <text x="50%" y="54%" dominantBaseline="middle" textAnchor="middle"
@@ -690,8 +269,8 @@ function MemGauge({ R, size = 30 }) {
   }
   const col = thermal((1 - R) * 4);
   return (
-    <svg width={size} height={size} role="img" aria-label={`mémoire ${Math.round(R * 100)} %`}
-      title={`mémoire ~${Math.round(R * 100)} %`} style={{ flex: '0 0 auto' }}>
+    <svg width={size} height={size} role="img" aria-label={`rappel estimé ${Math.round(R * 100)} %`}
+      title={`rappel estimé ~${Math.round(R * 100)} %`} style={{ flex: '0 0 auto' }}>
       <circle cx={size / 2} cy={size / 2} r={r} stroke={C.line} strokeWidth={stroke} fill="none" />
       <circle cx={size / 2} cy={size / 2} r={r} stroke={col} strokeWidth={stroke} fill="none"
         strokeLinecap="round" strokeDasharray={`${c * clamp(R, 0, 1)} ${c}`}
@@ -765,13 +344,18 @@ function ReasonLine({ m, size = 13.5 }) {
  *  Notation (4 boutons) & carte de chapitre
  * ------------------------------------------------------------------ */
 
-function GradeButtons({ onGrade, previewFor, compact }) {
+// Les libellés des 4 issues dépendent du type de preuve (rappel / exercice /
+// annale). La note décrit le RÉSULTAT du test — pas le temps passé ni
+// l'impression d'avoir compris.
+function GradeButtons({ onGrade, previewFor, evidence = 'recall', compact }) {
+  const ev = EVIDENCE[evidence] || EVIDENCE.recall;
   return (
     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
       {[1, 2, 3, 4].map((g) => {
         const G = GRADES[g];
+        const label = ev.grades[g];
         const days = previewFor ? previewFor(g) : null;
-        const title = days != null ? `${G.hint} → revoir dans ~${days} j` : G.hint;
+        const title = days != null ? `résultat du test → retester dans ~${days} j` : 'résultat du test';
         return (
           <button key={g} type="button" onClick={() => onGrade(g)}
             title={title}
@@ -782,7 +366,7 @@ function GradeButtons({ onGrade, previewFor, compact }) {
               border: `1px solid ${G.color}55`, background: `${G.color}14`, color: G.color,
             }}>
             <span style={{ width: 7, height: 7, borderRadius: '50%', background: G.color }} />
-            {G.label}
+            {label}
           </button>
         );
       })}
@@ -792,12 +376,12 @@ function GradeButtons({ onGrade, previewFor, compact }) {
 
 // Carte d'un chapitre dans le plan du jour.
 // Clavier : Tab pour sélectionner la carte, 1–4 pour noter.
-function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrade, onUndo, onSkip }) {
+function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, evidence, onGrade, onUndo, onSkip }) {
   const [expanded, setExpanded] = useState(false);
   const open = !simpleMode || expanded;
   const tcol = thermal(ch.priority);
-  const sinceLabel = ch.since == null ? 'jamais révisé'
-    : ch.since === 0 ? 'révisé aujourd’hui' : `revu il y a ${ch.since} j`;
+  const sinceLabel = ch.since == null ? 'jamais testé'
+    : ch.since === 0 ? 'testé aujourd’hui' : `testé il y a ${ch.since} j`;
   const G = done ? GRADES[done.grade] : null;
 
   // Aperçu : où atterrirait la prochaine révision selon la note.
@@ -820,7 +404,7 @@ function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrad
       borderRadius: 10, padding: 13, display: 'flex', flexDirection: 'column', gap: 9,
       opacity: done ? 0.82 : 1,
     }}>
-      {/* Quel chapitre + jauge mémoire */}
+      {/* Quel chapitre + jauge de rappel estimé */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <Mono style={{ color: C.faint, fontSize: 12, width: 16 }}>{idx + 1}</Mono>
         <MemGauge R={ch.R} />
@@ -846,11 +430,11 @@ function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrad
           <div style={{ display: 'flex', flexDirection: 'column', gap: 7, paddingLeft: 26, paddingTop: 4 }}>
             <Mono style={{ color: C.faint, fontSize: 11 }}>
               {sinceLabel}
-              {ch.R != null ? ` · mémoire ~${Math.round(ch.R * 100)} %` : ''}
+              {ch.R != null ? ` · rappel estimé ~${Math.round(ch.R * 100)} %` : ''}
               {` · solidité ${round1(ch.stability)} j · difficulté ${round1(ch.difficulty)}/10`}
             </Mono>
             <Mono style={{ color: C.faint, fontSize: 11 }}>
-              prochaine révision {ch.dueIn <= 0 ? 'aujourd’hui' : `dans ~${ch.dueIn} j`} · intervalle visé {Math.round(ch.ti)} j
+              prochain test {ch.dueIn <= 0 ? 'aujourd’hui' : `dans ~${ch.dueIn} j`} · intervalle visé {Math.round(ch.ti)} j · ~{fmtMinutes(ch.estimatedMinutes ?? 30)}
             </Mono>
             <PriorityReader m={ch} compact />
           </div>
@@ -861,16 +445,17 @@ function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrad
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 26, flexWrap: 'wrap' }}>
         {done ? (
           <>
-            <Chip color={G.color} bg={`${G.color}18`} style={{ fontWeight: 700 }}>
-              <Check size={12} className="cad-pop" /> {G.label}
+            <Chip color={G.color} bg={`${G.color}18`} style={{ fontWeight: 700 }}
+              title={EVIDENCE[done.evidenceType]?.label}>
+              <Check size={12} className="cad-pop" /> {gradeLabel(done.evidenceType, done.grade)}
             </Chip>
-            <Btn variant="bare" onClick={() => onUndo(done.id)} title="Annuler cette révision"
+            <Btn variant="bare" onClick={() => onUndo(done.id)} title="Annuler ce test"
               style={{ color: C.faint, fontSize: 12 }}>
               <Undo2 size={13} /> annuler
             </Btn>
           </>
         ) : (
-          <GradeButtons onGrade={(g) => onGrade(ch.id, g)} previewFor={previewFor} />
+          <GradeButtons onGrade={(g) => onGrade(ch.id, g)} previewFor={previewFor} evidence={evidence} />
         )}
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 2 }}>
           {!done && onSkip && (
@@ -1023,16 +608,16 @@ export default function Cadence() {
   const [state, setState] = useState(() => {
     try {
       const raw = store.getItem(STORAGE_KEY);
-      if (raw) return normalize(JSON.parse(raw));
+      if (raw) return normalize(JSON.parse(raw)); // migre v1/v2 -> v3 sans perte
       const legacy = store.getItem(LEGACY_KEY);
-      if (legacy) return migrateV1(JSON.parse(legacy));
+      if (legacy) return normalize(migrateV1(JSON.parse(legacy)));
     } catch (e) { /* ignore */ }
     return seedState();
   });
 
   useEffect(() => {
     try { store.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
-    // Sauvegarde quotidienne automatique (7 jours glissants, restaurable).
+    // Instantané local quotidien (même appareil — pas une sauvegarde externe).
     try {
       const t = todayISO();
       const raw = store.getItem(BACKUP_KEY);
@@ -1045,9 +630,14 @@ export default function Cadence() {
 
   const [tab, setTab] = useState('today');
   const [toast, setToast] = useState(null); // { text, entryId }
+  // Type de preuve courant pour les notes (rappel / exercice / annale).
+  const [evidence, setEvidence] = useState('recall');
   const toastTimer = useRef(null);
   const today = todayISO();
-  const { subjects, chapters, exams, settings, parallelLog, reviewLog, skips } = state;
+  const {
+    subjects, chapters, exams, settings, parallelLog, reviewLog, skips,
+    capacityOverrides, lastExportAt,
+  } = state;
 
   /* ----- Mutations ----- */
   const patch = (fn) => setState((prev) => fn(prev));
@@ -1073,6 +663,7 @@ export default function Cadence() {
   const addChapter = (subjectId, name) => patch((p) => ({
     ...p, chapters: [...p.chapters, {
       id: uid(), subjectId, name, lastReviewed: null,
+      estimatedMinutes: p.settings.minutesPerChapter ?? 30,
       ...levelSeed(LEVELS[0], p.settings), // « Jamais vu » par défaut
     }],
   }));
@@ -1085,14 +676,25 @@ export default function Cadence() {
     exams: stripChapterIds(p.exams, [id]),
     reviewLog: p.reviewLog.filter((r) => r.chapterId !== id),
   }));
-  // Recalibrer un chapitre sur un niveau nommé (repart de zéro côté mémoire).
-  const setChapterLevel = (id, level) => patch((p) => ({
-    ...p, chapters: p.chapters.map((c) => (c.id === id ? { ...c, ...levelSeed(level, p.settings) } : c)),
-  }));
+  // Recalibrer un chapitre : confirmation, puis nouveau niveau + lastReviewed
+  // remis à null + historique du chapitre archivé (cohérence garantie).
+  const setChapterLevel = (id, level) => {
+    const ch = chapters.find((c) => c.id === id);
+    const hasHistory = ch?.lastReviewed || reviewLog.some((r) => r.chapterId === id);
+    if (hasHistory && !confirm(
+      `Recalibrer « ${ch?.name} » sur « ${level.label} » ?\n` +
+      'Le chapitre repart de ce niveau : sa date de test est effacée et son historique est archivé.')) return;
+    patch((p) => recalibrateState(p, id, level.key));
+  };
 
-  // Noter une révision (FSRS) : met à jour stabilité + difficulté, journalise.
+  // Taille estimée d'un chapitre (minutes de travail).
+  const setChapterMinutes = (id, minutes) => updateChapter(id, { estimatedMinutes: minutes });
+
+  // Noter un TEST : met à jour stabilité + difficulté, journalise avec le
+  // type de preuve (rappel / exercice / annale).
   const gradeChapter = (id, grade) => {
     const entryId = uid();
+    const ev = evidence;
     patch((p) => {
       const ch = p.chapters.find((c) => c.id === id);
       if (!ch) return p;
@@ -1100,7 +702,7 @@ export default function Cadence() {
       if (already) return p; // une note par jour et par chapitre
       const { stability, difficulty } = applyGrade(ch, grade, today);
       const entry = {
-        id: entryId, chapterId: id, date: today, grade,
+        id: entryId, chapterId: id, date: today, grade, evidenceType: ev,
         before: { stability: ch.stability, difficulty: ch.difficulty, lastReviewed: ch.lastReviewed },
         after: { stability, difficulty },
       };
@@ -1111,7 +713,7 @@ export default function Cadence() {
       };
     });
     if (toastTimer.current) clearTimeout(toastTimer.current);
-    setToast({ text: `Noté « ${GRADES[grade].label} »`, entryId });
+    setToast({ text: `Noté « ${gradeLabel(ev, grade)} » (${EVIDENCE[ev]?.short?.toLowerCase()})`, entryId });
     toastTimer.current = setTimeout(() => setToast(null), 6000);
   };
 
@@ -1157,7 +759,10 @@ export default function Cadence() {
   };
 
   const addExam = (subjectId, exam) => patch((p) => ({
-    ...p, exams: [...p.exams, { id: uid(), subjectId, name: exam.name, date: exam.date, chapterIds: exam.chapterIds || [] }],
+    ...p, exams: [...p.exams, {
+      id: uid(), subjectId, name: exam.name, date: exam.date,
+      chapterIds: exam.chapterIds || [], importance: exam.importance || 'normal',
+    }],
   }));
   const updateExam = (id, up) => patch((p) => ({
     ...p, exams: p.exams.map((e) => (e.id === id ? { ...e, ...up } : e)),
@@ -1183,10 +788,26 @@ export default function Cadence() {
     return { ...p, parallelLog: log };
   });
 
-  const importState = (obj) => setState(normalize(obj));
+  // Import : validation stricte + confirmation avant écrasement.
+  const importState = (obj) => {
+    const v = validateImport(obj);
+    if (!v.ok) { alert(`Import refusé — ${v.error}`); return; }
+    const nb = (obj.chapters || []).length;
+    if (!confirm(`Remplacer les données actuelles par ce fichier ?\n(${(obj.subjects || []).length} matières, ${nb} chapitres — l'état actuel sera écrasé.)`)) return;
+    setState(normalize(obj));
+  };
+  const markExported = () => patch((p) => ({ ...p, lastExportAt: today }));
   const resetAll = () => {
     if (confirm('Réinitialiser CADENCE ? Tes chapitres, épreuves, historique et réglages seront effacés.')) setState(seedState());
   };
+
+  // Capacité réelle du jour (dérogation datée ; null = revenir au défaut).
+  const setTodayCapacity = (minutes) => patch((p) => {
+    const overrides = { ...(p.capacityOverrides || {}) };
+    if (minutes == null) delete overrides[today];
+    else overrides[today] = Math.max(0, Math.round(minutes / 30) * 30);
+    return { ...p, capacityOverrides: overrides };
+  });
 
   /* ----- Données dérivées ----- */
   const subjectById = useMemo(
@@ -1220,18 +841,27 @@ export default function Cadence() {
     })
     .sort((a, b) => b.priority - a.priority), [chapters, skips, doneByChapter, exams, settings, today]);
 
-  const overdue = ranked.filter((c) => c.urgency >= 1 && !doneByChapter[c.id]).length;
-  const chaptersPerSession = Math.max(1, Math.round((settings.sessionHours * 60) / settings.minutesPerChapter));
-  const dailyCapacity = chaptersPerSession * settings.subjectsPerDay;
+  const overdueList = ranked.filter((c) => c.urgency >= 1 && !doneByChapter[c.id]);
+  const overdue = overdueList.length;
+  const overdueMinutes = overdueList.reduce((a, c) => a + chapterMinutes(c, settings), 0);
+  // Capacité réelle du jour, en minutes (dérogation datée sinon défaut).
+  const todayMinutes = todayCapacityMinutes(settings, capacityOverrides, today);
+  const defaultMinutes = defaultDailyMinutes(settings);
   // Plan honnête : seulement les chapitres qui valent la peine aujourd'hui
   // (proches de l'échéance ou poussés par un examen) — jamais de remplissage.
   const worthToday = useMemo(
     () => planningRanked.filter((c) => isWorthReviewing(c) || doneByChapter[c.id]),
     [planningRanked, doneByChapter]);
   const sessions = useMemo(
-    () => planDay(worthToday, subjects, settings.subjectsPerDay, chaptersPerSession),
-    [worthToday, subjects, settings.subjectsPerDay, chaptersPerSession]);
+    () => planDay(worthToday, subjects, {
+      subjectsPerDay: settings.subjectsPerDay,
+      sessionMinutes: Math.round(settings.sessionHours * 60),
+      totalMinutes: todayMinutes,
+      settings,
+    }),
+    [worthToday, subjects, settings, todayMinutes]);
   const plannedCount = sessions.reduce((a, s) => a + s.chapters.length, 0);
+  const plannedMinutes = sessions.reduce((a, s) => a + s.minutes, 0);
   const doneCount = sessions.reduce((a, s) => a + s.chapters.filter((c) => doneByChapter[c.id]).length, 0);
   const hasCoreChapters = useMemo(
     () => chapters.some((c) => subjectById[c.subjectId]?.type === 'core'),
@@ -1250,7 +880,10 @@ export default function Cadence() {
   const dueForecast = useMemo(
     () => forecastDue(chapters, settings, today, 35), [chapters, settings, today]);
 
-  // Préparation d'examen : mémoire prévue le jour J par épreuve à venir.
+  // Préparation d'examen : rappel estimé le jour J par épreuve à venir.
+  // Rappel d'export discret : jamais exporté (ou > 21 j) avec un historique réel.
+  const exportStale = reviewLog.length >= 20 &&
+    (!lastExportAt || daysBetween(lastExportAt, today) > 21);
   const readinessByExam = useMemo(() => {
     const map = {};
     for (const e of upcomingExams) {
@@ -1299,13 +932,18 @@ export default function Cadence() {
         <div key={tab} className="cad-view">
           {tab === 'today' && (
             <TodayView
-              today={today} overdue={overdue} nextExam={nextExam} subjectById={subjectById}
+              today={today} overdue={overdue} overdueMinutes={overdueMinutes}
+              nextExam={nextExam} subjectById={subjectById}
               annalesBanners={annalesBanners} sessions={sessions} ranked={ranked}
-              plannedCount={plannedCount} doneCount={doneCount} doneByChapter={doneByChapter}
+              plannedCount={plannedCount} plannedMinutes={plannedMinutes}
+              doneCount={doneCount} doneByChapter={doneByChapter}
               skippedToday={skippedToday} readinessByExam={readinessByExam}
-              dailyCapacity={dailyCapacity} hasCoreChapters={hasCoreChapters}
+              todayMinutes={todayMinutes} defaultMinutes={defaultMinutes}
+              hasCoreChapters={hasCoreChapters} exportStale={exportStale}
+              evidence={evidence} onSetEvidence={setEvidence}
               parallelSubjects={parallelSubjects} parallelLog={parallelLog} settings={settings}
               onGrade={gradeChapter} onUndo={undoReview} onSkip={skipChapter} onUnskip={unskipToday}
+              onSetTodayCapacity={setTodayCapacity}
               onAdjustParallel={adjustParallel}
               onGoSubjects={() => setTab('subjects')}
               onSetSimpleMode={(v) => updateSetting('simpleMode', v)}
@@ -1321,7 +959,7 @@ export default function Cadence() {
               subjects={subjects} chapters={chapters} exams={exams} settings={settings} today={today}
               onAddSubject={addSubject} onUpdateSubject={updateSubject} onDeleteSubject={deleteSubject}
               onAddChapter={addChapter} onUpdateChapter={updateChapter} onDeleteChapter={deleteChapter}
-              onSetLevel={setChapterLevel}
+              onSetLevel={setChapterLevel} onSetMinutes={setChapterMinutes}
               onAddExam={addExam} onUpdateExam={updateExam} onDeleteExam={deleteExam}
               onToggleExamChapter={toggleExamChapter}
             />
@@ -1332,7 +970,7 @@ export default function Cadence() {
           )}
           {tab === 'settings' && (
             <SettingsView settings={settings} state={state} chapters={chapters}
-              onUpdate={updateSetting}
+              onUpdate={updateSetting} lastExportAt={lastExportAt} onExported={markExported}
               onImport={importState} onReset={resetAll} today={today}
               listBackups={listBackups} onRestore={restoreBackup} />
           )}
@@ -1356,16 +994,21 @@ export default function Cadence() {
  *  Vue 1 — Aujourd'hui
  * ================================================================== */
 
+const CAPACITY_PRESETS = [0, 120, 240, 360];
+
 function TodayView({
-  today, overdue, nextExam, subjectById, annalesBanners, sessions, ranked,
-  plannedCount, doneCount, doneByChapter, skippedToday, readinessByExam,
-  dailyCapacity, hasCoreChapters, parallelSubjects, parallelLog, settings,
-  onGrade, onUndo, onSkip, onUnskip, onAdjustParallel, onGoSubjects, onSetSimpleMode,
+  today, overdue, overdueMinutes, nextExam, subjectById, annalesBanners, sessions, ranked,
+  plannedCount, plannedMinutes, doneCount, doneByChapter, skippedToday, readinessByExam,
+  todayMinutes, defaultMinutes, hasCoreChapters, exportStale, evidence, onSetEvidence,
+  parallelSubjects, parallelLog, settings,
+  onGrade, onUndo, onSkip, onUnskip, onSetTodayCapacity,
+  onAdjustParallel, onGoSubjects, onSetSimpleMode,
 }) {
   const [showAll, setShowAll] = useState(false);
+  const [customCap, setCustomCap] = useState(false);
   const wk = mondayOf(today);
-  const hrs = settings.sessionHours;
-  const hLabel = `${hrs} h`;
+  const isOverride = todayMinutes !== defaultMinutes;
+  const isPreset = CAPACITY_PRESETS.includes(todayMinutes);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -1375,7 +1018,7 @@ function TodayView({
         <div>
           <Mono style={{ fontSize: 22, color: C.text, textTransform: 'capitalize' }}>{fmtLongDate(today)}</Mono>
           <div style={{ fontFamily: SANS, fontSize: 12, color: C.faint, marginTop: 2 }}>
-            Révise, puis note chaque chapitre : Oublié · Difficile · Bien · Facile
+            Travaille, teste-toi <b>sans correction sous les yeux</b>, puis note le résultat du test.
           </div>
         </div>
         <div style={{ display: 'flex', gap: 10, marginLeft: 'auto', flexWrap: 'wrap' }}>
@@ -1386,6 +1029,53 @@ function TodayView({
             <Stat label="prochaine épreuve" value="—" unit="aucune" tone={C.faint} />
           )}
         </div>
+      </div>
+
+      {/* Capacité réelle du jour */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
+        <Clock3 size={14} color={C.dim} />
+        <span style={{ fontFamily: SANS, fontSize: 12.5, color: C.dim }}>Temps disponible aujourd’hui</span>
+        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+          {CAPACITY_PRESETS.map((m) => {
+            const on = !customCap && todayMinutes === m;
+            return (
+              <button key={m} type="button"
+                onClick={() => { setCustomCap(false); onSetTodayCapacity(m === defaultMinutes ? null : m); }}
+                style={{
+                  fontFamily: MONO, fontSize: 12, padding: '4px 11px', borderRadius: 999, cursor: 'pointer',
+                  border: `1px solid ${on ? 'rgba(94,169,255,.5)' : C.line2}`,
+                  background: on ? 'rgba(94,169,255,.14)' : 'transparent',
+                  color: on ? '#dbeafe' : C.dim,
+                }}>
+                {m === 0 ? '0 h' : fmtMinutes(m)}
+              </button>
+            );
+          })}
+          <button type="button" onClick={() => setCustomCap((v) => !v)}
+            style={{
+              fontFamily: SANS, fontSize: 12, padding: '4px 11px', borderRadius: 999, cursor: 'pointer',
+              border: `1px solid ${customCap || (!isPreset && isOverride) ? 'rgba(94,169,255,.5)' : C.line2}`,
+              background: customCap || (!isPreset && isOverride) ? 'rgba(94,169,255,.14)' : 'transparent',
+              color: customCap || (!isPreset && isOverride) ? '#dbeafe' : C.dim,
+            }}>
+            personnalisé
+          </button>
+        </div>
+        {customCap && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input type="number" min={0} max={720} step={30} value={todayMinutes}
+              aria-label="minutes disponibles aujourd'hui"
+              onChange={(e) => onSetTodayCapacity(Number(e.target.value) || 0)}
+              style={{ width: 70, fontFamily: MONO, fontSize: 13, color: C.text, background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 6, padding: '4px 6px' }} />
+            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>min (pas de 30)</span>
+          </div>
+        )}
+        {isOverride && (
+          <Btn variant="bare" onClick={() => { setCustomCap(false); onSetTodayCapacity(null); }}
+            style={{ color: C.faint, fontSize: 11.5 }}>
+            revenir au défaut ({fmtMinutes(defaultMinutes)})
+          </Btn>
+        )}
       </div>
 
       {/* Bannières « examen proche » */}
@@ -1400,10 +1090,15 @@ function TodayView({
           <span style={{ fontFamily: SANS, fontSize: 13.5 }}>
             <b>{subject.name}</b> · examen proche
           </span>
-          {readinessByExam[info.exam.id] && (
+          {readinessByExam[info.exam.id]?.avgR != null && (
             <Chip color={thermal((1 - readinessByExam[info.exam.id].avgR) * 4)}
-              title="Mémoire moyenne prévue le jour J, si tu ne revois rien d'ici là.">
-              mémoire prévue ~{Math.round(readinessByExam[info.exam.id].avgR * 100)} %
+              title="Rappel moyen estimé le jour J sans nouvelle révision — estimation de rappel, pas une probabilité de réussite à l'examen. Chapitres testés uniquement.">
+              rappel estimé le jour J ~{Math.round(readinessByExam[info.exam.id].avgR * 100)} %
+            </Chip>
+          )}
+          {readinessByExam[info.exam.id]?.untested.length > 0 && (
+            <Chip color={C.warn} title="Chapitres couverts par l'épreuve mais jamais testés — à traiter en priorité.">
+              <AlertTriangle size={11} /> {readinessByExam[info.exam.id].untested.length} jamais testé{readinessByExam[info.exam.id].untested.length > 1 ? 's' : ''}
             </Chip>
           )}
           <Mono style={{ marginLeft: 'auto', color: C.warn, fontSize: 12 }}>
@@ -1412,19 +1107,20 @@ function TodayView({
         </div>
       ))}
 
-      {/* Alerte de surcharge : le retard dépasse la capacité quotidienne */}
-      {overdue > dailyCapacity && (
+      {/* Alerte de surcharge : le retard (en minutes) dépasse la capacité */}
+      {todayMinutes > 0 && overdueMinutes > todayMinutes && (
         <div className="cad-in cad-card" style={{
           display: 'flex', alignItems: 'center', gap: 10, padding: '10px 13px', borderRadius: 9,
           background: 'rgba(248,113,113,.08)', border: '1px solid rgba(248,113,113,.35)', flexWrap: 'wrap',
         }}>
           <AlertTriangle size={16} color={C.bad} />
           <span style={{ fontFamily: SANS, fontSize: 13 }}>
-            <b>Surcharge</b> · {overdue} chapitres en retard pour ~{dailyCapacity}/jour de capacité
-            (≈ {Math.ceil(overdue / Math.max(1, dailyCapacity))} j pour résorber)
+            <b>Surcharge</b> · ~{fmtMinutes(overdueMinutes)} de retard ({overdue} chap.)
+            pour {fmtMinutes(todayMinutes)} aujourd’hui
+            (≈ {Math.ceil(overdueMinutes / Math.max(30, defaultMinutes))} j pour résorber)
           </span>
           <span style={{ fontFamily: SANS, fontSize: 11.5, color: C.dim, marginLeft: 'auto' }}>
-            options : +1 matière/jour quelque temps, ou rétention cible à 85 %
+            options : augmenter le temps quelques jours, ou rétention cible à 85 %
           </span>
         </div>
       )}
@@ -1440,8 +1136,8 @@ function TodayView({
           ) : null
         }>
           Plan du jour
-          <Chip color={C.faint} style={{ marginLeft: 8 }} title="Ta capacité : ce nombre de matières par jour, les plus sous pression d'abord. Les autres montent en priorité les jours suivants.">
-            {settings.subjectsPerDay} matières × {hLabel}
+          <Chip color={C.faint} style={{ marginLeft: 8 }} title="Capacité réelle du jour (réglable ci-dessus) — les matières les plus sous pression d'abord, les autres remontent les jours suivants.">
+            {fmtMinutes(todayMinutes)} aujourd’hui{isOverride ? ' (ajusté)' : ''}
           </Chip>
         </SectionTitle>
 
@@ -1453,6 +1149,20 @@ function TodayView({
               <Btn variant="primary" onClick={onGoSubjects}><Layers size={14} /> Onglet Matières</Btn>
             </div>
           </Empty>
+        ) : todayMinutes <= 0 ? (
+          <div className="cad-in" style={{
+            display: 'flex', alignItems: 'center', gap: 12, padding: '18px 16px',
+            border: `1px solid ${C.line2}`, borderRadius: 9, background: C.panel2,
+          }}>
+            <Clock3 size={18} color={C.dim} />
+            <div style={{ fontFamily: SANS, fontSize: 13.5, lineHeight: 1.5 }}>
+              <b>Pas de séance prévue aujourd’hui (0 h disponible).</b>
+              <div style={{ color: C.dim, fontSize: 12.5 }}>
+                Aucun faux retard n’est créé : les échéances suivent leur cours.
+                Le classement reste consultable via « voir tout le classement ».
+              </div>
+            </div>
+          </div>
         ) : sessions.length === 0 ? (
           hasCoreChapters ? (
             <div className="cad-in" style={{
@@ -1463,7 +1173,7 @@ function TodayView({
               <div style={{ fontFamily: SANS, fontSize: 13.5, lineHeight: 1.5 }}>
                 <b style={{ color: C.good }}>Rien d’urgent aujourd’hui — tout est à jour.</b>
                 <div style={{ color: C.dim, fontSize: 12.5 }}>
-                  Réviser en avance consolide peu : profites-en pour avancer sur les nouvelles notions.
+                  Retester en avance consolide peu : profites-en pour avancer sur les nouvelles notions.
                   La file se remplira toute seule quand des chapitres approcheront de leur échéance.
                 </div>
               </div>
@@ -1473,13 +1183,33 @@ function TodayView({
           )
         ) : (
           <>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 14px', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 6px', flexWrap: 'wrap' }}>
               <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>affichage</span>
               <Segmented value={settings.simpleMode ? 'simple' : 'full'} ariaLabel="Affichage des cartes"
                 onChange={(v) => onSetSimpleMode(v === 'simple')}
                 options={[{ value: 'simple', label: 'Simple' }, { value: 'full', label: 'Détaillé' }]} />
               <div style={{ flex: 1 }} />
               <ThermalLegend />
+            </div>
+            {/* Type de preuve : comment tu vas te tester (les 4 issues s'adaptent) */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 0 14px', flexWrap: 'wrap' }}>
+              <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}
+                title="La note décrit le résultat d'un test sans correction sous les yeux — pas le temps passé ni l'impression d'avoir compris.">
+                preuve
+              </span>
+              <Segmented value={evidence} ariaLabel="Type de preuve"
+                onChange={onSetEvidence}
+                options={[
+                  { value: 'recall', label: EVIDENCE.recall.short },
+                  { value: 'exercise', label: EVIDENCE.exercise.short },
+                  { value: 'problem', label: EVIDENCE.problem.short },
+                ]} />
+              <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>
+                {EVIDENCE[evidence]?.hint}
+              </span>
+              <Mono style={{ marginLeft: 'auto', fontSize: 11, color: C.dim }}>
+                plan ≈ {fmtMinutes(plannedMinutes)} / {fmtMinutes(todayMinutes)}
+              </Mono>
             </div>
             {!showAll ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -1494,7 +1224,9 @@ function TodayView({
                           color: session.subject.color, fontFamily: MONO, fontSize: 12, fontWeight: 700,
                         }}>{si + 1}</span>
                         <span style={{ fontFamily: SANS, fontSize: 15.5, fontWeight: 700, color: C.text }}>{session.subject.name}</span>
-                        <Chip color={C.dim}>séance ≈ {hLabel}</Chip>
+                        <Chip color={C.dim} title={`${session.chapters.length} unité${session.chapters.length > 1 ? 's' : ''}, temps estimé`}>
+                          ≈ {fmtMinutes(session.minutes)} · {session.chapters.length} unité{session.chapters.length > 1 ? 's' : ''}
+                        </Chip>
                         <Mono style={{ marginLeft: 'auto', color: sDone === session.chapters.length ? C.good : C.faint, fontSize: 11 }}>
                           {sDone}/{session.chapters.length} fait{sDone > 1 ? 's' : ''}
                           {session.total > session.chapters.length ? ` · +${session.total - session.chapters.length} en attente` : ''}
@@ -1507,7 +1239,7 @@ function TodayView({
                         {session.chapters.map((ch, i) => (
                           <QueueCard key={ch.id} idx={i} ch={ch} subject={session.subject}
                             simpleMode={settings.simpleMode} done={doneByChapter[ch.id]}
-                            today={today} settings={settings}
+                            today={today} settings={settings} evidence={evidence}
                             onGrade={onGrade} onUndo={onUndo} onSkip={onSkip} />
                         ))}
                       </div>
@@ -1534,10 +1266,10 @@ function TodayView({
         )}
       </div>
 
-      {/* Minimums hebdo */}
+      {/* Minimums hebdo (matières parallèles) */}
       {parallelSubjects.length > 0 && (
         <div>
-          <SectionTitle icon={Lock}>À tenir cette semaine</SectionTitle>
+          <SectionTitle icon={Lock}>Minimums hebdo — à protéger si possible</SectionTitle>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             {parallelSubjects.map((s) => {
               const done = parallelLog?.[wk]?.[s.id] || 0;
@@ -1572,8 +1304,14 @@ function TodayView({
             })}
           </div>
           <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, marginTop: 8 }}>
-            À faire chaque semaine quoi qu’il arrive — même les semaines chargées.
+            Des minimums à protéger si possible — une semaine d’examen majeur ou une
+            capacité réduite peuvent légitimement passer devant.
           </div>
+          {exportStale && (
+            <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint, marginTop: 10 }}>
+              💾 Aucun export récent de tes données — pense à <b>Réglages → Exporter (JSON)</b> (les instantanés locaux ne survivent pas à ce navigateur).
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -1734,29 +1472,57 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 7, flexWrap: 'wrap' }}>
                       <Mono style={{ fontSize: 11, color: C.dim }}>{fmtShortDate(e.date)}</Mono>
                       <Chip color={C.dim}>{(e.chapterIds || []).length} chap.</Chip>
+                      <Chip color={e.importance === 'major' ? C.bad : e.importance === 'minor' ? C.faint : C.dim}
+                        title="Importance de l'épreuve (module la pression d'examen)">
+                        {IMPORTANCE[e.importance || 'normal'].label.toLowerCase()}
+                      </Chip>
                       {annales && <Chip color={C.warn}><CalendarDays size={11} /> examen proche</Chip>}
                     </div>
                     {readinessByExam?.[e.id] && (() => {
                       const r = readinessByExam[e.id];
-                      const col = thermal((1 - r.avgR) * 4);
                       return (
-                        <div title="Mémoire moyenne prévue le jour J, si tu ne revois rien d'ici là."
+                        <div title="Rappel moyen estimé le jour J sans nouvelle révision — estimation de rappel, pas une probabilité de réussir l'épreuve."
                           style={{ marginTop: 8 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>mémoire prévue le jour J</span>
-                            <Mono style={{ fontSize: 12, color: col, fontWeight: 700 }}>~{Math.round(r.avgR * 100)} %</Mono>
-                            {r.weak > 0 && (
-                              <Chip color={C.warn} style={{ marginLeft: 'auto' }}>
-                                <AlertTriangle size={11} /> {r.weak} fragile{r.weak > 1 ? 's' : ''}
-                              </Chip>
-                            )}
-                          </div>
-                          <div style={{ height: 5, background: C.inset, borderRadius: 3, marginTop: 5, overflow: 'hidden', border: `1px solid ${C.line}` }}>
-                            <div className="cad-bar" style={{ width: `${clamp(r.avgR, 0, 1) * 100}%`, height: '100%', background: col, opacity: .8 }} />
-                          </div>
-                          {r.weak > 0 && (
-                            <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, marginTop: 4 }}>
-                              le plus fragile : {r.per[0].chapter.name} (~{Math.round(r.per[0].projR * 100)} %)
+                          {/* Les jamais-testés d'abord : catégorie prioritaire, jamais fondue dans la moyenne */}
+                          {r.untested.length > 0 && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 6 }}>
+                              <AlertTriangle size={12} color={C.warn} />
+                              <span style={{ fontFamily: SANS, fontSize: 11.5, color: C.warn, fontWeight: 600 }}>
+                                {r.untested.length} chapitre{r.untested.length > 1 ? 's' : ''} jamais testé{r.untested.length > 1 ? 's' : ''} — priorité
+                              </span>
+                              <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {r.untested.map((c) => c.name).join(', ')}
+                              </span>
+                            </div>
+                          )}
+                          {r.avgR != null ? (() => {
+                            const col = thermal((1 - r.avgR) * 4);
+                            return (
+                              <>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                  <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>
+                                    rappel estimé le jour J · {r.testedCount}/{r.coveredCount} testés
+                                  </span>
+                                  <Mono style={{ fontSize: 12, color: col, fontWeight: 700 }}>~{Math.round(r.avgR * 100)} %</Mono>
+                                  {r.weak > 0 && (
+                                    <Chip color={C.warn} style={{ marginLeft: 'auto' }}>
+                                      <AlertTriangle size={11} /> {r.weak} fragile{r.weak > 1 ? 's' : ''}
+                                    </Chip>
+                                  )}
+                                </div>
+                                <div style={{ height: 5, background: C.inset, borderRadius: 3, marginTop: 5, overflow: 'hidden', border: `1px solid ${C.line}` }}>
+                                  <div className="cad-bar" style={{ width: `${clamp(r.avgR, 0, 1) * 100}%`, height: '100%', background: col, opacity: .8 }} />
+                                </div>
+                                {r.weak > 0 && (
+                                  <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, marginTop: 4 }}>
+                                    le plus fragile : {r.per[0].chapter.name} (~{Math.round(r.per[0].projR * 100)} %)
+                                  </div>
+                                )}
+                              </>
+                            );
+                          })() : (
+                            <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>
+                              aucun chapitre couvert encore testé — pas d’estimation de rappel
                             </div>
                           )}
                         </div>
@@ -1827,7 +1593,7 @@ function LevelPicker({ current, onPick, compact }) {
 function SubjectsView({
   subjects, chapters, exams, settings, today,
   onAddSubject, onUpdateSubject, onDeleteSubject,
-  onAddChapter, onUpdateChapter, onDeleteChapter, onSetLevel,
+  onAddChapter, onUpdateChapter, onDeleteChapter, onSetLevel, onSetMinutes,
   onAddExam, onUpdateExam, onDeleteExam, onToggleExamChapter,
 }) {
   const [open, setOpen] = useState({});
@@ -1900,7 +1666,7 @@ function SubjectsView({
                       const tcol = thermal(m.priority);
                       const since = c.lastReviewed
                         ? (m.since === 0 ? 'revu aujourd’hui' : `revu il y a ${m.since} j`)
-                        : 'jamais révisé';
+                        : 'jamais testé';
                       return (
                         <div key={c.id} className="cad-card" style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 10, background: C.panel2, border: `1px solid ${C.line}`, borderLeft: `3px solid ${tcol}`, borderRadius: 8 }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1910,11 +1676,35 @@ function SubjectsView({
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', paddingLeft: 34 }}>
                             <Pencil size={12} color={C.faint} />
-                            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>niveau</span>
+                            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}
+                              title="Recalibrer : le chapitre repart de ce niveau (date de test effacée, historique archivé).">
+                              niveau
+                            </span>
                             <LevelPicker compact current={c.difficulty} onPick={(l) => onSetLevel(c.id, l)} />
                             <Mono style={{ fontSize: 11, color: C.faint }}>
-                              · {since} · prochaine {m.dueIn <= 0 ? 'auj.' : `dans ~${m.dueIn} j`} · solidité {round1(m.stability)} j
+                              · {since} · prochain test {m.dueIn <= 0 ? 'auj.' : `dans ~${m.dueIn} j`} · solidité {round1(m.stability)} j
                             </Mono>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', paddingLeft: 34 }}>
+                            <Clock3 size={12} color={C.faint} />
+                            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>taille</span>
+                            <div style={{ display: 'flex', gap: 5 }}>
+                              {CHAPTER_SIZES.map((mn) => {
+                                const on = (c.estimatedMinutes ?? 30) === mn;
+                                return (
+                                  <button key={mn} type="button" onClick={() => onSetMinutes(c.id, mn)}
+                                    title="temps de travail estimé pour une séance sur ce chapitre"
+                                    style={{
+                                      fontFamily: MONO, fontSize: 11, padding: '3px 8px', borderRadius: 999, cursor: 'pointer',
+                                      border: `1px solid ${on ? 'rgba(94,169,255,.5)' : C.line2}`,
+                                      background: on ? 'rgba(94,169,255,.14)' : 'transparent',
+                                      color: on ? '#dbeafe' : C.dim,
+                                    }}>
+                                    {fmtMinutes(mn)}
+                                  </button>
+                                );
+                              })}
+                            </div>
                           </div>
                           <div style={{ paddingLeft: 34 }}>
                             <PriorityReader m={m} compact />
@@ -1941,6 +1731,13 @@ function SubjectsView({
                               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                                 <TextInput value={e.name} onChange={(v) => onUpdateExam(e.id, { name: v })} ariaLabel="nom de l'épreuve" style={{ maxWidth: 220 }} />
                                 <TextInput type="date" value={e.date} onChange={(v) => onUpdateExam(e.id, { date: v })} ariaLabel="date de l'épreuve" style={{ maxWidth: 160 }} />
+                                <Segmented value={e.importance || 'normal'} ariaLabel="importance de l'épreuve"
+                                  onChange={(v) => onUpdateExam(e.id, { importance: v })}
+                                  options={[
+                                    { value: 'minor', label: 'Mineure' },
+                                    { value: 'normal', label: 'Normale' },
+                                    { value: 'major', label: 'Majeure' },
+                                  ]} />
                                 <Mono style={{ fontSize: 12, color: days < 0 ? C.faint : (days <= settings.examModeThreshold ? C.warn : C.accent) }}>
                                   {days < 0 ? 'passée' : `J−${days}`}
                                 </Mono>
@@ -2045,6 +1842,7 @@ function ProgressView({ reviewLog, ranked, today, subjects, settings }) {
   const avgR = reviewed.length
     ? reviewed.reduce((a, c) => a + c.R, 0) / reviewed.length : null;
   const fresh = ranked.filter((c) => c.urgency < 1).length;
+  const untestedCount = ranked.length - reviewed.length;
   const calib = observedRetention(reviewLog);
 
   const gradeCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
@@ -2066,15 +1864,22 @@ function ProgressView({ reviewLog, ranked, today, subjects, settings }) {
 
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
         <Stat label="série" value={streak} unit={`jour${streak > 1 ? 's' : ''} d’affilée`} tone={streak > 0 ? C.warn : C.faint} />
-        <Stat label="révisions (total)" value={reviewLog.length} unit="notées" tone={C.accent} />
-        <Stat label="mémoire moyenne" value={avgR != null ? `${Math.round(avgR * 100)}%` : '—'}
-          unit={reviewed.length ? `${reviewed.length} chap.` : 'aucun chapitre revu'} tone={avgR != null ? thermal((1 - avgR) * 4) : C.faint} />
+        <Stat label="tests (total)" value={reviewLog.length} unit="notés" tone={C.accent} />
+        <Stat label="rappel moyen estimé" value={avgR != null ? `${Math.round(avgR * 100)}%` : '—'}
+          unit={`sur ${reviewed.length}/${ranked.length} chap. testés`} tone={avgR != null ? thermal((1 - avgR) * 4) : C.faint} />
+        <Stat label="couverture" value={`${reviewed.length}/${ranked.length}`}
+          unit={untestedCount > 0 ? `${untestedCount} jamais testé${untestedCount > 1 ? 's' : ''}` : 'tout est testé'}
+          tone={untestedCount > 0 ? C.warn : C.good} />
         <Stat label="à jour" value={`${fresh}/${ranked.length}`} unit="chapitres" tone={ranked.length && fresh === ranked.length ? C.good : C.dim} />
         {calib.n >= 5 && (
           <Stat label="rétention observée" value={`${Math.round(calib.rate * 100)}%`}
-            unit={`cible ${Math.round((settings?.requestRetention ?? 0.9) * 100)} % · ${calib.n} rév.`}
+            unit={`cible ${Math.round((settings?.requestRetention ?? 0.9) * 100)} % · ${calib.n} tests`}
             tone={calib.rate >= (settings?.requestRetention ?? 0.9) - 0.05 ? C.good : C.warn} />
         )}
+      </div>
+      <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, marginTop: -8 }}>
+        Le « rappel estimé » est une estimation du modèle sur les chapitres testés —
+        pas une probabilité de réussir un examen. Les chapitres jamais testés n’entrent pas dans la moyenne.
       </div>
       {calib.n >= 5 && calib.rate < (settings?.requestRetention ?? 0.9) - 0.07 && (
         <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.warn }}>
@@ -2084,16 +1889,16 @@ function ProgressView({ reviewLog, ranked, today, subjects, settings }) {
       )}
 
       <div>
-        <SectionTitle icon={Activity}>Révisions des 30 derniers jours</SectionTitle>
+        <SectionTitle icon={Activity}>Tests des 30 derniers jours</SectionTitle>
         {reviewLog.length === 0 ? (
-          <Empty>Encore aucune révision notée. Après chaque séance, note le chapitre (Oublié · Difficile · Bien · Facile) : tout s’enregistre ici.</Empty>
+          <Empty>Encore aucun test noté. Après chaque séance, teste-toi sans correction puis note le résultat : tout s’enregistre ici.</Empty>
         ) : (
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 14 }}>
             <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height: 110 }}>
               {days.map((d) => {
                 const n = byDay[d] || 0;
                 return (
-                  <div key={d} title={`${fmtShortDate(d)} : ${n} révision${n > 1 ? 's' : ''}`}
+                  <div key={d} title={`${fmtShortDate(d)} : ${n} test${n > 1 ? 's' : ''}`}
                     style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', height: '100%' }}>
                     <div className="cad-bar" style={{
                       height: `${n ? 8 + (n / maxDay) * 92 : 2}%`,
@@ -2114,7 +1919,7 @@ function ProgressView({ reviewLog, ranked, today, subjects, settings }) {
 
       {bySubject.length > 0 && (
         <div>
-          <SectionTitle icon={Layers}>Mémoire par matière</SectionTitle>
+          <SectionTitle icon={Layers}>Rappel estimé par matière (chapitres testés)</SectionTitle>
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
             {bySubject.map(({ subject, avg, late, total }) => {
               const col = avg != null ? thermal((1 - avg) * 4) : C.faint;
@@ -2173,29 +1978,33 @@ function ProgressView({ reviewLog, ranked, today, subjects, settings }) {
  *  Vue 5 — Réglages
  * ================================================================== */
 
+// Réglages VISIBLES : ce que l'utilisateur comprend et décide vraiment
+// (capacité par défaut + rétention cible). Le reste est expert.
 const SLIDERS = [
-  { key: 'requestRetention', label: 'Rétention cible', min: 0.8, max: 0.97, step: 0.01, fmt: (v) => `${Math.round(v * 100)} %`, help: 'tu revois quand il te reste ce niveau en mémoire — plus haut = plus de révisions' },
-  { key: 'subjectsPerDay', label: 'Matières par jour', min: 1, max: 6, step: 1, unit: '', help: 'ta capacité quotidienne' },
-  { key: 'sessionHours', label: 'Durée d’une séance', min: 1, max: 4, step: 0.5, unit: ' h', help: 'temps par matière' },
-  { key: 'minutesPerChapter', label: 'Minutes par chapitre', min: 10, max: 60, step: 5, unit: ' min', help: 'sert à estimer le nombre de chapitres par séance' },
-  { key: 'maxExamPressure', label: 'Pression d’examen max', min: 1, max: 10, step: 0.5, unit: '×', help: 'multiplicateur au jour J' },
+  { key: 'requestRetention', label: 'Rétention cible', min: 0.8, max: 0.97, step: 0.01, fmt: (v) => `${Math.round(v * 100)} %`, help: 'tu retestes quand le rappel estimé retombe à ce niveau — plus haut = plus de travail' },
+  { key: 'subjectsPerDay', label: 'Matières par jour (défaut)', min: 1, max: 6, step: 1, unit: '', help: 'capacité par défaut — ajustable chaque jour depuis l’accueil' },
+  { key: 'sessionHours', label: 'Durée d’une séance (défaut)', min: 1, max: 4, step: 0.5, unit: ' h', help: 'temps par matière, par défaut' },
+];
+
+// Réglages EXPERTS : paramètres du modèle, arbitraires ou scientifiques.
+// Les déplacer ne « calibre » rien — n'y touche que si tu sais pourquoi.
+const ADVANCED_SLIDERS = [
+  { key: 'maxExamPressure', label: 'Pression d’examen max', min: 1, max: 10, step: 0.5, unit: '×', help: 'multiplicateur au jour J (épreuve normale)' },
   { key: 'pressureHorizon', label: 'Horizon de pression', min: 7, max: 90, step: 1, unit: ' j', help: 'au-delà, l’examen n’influe pas' },
   { key: 'examModeThreshold', label: 'Seuil « examen proche »', min: 3, max: 45, step: 1, unit: ' j', help: 'à partir de combien de jours une UE est signalée' },
-];
-
-const ADVANCED_SLIDERS = [
   { key: 'minInterval', label: 'Stabilité initiale « Jamais vu »', min: 1, max: 7, step: 1, unit: ' j', help: 'point de départ des nouveaux chapitres' },
   { key: 'maxInterval', label: 'Stabilité initiale « Solide »', min: 7, max: 60, step: 1, unit: ' j', help: 'point de départ d’un chapitre déjà maîtrisé' },
+  { key: 'minutesPerChapter', label: 'Taille par défaut d’un chapitre', min: 15, max: 60, step: 15, unit: ' min', help: 'appliquée aux nouveaux chapitres (modifiable chapitre par chapitre)' },
 ];
 
-function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, today, listBackups, onRestore }) {
+function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, today, listBackups, onRestore, lastExportAt, onExported }) {
   const fileRef = useRef(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const backups = listBackups ? listBackups() : [];
 
   // Compromis rétention <-> travail, calculé sur TES chapitres (live).
   const load = chapters?.length ? cruiseLoad(chapters, settings) : null;
-  const dailyCap = Math.max(1, Math.round((settings.sessionHours * 60) / settings.minutesPerChapter)) * settings.subjectsPerDay;
+  const dailyCap = Math.max(1, Math.round(defaultDailyMinutes(settings) / 30));
 
   const exportJSON = () => {
     try {
@@ -2205,6 +2014,7 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
       a.href = url; a.download = `cadence-${today}.json`;
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
+      onExported?.();
     } catch (e) { alert('Export impossible dans cet environnement.'); }
   };
   const onFile = (e) => {
@@ -2251,7 +2061,7 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
           color: load > dailyCap ? C.warn : C.good,
         }}>
           charge de croisière ≈ {load < 0.95 ? round1(load) : Math.round(load)} chap./jour
-          <span style={{ color: C.faint }}> · ta capacité : {dailyCap}/jour</span>
+          <span style={{ color: C.faint }}> · ta capacité : ≈ {dailyCap} chap. de 30 min/jour</span>
           {load > dailyCap ? ' — trop haut, baisse la rétention' : ''}
         </div>
       )}
@@ -2273,8 +2083,13 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
         </div>
         <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, marginTop: 8 }}>
           Astuce clavier : <Mono color={C.dim}>Tab</Mono> pour sélectionner une carte, puis
-          <Mono color={C.dim}> 1</Mono>–<Mono color={C.dim}>4</Mono> pour noter
-          (Oublié · Difficile · Bien · Facile).
+          <Mono color={C.dim}> 1</Mono>–<Mono color={C.dim}>4</Mono> pour noter.
+        </div>
+        <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.dim, marginTop: 10, lineHeight: 1.55, maxWidth: 640 }}>
+          <b>Comment noter :</b> la note décrit le <b>résultat d’un test sans correction sous
+          les yeux</b> (rappel de tête, exercice ou annale selon la « preuve » choisie sur
+          l’accueil) — jamais le temps passé ni l’impression d’avoir compris. Relire
+          passivement n’est pas un test.
         </div>
       </div>
 
@@ -2287,15 +2102,21 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
           <div>
             <Btn variant="bare" onClick={() => setShowAdvanced((v) => !v)} style={{ color: C.dim, fontSize: 12, paddingLeft: 0 }}>
               <ChevronRight size={14} style={{ transition: 'transform .22s var(--ease)', transform: showAdvanced ? 'rotate(90deg)' : 'none' }} />
-              réglages avancés
+              réglages experts (paramètres du modèle)
             </Btn>
             <div className={`cad-collapse${showAdvanced ? ' open' : ''}`}>
               <div className="cad-collapse-in" {...(showAdvanced ? {} : { inert: '' })}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 14, paddingTop: 10 }}>
+                  <div style={{ fontFamily: SANS, fontSize: 11, color: C.warn }}>
+                    Paramètres internes du modèle. Les déplacer ne « calibre » rien
+                    scientifiquement — les valeurs par défaut conviennent dans la
+                    quasi-totalité des cas.
+                  </div>
                   {ADVANCED_SLIDERS.map(renderSlider)}
                   <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>
-                    Le moteur FSRS ajuste ensuite la stabilité et la difficulté de chaque
-                    chapitre à partir de tes notes (Oublié · Difficile · Bien · Facile).
+                    Le modèle de rappel (équations FSRS-4.5, poids par défaut publiés,
+                    non personnalisés) ajuste ensuite la stabilité et la difficulté de
+                    chaque chapitre à partir de tes notes de test.
                   </div>
                 </div>
               </div>
@@ -2339,7 +2160,7 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
             </div>
             <div style={{ position: 'relative', display: 'flex', alignItems: 'flex-end', gap: 2, height: 96 }}>
               {fBars.map((b, i) => (
-                <div key={i} title={`${Math.round(b.t)} j → mémoire ${Math.round(b.R * 100)}%`} style={{
+                <div key={i} title={`${Math.round(b.t)} j → rappel estimé ${Math.round(b.R * 100)}%`} style={{
                   flex: 1, height: `${4 + b.R * 96}%`, background: thermal((1 - b.R) * 4),
                   borderRadius: '2px 2px 0 0', opacity: 0.9,
                   transition: 'height .28s var(--ease), background .28s var(--ease)',
@@ -2351,7 +2172,7 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
               }} />
             </div>
             <div style={{ fontFamily: MONO, fontSize: 11, color: C.dim, marginTop: 8 }}>
-              révision visée à ~{Math.round(dueAt)} j (mémoire {Math.round(settings.requestRetention * 100)} %),
+              test visé à ~{Math.round(dueAt)} j (rappel estimé {Math.round(settings.requestRetention * 100)} %),
               solidité {round1(sampleS)} j (niveau « Moyen »)
             </div>
           </div>
@@ -2366,10 +2187,21 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
           <input ref={fileRef} type="file" accept="application/json,.json" onChange={onFile} style={{ display: 'none' }} />
           <Btn variant="danger" onClick={onReset}><RotateCcw size={14} /> Réinitialiser</Btn>
         </div>
+        <div style={{ marginTop: 10, fontFamily: SANS, fontSize: 11.5 }}>
+          <span style={{ color: C.dim }}>Dernier export : </span>
+          {lastExportAt ? (
+            <Mono style={{ fontSize: 11.5, color: daysBetween(lastExportAt, today) > 14 ? C.warn : C.good }}>
+              {lastExportAt}{daysBetween(lastExportAt, today) > 14 ? ' — pense à réexporter' : ''}
+            </Mono>
+          ) : (
+            <Mono style={{ fontSize: 11.5, color: C.warn }}>jamais — pense à exporter une fois tes données saisies</Mono>
+          )}
+        </div>
         {backups.length > 0 && (
           <div style={{ marginTop: 12 }}>
-            <div style={{ fontFamily: SANS, fontSize: 12, color: C.dim, marginBottom: 7 }}>
-              Sauvegardes automatiques (7 jours glissants) — restaurer :
+            <div style={{ fontFamily: SANS, fontSize: 12, color: C.dim, marginBottom: 7 }}
+              title="Instantanés pris chaque jour dans le stockage de CE navigateur — ils ne protègent pas contre la perte de l'appareil ou l'effacement du navigateur.">
+              Instantanés locaux (7 jours glissants, même appareil) — restaurer :
             </div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               {backups.map((d) => (
@@ -2389,9 +2221,10 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
         <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, marginTop: 10, lineHeight: 1.5, maxWidth: 620 }}>
           Tout est stocké localement sur cet appareil (une seule clé <Mono color={C.dim}>{STORAGE_KEY}</Mono>),
           avec repli en mémoire si le stockage est indisponible — rien n’est envoyé sur un serveur.
-          Une sauvegarde automatique est prise chaque jour (7 conservées).
-          L’appli est <b>installable</b> (« Ajouter à l’écran d’accueil ») et fonctionne <b>hors-ligne</b>.
-          Exporte de temps en temps quand même : c’est ta sauvegarde externe.
+          Les <b>instantanés locaux</b> quotidiens vivent dans le même stockage : ils réparent
+          une fausse manip, pas la perte de l’appareil. Ta seule vraie sauvegarde externe,
+          c’est <b>Exporter (JSON)</b>. L’appli est installable (« Ajouter à l’écran d’accueil »)
+          et fonctionne hors-ligne.
         </div>
       </div>
     </div>

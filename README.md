@@ -1,88 +1,118 @@
 # CADENCE
 
-Planificateur d'étude **piloté par les examens** — répétition espacée au niveau
-**chapitre** (et non carte), moteur **FSRS‑4.5**, plan du jour borné par ta
-capacité, calendrier avec prévision de charge et statistiques. Outil quotidien
-privé : ~2 min le soir pour noter ce qui a été revu.
+Outil d'étude **spécialisé** qui répond à une seule question :
 
-> 100 % côté client, aucune dépendance backend. Données locales (localStorage),
-> export / import JSON.
+> « Parmi mes unités académiques, lesquelles dois-je travailler ou retester
+> aujourd'hui, compte tenu de mon niveau constaté, des examens et du temps
+> réellement disponible ? »
+
+Répétition espacée au niveau **chapitre** (maths / physique), pilotée par les
+examens et bornée par la capacité réelle du jour. PWA 100 % locale : aucun
+backend, aucune authentification, données sur l'appareil (export/import JSON).
+
+CADENCE n'est volontairement **pas** : un emploi du temps, un gestionnaire
+d'habitudes ou de tâches, une prise de notes, un clone d'Anki, un Pomodoro.
 
 ## Idée centrale
-
-La priorité d'un chapitre combine deux signaux, et la pression d'examen
-**multiplie** au lieu d'additionner :
 
 ```
 priorité = urgence_de_péremption × pression_d'examen
 ```
 
-Un chapitre **fragile dont l'examen approche** explose ; un chapitre **déjà
-solide** ne monte qu'un peu. La décomposition est toujours affichée
-(`urgence × multiplicateur`, l'épreuve qui la déclenche, J−x) — jamais de
-boîte noire.
+La pression d'examen **multiplie** (elle n'additionne pas) : un chapitre
+fragile dont l'épreuve approche explose, un chapitre solide monte peu. La
+décomposition est toujours affichée — jamais de boîte noire.
 
-## Le moteur (FSRS‑4.5)
+## Le modèle de rappel (honnêteté)
 
-Chaque chapitre porte un état mémoire **(stabilité S, difficulté D)** mis à
-jour par l'algorithme **FSRS‑4.5** (poids par défaut publiés, 17 paramètres) à
-chaque révision notée **Oublié · Difficile · Bien · Facile** :
+CADENCE utilise un **modèle de rappel inspiré des équations FSRS‑4.5, appliqué
+au niveau chapitre** (stabilité + difficulté par chapitre, courbe d'oubli en
+loi de puissance, poids par défaut publiés — **non personnalisés**).
 
-- **Courbe d'oubli en loi de puissance** `R(t) = (1 + F·t/S)^−0.5`, calée pour
-  `R(S) = 90 %` (Wixted ; FSRS).
-- **Succès** : `S' = S·(1 + e^{w8}·(11−D)·S^{−w9}·(e^{w10(1−R)}−1)·pénalité/bonus)` —
-  intervalles expansifs, gain maximal près du seuil d'oubli (effet
-  d'espacement, Cepeda/Bjork), modulé par la difficulté.
-- **Oubli** : la stabilité **chute** (`w11·D^{−w12}·((S+1)^{w13}−1)·e^{w14(1−R)}`,
-  plafonnée à S) et la difficulté monte.
-- **Rétention cible** réglable (80–97 %) : on planifie la révision quand `R` y
-  retombe.
-- Chapitre sans historique : niveau nommé (« Jamais vu → Solide ») qui seed
-  S et D ; ensuite les notes pilotent tout.
-- **Journal des révisions** : chaque note est archivée (annulable), alimente
-  les statistiques et la stabilité du plan du jour.
+Ce que le modèle fournit est une **estimation de rappel** (« rappel estimé »),
+pas une probabilité de réussir un examen : réussir une épreuve dépend aussi du
+transfert, de la rédaction, du temps, du barème. L'interface le rappelle
+partout où un pourcentage apparaît, et sépare systématiquement les chapitres
+**testés** (moyenne calculée) des chapitres **jamais testés** (catégorie
+prioritaire, jamais fondue dans une moyenne).
 
-## Capacité & plan du jour
+## Des évaluations académiquement valides
 
-`subjectsPerDay` matières par jour (3 par défaut), chacune en séance de
-`sessionHours` h (2 h) : les matières les plus sous pression d'abord, les autres
-remontent naturellement les jours suivants. Le plan du jour est **stable** :
-noter un chapitre ne réorganise pas la liste (il passe simplement à « fait »,
-annulable).
+Noter un chapitre = enregistrer le **résultat d'un test sans correction sous
+les yeux** — pas le temps passé, pas l'impression d'avoir compris. Avant de
+noter, on choisit le **type de preuve** :
 
-Le plan est aussi **honnête** : un chapitre n'y entre que s'il vaut la peine
-d'être revu aujourd'hui (≥ 75 % de l'intervalle écoulé, ou poussé par un
-examen). Rien d'utile → « Rien d'urgent aujourd'hui », plutôt que du
-remplissage contre-productif. En cas de retard supérieur à la capacité
-quotidienne, une **alerte de surcharge** chiffre le rattrapage et propose des
-leviers ; la **charge de croisière** (Σ 1/intervalle) s'affiche en direct sous
-le curseur de rétention ; la **rétention observée** (Progrès) confronte le
-modèle à tes résultats réels.
+| Preuve | Échec → Réussite |
+| --- | --- |
+| Rappel sans support | Oublié · Avec effort · Correct · Immédiat |
+| Exercice standard | Bloqué · Avec aide · Autonome · Autonome et propre |
+| Problème / annale | Bloqué · Partiel · Résolu · Résolu proprement dans le temps |
+
+Chaque note est journalisée avec son `evidenceType` (les anciennes révisions
+migrées portent `legacy`) — ce qui permettra plus tard de distinguer rappel,
+exercice et transfert dans le modèle.
+
+## Niveaux initiaux réellement différenciés
+
+Un chapitre jamais testé est calibré par un niveau nommé, qui fixe son urgence
+initiale : **Jamais vu 2.2 · Fragile 1.6 · Moyen 1.0 · Solide 0.5**. Un
+chapitre « Solide » jamais testé n'encombre pas le plan du jour ; un « Jamais
+vu » y entre immédiatement. Recalibrer un chapitre (avec confirmation) le fait
+repartir du niveau choisi : date de test effacée, historique **archivé** —
+jamais d'état contradictoire.
+
+## Capacité réelle & plan en minutes
+
+- **Temps disponible aujourd'hui** réglable sur l'accueil (0 h · 2 h · 4 h ·
+  6 h · personnalisé par pas de 30 min), stocké par date (`capacityOverrides`).
+  À 0 h : pas de faux plan, pas de faux retard, classement consultable.
+- Chaque chapitre porte une **taille estimée** (15/30/60/90 min). Le plan
+  remplit la capacité **en minutes** (jamais de dépassement) et affiche le
+  temps par séance, le nombre d'unités et le total.
+- Les matières sont classées par un **score robuste** (priorité max + moyenne
+  du top 3) : saucissonner une matière en petits chapitres ne lui donne aucun
+  avantage.
+
+## Importance des épreuves
+
+Chaque épreuve est **Mineure / Normale / Majeure**. L'importance module la
+pression d'examen sans l'exploser :
+
+```
+mult = 1 + (mult_base − 1) × w      w ∈ {0.6, 1.0, 1.4}
+```
+
+Borne : `mult ≤ 1 + (maxExamPressure − 1) × 1.4` (≤ 6.6 par défaut). À date et
+couverture identiques : majeure > normale > mineure (testé).
 
 ## Les cinq vues
 
-1. **Aujourd'hui** — anneau de progression, séances par matière, cartes avec
-   **jauge mémoire** (R %), raison en clair, notation à 4 boutons (avec
-   **aperçu de l'intervalle** au survol), **reporter** (le plan se recomplète),
-   annulation (toast), **clavier** (Tab puis 1–4), minimums hebdo protégés.
-2. **Calendrier** — épreuves avec **mémoire prévue le jour J** (projection
-   FSRS par chapitre couvert, chapitres fragiles signalés), fenêtres « examen
-   proche » ombrées, **prévision de charge** (grille + 14 j).
-3. **Matières** — CRUD des UE, chapitres (niveau nommé, jauge, prochaine
-   échéance) et épreuves (date + chapitres couverts).
-4. **Progrès** — série de jours, total de révisions, mémoire moyenne (globale
-   et **par matière**), chapitres à jour, histogramme 30 j, répartition des
-   notes.
-5. **Réglages** — rétention cible, capacité, pression d'examen, avancé
-   (stabilités initiales), aperçus live (courbe d'oubli + multiplicateur),
-   export / import / réinitialisation, **sauvegardes automatiques
-   restaurables** (7 jours glissants).
+1. **Aujourd'hui** — capacité du jour, plan par séances (minutes réelles),
+   type de preuve, notation 4 issues adaptées, annulation, reporter, clavier
+   (Tab puis 1–4), minimums hebdo *à protéger si possible*.
+2. **Calendrier** — épreuves (avec importance), rappel estimé le jour J *sans
+   nouvelle révision* (testés seulement, non-testés signalés à part),
+   prévision de charge.
+3. **Matières** — UE, chapitres (niveau, taille, prochain test), épreuves
+   (date, importance, chapitres couverts).
+4. **Progrès** — rappel moyen estimé **sur les chapitres testés**, couverture
+   `X/Y testés`, non-testés, rétention observée vs cible, histogramme,
+   répartition des notes.
+5. **Réglages** — capacité par défaut, rétention cible (avec charge de
+   croisière calculée sur tes chapitres), mode simple/détaillé ; paramètres du
+   modèle repliés dans une section **experte** (les déplacer ne « calibre »
+   rien) ; export/import validé ; **instantanés locaux** quotidiens (7 j,
+   même appareil — la seule sauvegarde externe est l'export JSON).
 
-## PWA
+## Données & fiabilité
 
-CADENCE est **installable** (« Ajouter à l'écran d'accueil ») et fonctionne
-**hors-ligne** (service worker : réseau d'abord pour les mises à jour, cache
-en secours ; assets en cache d'abord).
+- Une seule clé de stockage (`cadence.v2`), **schéma v3 versionné** ; les
+  données v1/v2 sont migrées automatiquement, sans perte (matières, chapitres,
+  examens, réglages, historique, reports, instantanés).
+- Import JSON **validé strictement** (message d'erreur clair, confirmation
+  avant écrasement). Rappel discret d'export si aucun export récent.
+- Repli en mémoire si le stockage est indisponible. Hors-ligne via service
+  worker ; installable (« Ajouter à l'écran d'accueil »).
 
 ## Lancer
 
@@ -90,17 +120,17 @@ en secours ; assets en cache d'abord).
 npm install
 npm run dev      # serveur de dev Vite
 npm run build    # build de production -> dist/
-npm test         # tests du moteur (FSRS, priorité, plan, prévision, migration)
+npm test         # tests du moteur (45+) : modèle, plan, migrations, imports
 ```
 
 ## Architecture
 
-- **Un seul fichier** : `src/Cadence.jsx` (composant + moteur en exports nommés
-  purs, testés).
-- **Persistance** : clé `cadence.v2` (localStorage → repli mémoire), migration
-  automatique depuis `cadence.v1` (maîtrise → difficulté).
-- Déploiement continu sur GitHub Pages (workflow `deploy.yml`).
+- `src/engine.js` — **fonctions pures** : modèle de rappel, priorité, plan en
+  minutes, préparation d'examen, migrations v1→v2→v3, validation d'import,
+  recalibrage. Testé directement.
+- `src/Cadence.jsx` — interface React (un composant par vue) + persistance.
+- Déploiement continu GitHub Pages (`.github/workflows/deploy.yml`).
 
-Réglages par défaut : `requestRetention=0.90`, `subjectsPerDay=3`,
-`sessionHours=2`, `minutesPerChapter=30`, `maxExamPressure=5`,
-`pressureHorizon=35`, `examModeThreshold=21`.
+Défauts : `requestRetention=0.90`, `subjectsPerDay=3`, `sessionHours=2`,
+chapitre = 30 min, `maxExamPressure=5`, `pressureHorizon=35`,
+`examModeThreshold=21`.

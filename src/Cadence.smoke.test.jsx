@@ -12,7 +12,9 @@ describe('Cadence — rendu', () => {
     expect(html).toContain('Aujourd’hui');
     // bande des minimums hebdo issue du seed (matières parallèles)
     expect(html).toContain('Anglais / TOEIC');
-    expect(html).toContain('À tenir cette semaine');
+    expect(html).toContain('Minimums hebdo — à protéger si possible');
+    // capacité réelle du jour
+    expect(html).toContain('Temps disponible aujourd’hui');
     // état vide invitant à agir
     expect(html).toContain('ajoute tes chapitres');
   });
