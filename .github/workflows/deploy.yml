@@ -1,50 +1,63 @@
-# Publie CADENCE sur GitHub Pages à chaque push.
+# Vérifie chaque push/PR et publie CADENCE sur GitHub Pages après succès.
 #
 # ⚠️ UNE SEULE FOIS, à faire à la main (le token Actions n'a pas le droit
 # d'administrer Pages ici) :
 #   Repo → Settings → Pages → Build and deployment → Source = "GitHub Actions"
 # Sans ça, Pages sert la source brute du dépôt (écran noir) au lieu du build.
-name: Deploy to GitHub Pages
+name: Test, build and deploy to GitHub Pages
 
 on:
   push:
     branches:
       - claude/compassionate-newton-5l4tvt
       - main
+  pull_request:
+    branches:
+      - claude/compassionate-newton-5l4tvt
+      - main
   workflow_dispatch:
-
-# Droits requis par le déploiement Pages officiel.
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-# Un seul déploiement à la fois.
-concurrency:
-  group: pages
-  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v6
+      - name: Installer Node.js
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
-      - run: npm ci
-      - run: npm run build
-      - uses: actions/upload-pages-artifact@v3
+      - name: Installer les dépendances
+        run: npm ci
+      - name: Auditer les dépendances
+        run: npm audit --audit-level=high
+      - name: Tester
+        run: npm test
+      - name: Construire la PWA
+        run: npm run build
+      - name: Préparer l'artefact Pages
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v5
         with:
           path: dist
 
   deploy:
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: true
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Déployer sur GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

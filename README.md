@@ -133,9 +133,23 @@ moyenne. La répartition des notes est **séparée par type de preuve**. Pas de
 « série de jours » : rien qui pousse à multiplier des tests faciles pour
 entretenir un compteur.
 
+## Expérience guidée et navigation rapide
+
+- Un **démarrage guidé en trois étapes** accompagne la première configuration :
+  chapitres, épreuve couverte, puis premier test. Chaque action ouvre directement
+  la bonne matière et le bon champ.
+- Une **recherche de chapitres** accessible depuis l'en-tête (`Ctrl/Cmd+K` ou
+  `/`) retrouve un chapitre par son nom ou sa matière, sans tenir compte des
+  accents, puis ouvre et met en évidence le résultat exact.
+- Le **mode focus** n'affiche qu'un chapitre à la fois, avec progression,
+  navigation précédente/suivante, raccourcis clavier et retour sûr au plan
+  complet. Il réutilise strictement la même notation multi-axes que les cartes
+  ordinaires.
+
 ## Les cinq vues
 
-1. **Aujourd'hui** — capacité du jour, plan par séances (minutes réelles),
+1. **Aujourd'hui** — démarrage guidé, capacité du jour, plan par séances
+   (minutes réelles), **mode focus chapitre par chapitre**,
    axe proposé + choix d'axe par carte, notation 4 issues, annulation,
    reporter, **bilan d'épreuve**, clavier (Tab, r/e/p pour l'axe, 1–4 pour
    noter), minimums hebdo *à protéger si possible*.
@@ -155,8 +169,10 @@ entretenir un compteur.
 
 ## Données, migration v3 → v4, fiabilité
 
-- Une seule clé de stockage (`cadence.v2`), **schéma v4 versionné** ; les
-  données v1/v2/v3 sont migrées automatiquement, y compris par import JSON.
+- Un état principal (`cadence.v2`) au **schéma v4 versionné** ; les données
+  v1/v2/v3 sont migrées automatiquement, y compris par import JSON. Une
+  version future/inconnue est refusée : elle n'est jamais rétrogradée comme
+  si elle était ancienne.
 - Migration v3 → v4 **déterministe et non destructive** : le journal est
   intégralement conservé (les notes sans type deviennent `legacy` = rappel).
   L'état de rappel est **reconstruit en rejouant uniquement les événements de
@@ -173,11 +189,24 @@ entretenir un compteur.
   (0–1440 min) et minimums hebdo bornés**, nombres finis (NaN refusé). En
   cas d'erreur : **liste lisible des problèmes, aucune donnée existante
   modifiée**.
+- Au démarrage, un état illisible est mis en quarantaine. CADENCE restaure le
+  dernier instantané quotidien valide ; sans instantané exploitable, toute
+  réécriture reste bloquée jusqu'à un choix explicite. Le contenu brut reste
+  téléchargeable depuis la bannière de récupération.
+- Chaque écriture locale est relue et vérifiée. Quota dépassé, navigateur
+  privé ou repli en mémoire volatile deviennent des alertes visibles avec un
+  accès direct à l'export. Un événement `storage` suspend aussi les écritures
+  lorsque deux onglets divergent, puis demande quelle version conserver.
+- Les instantanés locaux sont pris une fois au début de la journée (7 jours),
+  sans reparser toutes les copies à chaque frappe. Une réinitialisation
+  complète efface état principal, ancien schéma, instantanés et quarantaine.
 - Export par **fichier JSON** ou par **presse-papiers** (« Copier
   l'export »), import par fichier ou **par collage** — la voie fiable sur
   téléphone, où le téléchargement de fichier échoue parfois en silence.
-- Rappel discret d'export si aucun export récent. Repli en mémoire si le
-  stockage est indisponible. Hors-ligne via service worker ; installable.
+- Rappel discret d'export si aucun export récent. Hors-ligne dès la première
+  installation grâce à un service worker généré au build : shell, bundle
+  hashé, manifeste et icônes sont précachés sous une révision dédiée. Le
+  nettoyage ne touche qu'aux caches préfixés `cadence-`.
 
 ## Limites assumées
 
@@ -187,18 +216,23 @@ entretenir un compteur.
   des modèles validés scientifiquement.
 - **Aucun chiffre de CADENCE n'est une prédiction de réussite à un examen** :
   réussir dépend aussi du transfert, de la rédaction, du barème, du jour J.
+- Sur un site de projet GitHub Pages, `localStorage` est partagé avec les
+  autres projets du même domaine. Une origine ou un domaine dédié est requis
+  si cette isolation entre applications est importante.
 - Hors périmètre (volontairement) : agenda universel, notes, fichiers,
   Pomodoro, cartes Anki, IA générative.
 
 ## Lancer
 
+Prérequis : Node.js 22.12+ ou Node.js 24 LTS.
+
 ```bash
-npm install
+npm ci
 npm run dev      # serveur de dev Vite
-npm run build    # build de production -> dist/
-npm test         # 107 tests : moteur (FSRS, heuristiques, plan, migrations,
-                 # validation d'import, bilan d'épreuve) + interactions
-                 # réelles (RTL + jsdom)
+npm run build    # build de production + précache PWA révisionné -> dist/
+npm test         # 137 tests : moteur, stockage/récupération, changement de jour,
+                 # interactions réelles (RTL + jsdom), PWA/service worker
+                 # et génération déterministe du build hors-ligne
 ```
 
 ## Architecture
@@ -208,11 +242,23 @@ npm test         # 107 tests : moteur (FSRS, heuristiques, plan, migrations,
   la fois), priorité multi-axes, plan en minutes, préparation d'examen,
   bilan d'épreuve, migrations v1→v2→v3→v4, validation d'import, recalibrage.
   Testé directement.
-- `src/Cadence.jsx` — interface React (un composant par vue) + persistance.
+- `src/Cadence.jsx` — interface React (un composant par vue), mutations et
+  états visibles de sauvegarde/conflit.
+- `src/OnboardingChecklist.jsx`, `src/ChapterSearch.jsx`, `src/FocusMode.jsx` —
+  parcours guidé, recherche clavier accessible et séance chapitre par chapitre.
+- `src/storage.js` — chargement sûr, quarantaine/récupération, écritures
+  vérifiées et instantanés quotidiens.
+- `src/useCurrentDay.js` — bascule à minuit et resynchronisation au retour au
+  premier plan, pour qu'une PWA laissée ouverte date toujours correctement.
 - `src/Cadence.test.js` — tests du moteur ; `src/Cadence.ui.test.jsx` — tests
   d'interaction (React Testing Library + jsdom) ; `src/Cadence.smoke.test.jsx`
   — rendu SSR.
-- Déploiement continu GitHub Pages (`.github/workflows/deploy.yml`).
+- `scripts/generate-service-worker.mjs` — injecte après le build une révision et
+  la liste exhaustive des assets dans le service worker, puis vérifie que le
+  shell, le manifeste et les icônes sont bien précachés.
+- CI/CD GitHub Pages (`.github/workflows/deploy.yml`) : Node 24, audit npm,
+  137 tests et build sur chaque push/PR ; permissions Pages limitées au job
+  de déploiement.
 
 Défauts : `requestRetention=0.90`, `subjectsPerDay=3`, `sessionHours=2`,
 durées par axe 15/30/60 min, `maxExamPressure=5`, `pressureHorizon=35`,

@@ -1,55 +1,76 @@
 /*
- * Service worker CADENCE : l'appli fonctionne hors-ligne.
- * - navigations : réseau d'abord (pour récupérer les mises à jour),
- *   repli cache si hors-ligne ;
- * - assets (JS/CSS hashés, icônes) : cache d'abord, réseau en secours.
+ * Gabarit du service worker CADENCE.
+ * `npm run build` remplace les deux marqueurs ci-dessous avec la révision du
+ * build et la liste exhaustive des fichiers réellement émis dans `dist/`.
  */
-const VERSION = 'cadence-v2';
+const CACHE_PREFIX = 'cadence-';
+const BUILD_REVISION = '__CADENCE_BUILD_REVISION__';
+const CACHE_NAME = `${CACHE_PREFIX}precache-${BUILD_REVISION}`;
+const PRECACHE_ENTRIES = /* __CADENCE_PRECACHE_ENTRIES__ */ [];
+const PRECACHE_URLS = PRECACHE_ENTRIES.map(({ url }) => url);
+
+const SCOPE_URL = self.registration.scope;
+const SCOPE_PATH = new URL(SCOPE_URL).pathname;
+const APP_SHELL_URL = new URL('./index.html', SCOPE_URL).href;
+
+function isCacheable(response) {
+  return response && response.ok && (response.type === 'basic' || response.type === 'default');
+}
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(VERSION).then((cache) => cache.addAll(['./'])).then(() => self.skipWaiting())
-  );
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    const requests = PRECACHE_URLS.map((url) => new Request(new URL(url, SCOPE_URL), { cache: 'reload' }));
+    await cache.addAll(requests);
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== VERSION).map((k) => caches.delete(k))))
-      .then(() => self.clients.claim())
-  );
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    const obsolete = keys.filter((key) => key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME);
+    await Promise.all(obsolete.map((key) => caches.delete(key)));
+    await self.clients.claim();
+  })());
 });
 
-self.addEventListener('fetch', (event) => {
-  const req = event.request;
-  if (req.method !== 'GET') return;
-  let url;
-  try { url = new URL(req.url); } catch (e) { return; }
-  if (url.origin !== self.location.origin) return;
-
-  if (req.mode === 'navigate') {
-    event.respondWith(
-      fetch(req)
-        .then((res) => {
-          const copy = res.clone();
-          caches.open(VERSION).then((c) => c.put(req, copy));
-          return res;
-        })
-        .catch(() => caches.match(req).then((r) => r || caches.match('./')))
-    );
-    return;
+async function networkFirstNavigation(request) {
+  const cache = await caches.open(CACHE_NAME);
+  try {
+    const response = await fetch(request);
+    if (isCacheable(response)) await cache.put(APP_SHELL_URL, response.clone());
+    return response;
+  } catch (error) {
+    return (await cache.match(APP_SHELL_URL))
+      || (await cache.match(request, { ignoreSearch: true }))
+      || Response.error();
   }
+}
 
-  event.respondWith(
-    caches.match(req).then((cached) => {
-      if (cached) return cached;
-      return fetch(req).then((res) => {
-        if (res.ok) {
-          const copy = res.clone();
-          caches.open(VERSION).then((c) => c.put(req, copy));
-        }
-        return res;
-      });
-    })
-  );
+async function cacheFirstAsset(request) {
+  const cache = await caches.open(CACHE_NAME);
+  const cached = await cache.match(request);
+  if (cached) return cached;
+
+  try {
+    const response = await fetch(request);
+    if (isCacheable(response)) await cache.put(request, response.clone());
+    return response;
+  } catch (error) {
+    return Response.error();
+  }
+}
+
+self.addEventListener('fetch', (event) => {
+  const request = event.request;
+  if (request.method !== 'GET') return;
+
+  let url;
+  try { url = new URL(request.url); } catch (error) { return; }
+  if (url.origin !== self.location.origin || !url.pathname.startsWith(SCOPE_PATH)) return;
+
+  event.respondWith(request.mode === 'navigate'
+    ? networkFirstNavigation(request)
+    : cacheFirstAsset(request));
 });

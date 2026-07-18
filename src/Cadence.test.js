@@ -705,6 +705,48 @@ describe('validateImport — refus strict, sans toucher aux données', () => {
     expect(validateImport({}).ok).toBe(false);
     expect(validateImport({ subjects: 'nope' }).ok).toBe(false);
   });
+  it('est totale : aucune forme JSON arbitraire ne fait lever le validateur', () => {
+    const values = [
+      null, true, false, 0, 'texte', [], {},
+      { subjects: null },
+      { subjects: [null, 3, []], chapters: {}, exams: 'non', reviewLog: true },
+      { subjects: [], exams: [{ chapterIds: { c1: true } }] },
+      { subjects: [], chapters: [{ recall: [], exercise: 'x', problem: 4, minutes: [] }] },
+      { subjects: [], settings: [], capacityOverrides: [], examDebriefs: [] },
+    ];
+    for (const value of values) {
+      let result;
+      expect(() => { result = validateImport(value); }).not.toThrow();
+      expect(typeof result.ok).toBe('boolean');
+      expect(Array.isArray(result.errors)).toBe(true);
+    }
+  });
+  it('préserve les exports v1 à v4, y compris le v1 historique sans version', () => {
+    const subject = { id: 's1', name: 'Maths', color: '#fff', type: 'core' };
+    const legacyV1 = {
+      subjects: [subject],
+      chapters: [{ id: 'c1', subjectId: 's1', name: 'A', mastery: 50 }],
+      exams: [], settings: { requestRetention: 0.9, blocksPerDay: 3 },
+    };
+    expect(validateImport(legacyV1).ok).toBe(true);
+    expect(validateImport({ ...legacyV1, version: 1 }).ok).toBe(true);
+
+    const v2 = {
+      version: 2, subjects: [subject],
+      chapters: [{ id: 'c1', subjectId: 's1', name: 'A', stability: 10, difficulty: 5, lastReviewed: FIVE_AGO }],
+      exams: [], settings: { requestRetention: 0.9 },
+      reviewLog: [{ id: 'r1', chapterId: 'c1', date: FIVE_AGO, grade: 3 }],
+    };
+    expect(validateImport(v2).ok).toBe(true);
+
+    const v3 = {
+      ...v2, version: 3,
+      chapters: [{ ...v2.chapters[0], initialLevel: 'ok', estimatedMinutes: 30 }],
+      reviewLog: [{ ...v2.reviewLog[0], evidenceType: 'exercise' }],
+    };
+    expect(validateImport(v3).ok).toBe(true);
+    expect(validateImport(valid()).ok).toBe(true);
+  });
   it('version inconnue -> refus', () => {
     const v = valid(); v.version = 9;
     const r = validateImport(v);
@@ -720,6 +762,13 @@ describe('validateImport — refus strict, sans toucher aux données', () => {
   it('référence orpheline (épreuve -> chapitre inconnu) -> refus', () => {
     const v = valid(); v.exams[0].chapterIds = ['fantome'];
     expect(validateImport(v).ok).toBe(false);
+  });
+  it('chapterIds d’une épreuve doit être un tableau et ne fait jamais lever', () => {
+    for (const malformed of [{ c1: true }, 'c1', 42, null]) {
+      const v = valid(); v.exams[0].chapterIds = malformed;
+      expect(() => validateImport(v)).not.toThrow();
+      expect(validateImport(v).ok).toBe(false);
+    }
   });
   it('chapitre pointant une matière inconnue -> refus', () => {
     const v = valid(); v.chapters[0].subjectId = 'ghost';
@@ -742,6 +791,41 @@ describe('validateImport — refus strict, sans toucher aux données', () => {
     expect(validateImport(sc).ok).toBe(false);
     const imp = valid(); imp.exams[0].importance = 'catastrophique';
     expect(validateImport(imp).ok).toBe(false);
+  });
+  it('review : id et chapitre existant obligatoires, grade entier 1..4', () => {
+    const noId = valid(); delete noId.reviewLog[0].id;
+    expect(validateImport(noId).ok).toBe(false);
+    const noChapter = valid(); delete noChapter.reviewLog[0].chapterId;
+    expect(validateImport(noChapter).ok).toBe(false);
+    const ghost = valid(); ghost.reviewLog[0].chapterId = 'fantome';
+    expect(validateImport(ghost).ok).toBe(false);
+    const stringGrade = valid(); stringGrade.reviewLog[0].grade = '3';
+    expect(validateImport(stringGrade).ok).toBe(false);
+    const decimalGrade = valid(); decimalGrade.reviewLog[0].grade = 2.5;
+    expect(validateImport(decimalGrade).ok).toBe(false);
+  });
+  it('axes pratiques : compteurs non négatifs et score cohérent avec attempts', () => {
+    const mutate = (fn) => { const v = valid(); fn(v.chapters[0].exercise); return v; };
+    expect(validateImport(mutate((a) => { a.attempts = -1; })).ok).toBe(false);
+    expect(validateImport(mutate((a) => { a.attempts = 1.5; })).ok).toBe(false);
+    expect(validateImport(mutate((a) => { a.recentFails = -1; })).ok).toBe(false);
+    expect(validateImport(mutate((a) => { a.attempts = 0; a.score = 0.8; a.lastTested = null; })).ok).toBe(false);
+    expect(validateImport(mutate((a) => { a.attempts = 1; a.score = null; })).ok).toBe(false);
+    expect(validateImport(mutate((a) => { a.attempts = 1; a.recentFails = 2; })).ok).toBe(false);
+    const primitive = valid(); primitive.chapters[0].problem = 'invalide';
+    expect(validateImport(primitive).ok).toBe(false);
+  });
+  it('settings : types, bornes et ordre minInterval/maxInterval sont stricts', () => {
+    const bad = (key, value) => { const v = valid(); v.settings[key] = value; return v; };
+    expect(validateImport(bad('requestRetention', '0.9')).ok).toBe(false);
+    expect(validateImport(bad('requestRetention', 0.5)).ok).toBe(false);
+    expect(validateImport(bad('subjectsPerDay', 1.5)).ok).toBe(false);
+    expect(validateImport(bad('sessionHours', 0)).ok).toBe(false);
+    expect(validateImport(bad('pressureHorizon', 0)).ok).toBe(false);
+    expect(validateImport(bad('simpleMode', 'oui')).ok).toBe(false);
+    expect(validateImport(bad('inconnu', 1)).ok).toBe(false);
+    const inverted = valid(); inverted.settings.minInterval = 40; inverted.settings.maxInterval = 30;
+    expect(validateImport(inverted).ok).toBe(false);
   });
   it('type de preuve inconnu dans le journal -> refus', () => {
     const v = valid(); v.reviewLog[0].evidenceType = 'vibe';
@@ -833,19 +917,30 @@ describe('pendingDebriefs — proposer le constat après une épreuve', () => {
     expect(pendingDebriefs([exam()], chapters, [], { e1: TODAY }, TODAY).length).toBe(0);
     expect(pendingDebriefs([exam({ chapterIds: [] })], chapters, [], {}, TODAY).length).toBe(0);
   });
-  it('un constat = une note d’axe problème datée du jour de l’épreuve ou après', () => {
+  it('un constat doit être explicitement rattaché à l’épreuve concernée', () => {
     const log = [
-      { chapterId: 'c1', date: TODAY, grade: 3, evidenceType: 'problem' },
-      { chapterId: 'c2', date: addDays(TODAY, -5), grade: 3, evidenceType: 'problem' }, // AVANT l'épreuve
-      { chapterId: 'c2', date: TODAY, grade: 3, evidenceType: 'exercise' },             // mauvais axe
+      { chapterId: 'c1', date: exam().date, grade: 3, evidenceType: 'problem', source: 'exam-debrief', examId: 'e1' },
+      { chapterId: 'c2', date: TODAY, grade: 3, evidenceType: 'problem' }, // preuve générique
+      { chapterId: 'c2', date: exam().date, grade: 3, evidenceType: 'exercise', source: 'exam-debrief', examId: 'e1' },
     ];
     const [d] = pendingDebriefs([exam()], chapters, log, {}, TODAY);
     expect(d.items.find((it) => it.chapter.id === 'c1').done).toBe(true);
     expect(d.items.find((it) => it.chapter.id === 'c2').done).toBe(false);
   });
   it('tout constaté -> plus rien à demander', () => {
-    const log = ['c1', 'c2'].map((id) => ({ chapterId: id, date: TODAY, grade: 3, evidenceType: 'problem' }));
+    const log = ['c1', 'c2'].map((id) => ({
+      chapterId: id, date: exam().date, grade: 3, evidenceType: 'problem', source: 'exam-debrief', examId: 'e1',
+    }));
     expect(pendingDebriefs([exam()], chapters, log, {}, TODAY).length).toBe(0);
+  });
+  it('deux épreuves couvrant le même chapitre gardent deux bilans distincts', () => {
+    const exams = [exam({ id: 'e1' }), exam({ id: 'e2', name: 'Partiel' })];
+    const log = [{
+      chapterId: 'c1', date: exam().date, grade: 3, evidenceType: 'problem', source: 'exam-debrief', examId: 'e1',
+    }];
+    const result = pendingDebriefs(exams, chapters, log, {}, TODAY);
+    expect(result.find((d) => d.exam.id === 'e1').items.find((it) => it.chapter.id === 'c1').done).toBe(true);
+    expect(result.find((d) => d.exam.id === 'e2').items.find((it) => it.chapter.id === 'c1').done).toBe(false);
   });
 });
 

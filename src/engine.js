@@ -402,7 +402,8 @@ export function chapterMetrics(chapter, exams, s, today) {
 
 // Épreuves récemment passées à débriefer : pour chaque épreuve passée depuis
 // 1..DEBRIEF_WINDOW jours, non masquée, liste les chapitres couverts et si un
-// constat (note d'axe problème datée du jour de l'épreuve ou après) existe déjà.
+// constat explicitement rattaché à CETTE épreuve existe déjà. Une preuve
+// générique ne doit pas fermer plusieurs bilans qui couvrent le même chapitre.
 // Disparaît d'elle-même : tout noté, masquée, ou fenêtre écoulée.
 export function pendingDebriefs(exams, chapters, reviewLog, debriefs, today, window = DEBRIEF_WINDOW) {
   const byId = new Map(chapters.map((c) => [c.id, c]));
@@ -418,7 +419,8 @@ export function pendingDebriefs(exams, chapters, reviewLog, debriefs, today, win
       .map((chapter) => ({
         chapter,
         done: (reviewLog || []).some((r) => r.chapterId === chapter.id
-          && evidenceAxis(r.evidenceType) === 'problem' && r.date >= ex.date),
+          && evidenceAxis(r.evidenceType) === 'problem'
+          && r.source === 'exam-debrief' && r.examId === ex.id),
       }));
     if (!items.length) continue;
     if (items.every((it) => it.done)) continue; // tout constaté -> plus rien à demander
@@ -633,114 +635,221 @@ export function pruneBackups(backups, today, keep = 7) {
   return out;
 }
 
-// Validation STRICTE avant tout remplacement. Renvoie { ok, errors: [...] }.
+// Réglages acceptés à l'import. Les bornes englobent les anciennes interfaces
+// tout en protégeant les calculs contre les zéros, valeurs négatives et NaN.
+const IMPORT_SETTING_RULES = {
+  requestRetention: { min: 0.7, max: 0.99 },
+  subjectsPerDay: { min: 1, max: 24, integer: true },
+  sessionHours: { min: 0.25, max: 24 },
+  minutesPerChapter: { min: IMPORT_BOUNDS.axisMinutes[0], max: IMPORT_BOUNDS.axisMinutes[1] },
+  maxExamPressure: { min: 1, max: 20 },
+  pressureHorizon: { min: 1, max: 365, integer: true },
+  examModeThreshold: { min: 0, max: 365, integer: true },
+  minInterval: { min: 0.2, max: 730 },
+  maxInterval: { min: 0.2, max: 730 },
+  simpleMode: { type: 'boolean' },
+  // Champ v1 supprimé par migrateV1, mais encore accepté pour restaurer un
+  // ancien export.
+  blocksPerDay: { min: 1, max: 24, integer: true },
+};
+
+const isRecord = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+const safeName = (obj) => (typeof obj?.name === 'string' && obj.name ? obj.name : '?');
+
+// Validation STRICTE avant tout remplacement. Renvoie toujours
+// { ok, errors: [...] }, même pour une forme JSON profondément malformée.
 // N'altère jamais l'état existant : c'est à l'appelant de refuser si !ok.
 export function validateImport(obj) {
   const errors = [];
   const push = (e) => { if (errors.length < 20) errors.push(e); };
 
-  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
-    return { ok: false, errors: ['Le fichier ne contient pas un objet JSON CADENCE.'] };
-  }
-  if (obj.version != null && !KNOWN_VERSIONS.includes(obj.version)) {
-    push(`Version de schéma inconnue : ${obj.version}.`);
-  }
-  if (!Array.isArray(obj.subjects)) push('« subjects » manquant ou n’est pas une liste.');
-  if (obj.chapters != null && !Array.isArray(obj.chapters)) push('« chapters » doit être une liste.');
-  if (obj.exams != null && !Array.isArray(obj.exams)) push('« exams » doit être une liste.');
-  if (obj.reviewLog != null && !Array.isArray(obj.reviewLog)) push('« reviewLog » doit être une liste.');
-  if (errors.length) return { ok: false, errors };
-
-  const subjectIds = new Set();
-  for (const su of obj.subjects) {
-    if (!su || typeof su !== 'object') { push('Une matière n’est pas un objet.'); continue; }
-    if (typeof su.id !== 'string' || !su.id) push(`Matière sans identifiant valide (« ${su.name ?? '?'} »).`);
-    else if (subjectIds.has(su.id)) push(`Identifiant de matière dupliqué : ${su.id}.`);
-    else subjectIds.add(su.id);
-    if (typeof su.name !== 'string') push('Une matière n’a pas de nom.');
-    if (su.type != null && su.type !== 'core' && su.type !== 'parallel') push(`Type de matière invalide : ${su.type}.`);
-    if (su.weeklyFloor != null && !(Number.isFinite(su.weeklyFloor)
-      && su.weeklyFloor >= IMPORT_BOUNDS.weeklyFloor[0] && su.weeklyFloor <= IMPORT_BOUNDS.weeklyFloor[1])) {
-      push(`Matière « ${su.name ?? su.id} » : minimum hebdo hors bornes.`);
+  try {
+    if (!isRecord(obj)) {
+      return { ok: false, errors: ['Le fichier ne contient pas un objet JSON CADENCE.'] };
     }
-  }
 
-  const chapterIds = new Set();
-  for (const c of obj.chapters || []) {
-    if (!c || typeof c !== 'object') { push('Un chapitre n’est pas un objet.'); continue; }
-    if (typeof c.id !== 'string' || !c.id) push(`Chapitre sans identifiant valide (« ${c.name ?? '?'} »).`);
-    else if (chapterIds.has(c.id)) push(`Identifiant de chapitre dupliqué : ${c.id}.`);
-    else chapterIds.add(c.id);
-    if (typeof c.name !== 'string') push('Un chapitre n’a pas de nom.');
-    if (!subjectIds.has(c.subjectId)) push(`Chapitre « ${c.name ?? c.id} » : matière introuvable (${c.subjectId}).`);
-    if (c.initialLevel != null && !LEVELS.some((l) => l.key === c.initialLevel)) {
-      push(`Chapitre « ${c.name ?? c.id} » : niveau initial inconnu (${c.initialLevel}).`);
-    }
-    for (const ax of AXIS_KEYS) {
-      const a = c[ax];
-      if (a && typeof a === 'object') {
-        if (a.stability != null && (!Number.isFinite(a.stability) || a.stability < 0)) push(`Chapitre « ${c.name} » : stability invalide.`);
-        if (a.score != null && (!Number.isFinite(a.score) || a.score < 0 || a.score > 1)) push(`Chapitre « ${c.name} » : score ${ax} hors [0,1].`);
-        if (a.lastReviewed != null && !isValidISODate(a.lastReviewed)) push(`Chapitre « ${c.name} » : date rappel invalide.`);
-        if (a.lastTested != null && !isValidISODate(a.lastTested)) push(`Chapitre « ${c.name} » : date ${ax} invalide.`);
-      }
-      const mn = c.minutes?.[ax];
-      if (mn != null && !(Number.isFinite(mn) && mn >= IMPORT_BOUNDS.axisMinutes[0] && mn <= IMPORT_BOUNDS.axisMinutes[1])) {
-        push(`Chapitre « ${c.name ?? c.id} » : durée ${ax} hors bornes (${IMPORT_BOUNDS.axisMinutes[0]}–${IMPORT_BOUNDS.axisMinutes[1]} min).`);
+    // Les exports v1 historiques pouvaient ne pas porter de version. Une
+    // version présente doit en revanche être un entier explicitement connu.
+    const version = hasOwn(obj, 'version') ? obj.version : 1;
+    const knownVersion = Number.isInteger(version) && KNOWN_VERSIONS.includes(version);
+    if (!knownVersion) push(`Version de schéma inconnue : ${typeof version === 'number' || typeof version === 'string' ? version : '?'}.`);
+
+    const subjects = Array.isArray(obj.subjects) ? obj.subjects : [];
+    const chapters = Array.isArray(obj.chapters) ? obj.chapters : [];
+    const exams = Array.isArray(obj.exams) ? obj.exams : [];
+    const reviews = Array.isArray(obj.reviewLog) ? obj.reviewLog : [];
+    if (!Array.isArray(obj.subjects)) push('« subjects » manquant ou n’est pas une liste.');
+    if (hasOwn(obj, 'chapters') && !Array.isArray(obj.chapters)) push('« chapters » doit être une liste.');
+    if (hasOwn(obj, 'exams') && !Array.isArray(obj.exams)) push('« exams » doit être une liste.');
+    if (hasOwn(obj, 'reviewLog') && !Array.isArray(obj.reviewLog)) push('« reviewLog » doit être une liste.');
+
+    const subjectIds = new Set();
+    for (const su of subjects) {
+      if (!isRecord(su)) { push('Une matière n’est pas un objet.'); continue; }
+      if (typeof su.id !== 'string' || !su.id) push(`Matière sans identifiant valide (« ${safeName(su)} »).`);
+      else if (subjectIds.has(su.id)) push(`Identifiant de matière dupliqué : ${su.id}.`);
+      else subjectIds.add(su.id);
+      if (typeof su.name !== 'string') push('Une matière n’a pas de nom.');
+      if (su.type != null && su.type !== 'core' && su.type !== 'parallel') push('Type de matière invalide.');
+      if (su.weeklyFloor != null && !(Number.isFinite(su.weeklyFloor)
+        && su.weeklyFloor >= IMPORT_BOUNDS.weeklyFloor[0] && su.weeklyFloor <= IMPORT_BOUNDS.weeklyFloor[1])) {
+        push(`Matière « ${safeName(su)} » : minimum hebdo hors bornes.`);
       }
     }
-    if (c.stability != null && !Number.isFinite(c.stability)) push(`Chapitre « ${c.name} » : stability non numérique.`);
-    if (c.lastReviewed != null && !isValidISODate(c.lastReviewed)) push(`Chapitre « ${c.name} » : lastReviewed invalide.`);
-  }
 
-  const examIds = new Set();
-  for (const e of obj.exams || []) {
-    if (!e || typeof e !== 'object') { push('Une épreuve n’est pas un objet.'); continue; }
-    if (typeof e.id !== 'string' || !e.id) push(`Épreuve sans identifiant valide (« ${e.name ?? '?'} »).`);
-    else if (examIds.has(e.id)) push(`Identifiant d’épreuve dupliqué : ${e.id}.`);
-    else examIds.add(e.id);
-    if (!subjectIds.has(e.subjectId)) push(`Épreuve « ${e.name ?? e.id} » : matière introuvable (${e.subjectId}).`);
-    if (!isValidISODate(e.date)) push(`Épreuve « ${e.name ?? e.id} » : date invalide (${e.date}).`);
-    if (e.importance != null && !IMPORTANCE[e.importance]) push(`Épreuve « ${e.name ?? e.id} » : importance invalide.`);
-    for (const cid of e.chapterIds || []) {
-      if (!chapterIds.has(cid)) push(`Épreuve « ${e.name ?? e.id} » : chapitre couvert introuvable (${cid}).`);
-    }
-  }
+    const validateRecall = (a, label) => {
+      if (!isRecord(a)) { push(`Chapitre « ${label} » : état recall invalide.`); return; }
+      if (!(Number.isFinite(a.stability) && a.stability > 0)) push(`Chapitre « ${label} » : stability recall invalide.`);
+      if (!(Number.isFinite(a.difficulty) && a.difficulty >= 1 && a.difficulty <= 10)) push(`Chapitre « ${label} » : difficulté recall hors [1,10].`);
+      if (a.lastReviewed != null && !isValidISODate(a.lastReviewed)) push(`Chapitre « ${label} » : date rappel invalide.`);
+    };
+    const validatePractice = (a, axis, label) => {
+      if (!isRecord(a)) { push(`Chapitre « ${label} » : état ${axis} invalide.`); return; }
+      const attemptsOk = Number.isInteger(a.attempts) && a.attempts >= 0;
+      const failsOk = Number.isInteger(a.recentFails) && a.recentFails >= 0 && a.recentFails <= RISK.failCap;
+      const scoreOk = a.score === null || (Number.isFinite(a.score) && a.score >= 0 && a.score <= 1);
+      if (!attemptsOk) push(`Chapitre « ${label} » : attempts ${axis} doit être un entier positif ou nul.`);
+      if (!failsOk) push(`Chapitre « ${label} » : recentFails ${axis} invalide.`);
+      if (!scoreOk) push(`Chapitre « ${label} » : score ${axis} hors [0,1].`);
+      if (a.lastTested != null && !isValidISODate(a.lastTested)) push(`Chapitre « ${label} » : date ${axis} invalide.`);
+      if (attemptsOk && a.attempts === 0) {
+        if (a.score !== null || a.lastTested != null || a.recentFails !== 0) {
+          push(`Chapitre « ${label} » : état ${axis} incohérent sans tentative.`);
+        }
+      } else if (attemptsOk && a.attempts > 0) {
+        if (!(Number.isFinite(a.score) && a.score >= 0 && a.score <= 1) || !isValidISODate(a.lastTested)) {
+          push(`Chapitre « ${label} » : état ${axis} incohérent avec des tentatives.`);
+        }
+        if (failsOk && a.recentFails > a.attempts) push(`Chapitre « ${label} » : recentFails dépasse attempts (${axis}).`);
+      }
+    };
 
-  const reviewIds = new Set();
-  for (const r of obj.reviewLog || []) {
-    if (!r || typeof r !== 'object') { push('Une entrée d’historique n’est pas un objet.'); continue; }
-    if (r.id != null) { if (reviewIds.has(r.id)) push(`Identifiant de review dupliqué : ${r.id}.`); else reviewIds.add(r.id); }
-    if (!(r.grade >= 1 && r.grade <= 4)) push('Note d’historique hors [1,4].');
-    if (!isValidISODate(r.date)) push(`Historique : date invalide (${r.date}).`);
-    if (r.evidenceType != null && !EVIDENCE[r.evidenceType]) push(`Historique : type de preuve inconnu (${r.evidenceType}).`);
-    if (r.chapterId != null && chapterIds.size && !chapterIds.has(r.chapterId)) push('Historique : chapitre introuvable.');
-  }
+    const chapterIds = new Set();
+    for (const c of chapters) {
+      if (!isRecord(c)) { push('Un chapitre n’est pas un objet.'); continue; }
+      const label = safeName(c);
+      if (typeof c.id !== 'string' || !c.id) push(`Chapitre sans identifiant valide (« ${label} »).`);
+      else if (chapterIds.has(c.id)) push(`Identifiant de chapitre dupliqué : ${c.id}.`);
+      else chapterIds.add(c.id);
+      if (typeof c.name !== 'string') push('Un chapitre n’a pas de nom.');
+      if (typeof c.subjectId !== 'string' || !subjectIds.has(c.subjectId)) push(`Chapitre « ${label} » : matière introuvable.`);
+      if (c.initialLevel != null && !LEVELS.some((l) => l.key === c.initialLevel)) {
+        push(`Chapitre « ${label} » : niveau initial inconnu.`);
+      }
 
-  if (obj.settings != null) {
-    if (typeof obj.settings !== 'object') push('« settings » doit être un objet.');
-    else for (const [k, v] of Object.entries(obj.settings)) {
-      if (typeof v === 'number' && !Number.isFinite(v)) push(`Réglage non fini : ${k}.`);
-    }
-  }
+      // Le schéma v4 exige les trois axes indépendants. Les schémas v1-v3
+      // gardent leurs champs plats, mais tout axe éventuellement présent doit
+      // déjà être cohérent.
+      if (version === 4 || hasOwn(c, 'recall')) validateRecall(c.recall, label);
+      for (const ax of ['exercise', 'problem']) {
+        if (version === 4 || hasOwn(c, ax)) validatePractice(c[ax], ax, label);
+      }
 
-  if (obj.capacityOverrides != null) {
-    if (typeof obj.capacityOverrides !== 'object' || Array.isArray(obj.capacityOverrides)) {
-      push('« capacityOverrides » doit être un objet { date: minutes }.');
-    } else for (const [d, v] of Object.entries(obj.capacityOverrides)) {
-      if (!isValidISODate(d)) push(`Capacité : date invalide (${d}).`);
-      if (!(Number.isFinite(v) && v >= IMPORT_BOUNDS.dayMinutes[0] && v <= IMPORT_BOUNDS.dayMinutes[1])) {
-        push(`Capacité du ${d} hors bornes (0–${IMPORT_BOUNDS.dayMinutes[1]} min).`);
+      if (version === 4 && !isRecord(c.minutes)) push(`Chapitre « ${label} » : durées par axe manquantes.`);
+      else if (hasOwn(c, 'minutes') && !isRecord(c.minutes)) push(`Chapitre « ${label} » : « minutes » doit être un objet.`);
+      if (isRecord(c.minutes)) {
+        for (const ax of AXIS_KEYS) {
+          const mn = c.minutes[ax];
+          if (!(Number.isFinite(mn) && mn >= IMPORT_BOUNDS.axisMinutes[0] && mn <= IMPORT_BOUNDS.axisMinutes[1])) {
+            push(`Chapitre « ${label} » : durée ${ax} hors bornes (${IMPORT_BOUNDS.axisMinutes[0]}–${IMPORT_BOUNDS.axisMinutes[1]} min).`);
+          }
+        }
+      }
+
+      // Champs plats des schémas v1-v3.
+      if (c.mastery != null && !(Number.isFinite(c.mastery) && c.mastery >= 0 && c.mastery <= 100)) push(`Chapitre « ${label} » : mastery hors [0,100].`);
+      if (c.stability != null && !(Number.isFinite(c.stability) && c.stability >= 0)) push(`Chapitre « ${label} » : stability non numérique.`);
+      if (c.difficulty != null && !(Number.isFinite(c.difficulty) && c.difficulty >= 1 && c.difficulty <= 10)) push(`Chapitre « ${label} » : difficulté hors [1,10].`);
+      if (c.lastReviewed != null && !isValidISODate(c.lastReviewed)) push(`Chapitre « ${label} » : lastReviewed invalide.`);
+      if (c.estimatedMinutes != null && !(Number.isFinite(c.estimatedMinutes)
+        && c.estimatedMinutes >= IMPORT_BOUNDS.axisMinutes[0] && c.estimatedMinutes <= IMPORT_BOUNDS.axisMinutes[1])) {
+        push(`Chapitre « ${label} » : durée historique hors bornes.`);
       }
     }
-  }
 
-  if (obj.examDebriefs != null) {
-    if (typeof obj.examDebriefs !== 'object' || Array.isArray(obj.examDebriefs)) {
-      push('« examDebriefs » doit être un objet { épreuve: date }.');
-    } else for (const [, v] of Object.entries(obj.examDebriefs)) {
-      if (!isValidISODate(v)) push('Bilan d’épreuve : date invalide.');
+    const examIds = new Set();
+    for (const e of exams) {
+      if (!isRecord(e)) { push('Une épreuve n’est pas un objet.'); continue; }
+      const label = safeName(e);
+      if (typeof e.id !== 'string' || !e.id) push(`Épreuve sans identifiant valide (« ${label} »).`);
+      else if (examIds.has(e.id)) push(`Identifiant d’épreuve dupliqué : ${e.id}.`);
+      else examIds.add(e.id);
+      if (typeof e.name !== 'string') push('Une épreuve n’a pas de nom.');
+      if (typeof e.subjectId !== 'string' || !subjectIds.has(e.subjectId)) push(`Épreuve « ${label} » : matière introuvable.`);
+      if (!isValidISODate(e.date)) push(`Épreuve « ${label} » : date invalide.`);
+      if (e.importance != null && !IMPORTANCE[e.importance]) push(`Épreuve « ${label} » : importance invalide.`);
+
+      if (hasOwn(e, 'chapterIds') && !Array.isArray(e.chapterIds)) {
+        push(`Épreuve « ${label} » : « chapterIds » doit être une liste.`);
+      } else if (Array.isArray(e.chapterIds)) {
+        const covered = new Set();
+        for (const cid of e.chapterIds) {
+          if (typeof cid !== 'string' || !chapterIds.has(cid)) push(`Épreuve « ${label} » : chapitre couvert introuvable.`);
+          else if (covered.has(cid)) push(`Épreuve « ${label} » : chapitre couvert dupliqué (${cid}).`);
+          else covered.add(cid);
+        }
+      }
     }
+
+    const reviewIds = new Set();
+    for (const r of reviews) {
+      if (!isRecord(r)) { push('Une entrée d’historique n’est pas un objet.'); continue; }
+      if (typeof r.id !== 'string' || !r.id) push('Historique : identifiant de review manquant ou invalide.');
+      else if (reviewIds.has(r.id)) push(`Identifiant de review dupliqué : ${r.id}.`);
+      else reviewIds.add(r.id);
+      if (typeof r.chapterId !== 'string' || !chapterIds.has(r.chapterId)) push('Historique : chapitre introuvable.');
+      if (!(Number.isInteger(r.grade) && r.grade >= 1 && r.grade <= 4)) push('Note d’historique : entier attendu dans [1,4].');
+      if (!isValidISODate(r.date)) push('Historique : date invalide.');
+      if (r.evidenceType != null && !EVIDENCE[r.evidenceType]) push('Historique : type de preuve inconnu.');
+      if (r.axis != null && !AXIS_KEYS.includes(r.axis)) push('Historique : axe inconnu.');
+    }
+
+    if (hasOwn(obj, 'settings')) {
+      if (!isRecord(obj.settings)) push('« settings » doit être un objet.');
+      else {
+        for (const [key, value] of Object.entries(obj.settings)) {
+          const rule = IMPORT_SETTING_RULES[key];
+          if (!rule) { push(`Réglage inconnu : ${key}.`); continue; }
+          if (rule.type === 'boolean') {
+            if (typeof value !== 'boolean') push(`Réglage « ${key} » : booléen attendu.`);
+            continue;
+          }
+          if (!(typeof value === 'number' && Number.isFinite(value)
+            && value >= rule.min && value <= rule.max && (!rule.integer || Number.isInteger(value)))) {
+            push(`Réglage « ${key} » hors type ou bornes.`);
+          }
+        }
+        const merged = { ...DEFAULT_SETTINGS, ...obj.settings };
+        if (Number.isFinite(merged.minInterval) && Number.isFinite(merged.maxInterval)
+          && merged.minInterval > merged.maxInterval) {
+          push('Réglages incohérents : minInterval doit être inférieur ou égal à maxInterval.');
+        }
+      }
+    }
+
+    if (hasOwn(obj, 'capacityOverrides')) {
+      if (!isRecord(obj.capacityOverrides)) {
+        push('« capacityOverrides » doit être un objet { date: minutes }.');
+      } else for (const [d, v] of Object.entries(obj.capacityOverrides)) {
+        if (!isValidISODate(d)) push(`Capacité : date invalide (${d}).`);
+        if (!(Number.isFinite(v) && v >= IMPORT_BOUNDS.dayMinutes[0] && v <= IMPORT_BOUNDS.dayMinutes[1])) {
+          push(`Capacité du ${d} hors bornes (0–${IMPORT_BOUNDS.dayMinutes[1]} min).`);
+        }
+      }
+    }
+
+    if (hasOwn(obj, 'examDebriefs')) {
+      if (!isRecord(obj.examDebriefs)) {
+        push('« examDebriefs » doit être un objet { épreuve: date }.');
+      } else for (const [, v] of Object.entries(obj.examDebriefs)) {
+        if (!isValidISODate(v)) push('Bilan d’épreuve : date invalide.');
+      }
+    }
+  } catch (e) {
+    // Dernier garde-fou : une validation d'import ne doit jamais faire tomber
+    // l'interface, même face à un objet exotique fourni par un test/hôte.
+    push('Structure JSON illisible ou invalide.');
   }
   return { ok: errors.length === 0, errors };
 }
@@ -992,20 +1101,29 @@ export function recalibrateState(state, chapterId, levelKey) {
 }
 
 export function makeStore() {
+  const wrap = (storage, kind) => ({
+    kind,
+    persistent: true,
+    getItem: (key) => storage.getItem(key),
+    setItem: (key, value) => storage.setItem(key, value),
+    removeItem: (key) => storage.removeItem(key),
+  });
   try {
     if (typeof window !== 'undefined' && window.storage &&
-        typeof window.storage.getItem === 'function') return window.storage;
+        typeof window.storage.getItem === 'function') return wrap(window.storage, 'window.storage');
   } catch (e) { /* ignore */ }
   try {
     if (typeof localStorage !== 'undefined') {
       const k = '__cadence_probe__';
       localStorage.setItem(k, '1');
       localStorage.removeItem(k);
-      return localStorage;
+      return wrap(localStorage, 'localStorage');
     }
   } catch (e) { /* ignore */ }
   const mem = {};
   return {
+    kind: 'memory',
+    persistent: false,
     getItem: (k) => (k in mem ? mem[k] : null),
     setItem: (k, v) => { mem[k] = String(v); },
     removeItem: (k) => { delete mem[k]; },

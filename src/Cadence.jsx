@@ -23,16 +23,27 @@ import {
   STORAGE_KEY, LEGACY_KEY, BACKUP_KEY,
   DEFAULT_SETTINGS, GRADES, EVIDENCE, gradeLabel, LEVELS, IMPORTANCE,
   AXES, AXIS_KEYS, AXIS_MINUTES, MINUTE_CHOICES, evidenceAxis, closestLevel,
-  clamp, uid, parseISO, isoOf, todayISO, daysBetween, addDays, mondayOf,
+  clamp, uid, parseISO, isoOf, daysBetween, addDays, mondayOf,
   retrievability, optimalInterval, applyEvidence, targetInterval, levelSeed,
   examMultiplier, chapterMetrics, recallInfo, practiceRisk, nextFutureExam,
   annalesModeFor, reasonPhrase, isWorthReviewing, axisMinutes, axisSummary,
   pendingDebriefs,
   defaultDailyMinutes, todayCapacityMinutes, planDay,
   cruiseLoad, observedRetention, forecastDue, examReadiness,
-  pruneBackups, validateImport, normalize, migrateV1, seedState, newChapter,
+  validateImport, normalize, seedState, newChapter,
   stripChapterIds, recalibrateState, makeStore,
 } from './engine.js';
+import {
+  QUARANTINE_KEY,
+  deserializeCadenceState,
+  loadCadenceState,
+  saveCadenceState,
+  saveDailyBackup,
+} from './storage.js';
+import { useCurrentDay } from './useCurrentDay.js';
+import ChapterSearch from './ChapterSearch.jsx';
+import FocusMode from './FocusMode.jsx';
+import OnboardingChecklist from './OnboardingChecklist.jsx';
 
 /* ================================================================== *
  *  Thème & aides d'affichage
@@ -47,7 +58,7 @@ const C = {
   line2: '#2b3645',
   text: '#cdd8e6',
   dim: '#7c8a9e',
-  faint: '#54616f',
+  faint: '#738196',
   accent: '#5ea9ff',
   good: '#34d399',
   warn: '#fbbf24',
@@ -182,7 +193,7 @@ function Segmented({ value, options, onChange, ariaLabel }) {
       {options.map((o) => {
         const active = o.value === value;
         return (
-          <button key={o.value} type="button" onClick={() => onChange(o.value)} style={{
+          <button key={o.value} type="button" aria-pressed={active} onClick={() => onChange(o.value)} style={{
             fontFamily: SANS, fontSize: 12, padding: '5px 11px', cursor: 'pointer', border: 'none',
             background: active ? 'rgba(94,169,255,.16)' : 'transparent',
             color: active ? '#dbeafe' : C.dim,
@@ -387,7 +398,7 @@ function AxisPicker({ ch, axis, onPick, doneAxes }) {
         const info = ch.axisInfo[ax];
         const col = info.pct != null ? thermal((1 - info.pct / 100) * 4) : C.faint;
         return (
-          <button key={ax} type="button" onClick={() => onPick(ax)}
+          <button key={ax} type="button" aria-pressed={on} onClick={() => onPick(ax)}
             title={`${AXES[ax].long} · ${info.tested ? `${info.pct} %` : 'non testé'} · ~${fmtMinutes(info.minutes)}`}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer',
@@ -448,16 +459,21 @@ function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrad
 
   // Clavier : 1–4 note l'axe choisi ; r / e / p change d'axe.
   const AXIS_KEYBOARD = { r: 'recall', e: 'exercise', p: 'problem' };
+  const GRADE_KEYBOARD = {
+    Digit1: 1, Digit2: 2, Digit3: 3, Digit4: 4,
+    Numpad1: 1, Numpad2: 2, Numpad3: 3, Numpad4: 4,
+  };
   const onKey = (e) => {
     if (e.target !== e.currentTarget) return;
-    if (['1', '2', '3', '4'].includes(e.key) && !axisDone) { onGrade(ch.id, axis, Number(e.key)); e.preventDefault(); }
-    else if (AXIS_KEYBOARD[e.key]) { setAxis(AXIS_KEYBOARD[e.key]); e.preventDefault(); }
+    if (GRADE_KEYBOARD[e.code] && !axisDone) { onGrade(ch.id, axis, GRADE_KEYBOARD[e.code]); e.preventDefault(); }
+    else if (AXIS_KEYBOARD[e.key?.toLowerCase()]) { setAxis(AXIS_KEYBOARD[e.key.toLowerCase()]); e.preventDefault(); }
   };
 
   const rec = ch.recall; // info rappel : { risk, ti, since, R, dueIn, tested }
 
   return (
-    <div className={`cad-card${allDone ? ' cad-done' : ''}`} tabIndex={0} onKeyDown={onKey}
+    <div className={`cad-card${allDone ? ' cad-done' : ''}`} tabIndex={0} role="group"
+      aria-label={`${ch.name} — ${AXES[axis].long}`} onKeyDown={onKey}
       title={allDone ? undefined : 'Tab pour sélectionner · 1–4 pour noter · r/e/p pour changer d’axe'}
       style={{
       background: C.panel, border: `1px solid ${doneEntries.length ? `${accent}44` : C.line}`,
@@ -618,8 +634,9 @@ const GLOBAL_CSS = `
   .cadence { --ease: cubic-bezier(.22,.61,.36,1); }
   .cadence * { box-sizing: border-box; }
   .cadence input[type=range] {
-    -webkit-appearance: none; appearance: none; height: 4px;
-    background: ${C.line}; border-radius: 2px; outline: none; cursor: pointer;
+    -webkit-appearance: none; appearance: none; height: 28px;
+    background: linear-gradient(${C.line}, ${C.line}) center / 100% 4px no-repeat;
+    border-radius: 2px; outline: none; cursor: pointer;
   }
   .cadence input[type=range]::-webkit-slider-thumb {
     -webkit-appearance: none; appearance: none; width: 14px; height: 14px;
@@ -674,7 +691,144 @@ const GLOBAL_CSS = `
     animation: cad-toast .3s var(--ease) both;
   }
 
+  .cad-eyebrow {
+    margin: 0 0 5px; display: flex; align-items: center; gap: 6px;
+    color: ${C.accent}; font: 700 10.5px/1.2 ${MONO};
+    letter-spacing: .08em; text-transform: uppercase;
+  }
+  .cad-feature-button {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    flex: 0 0 auto; border: 1px solid ${C.line2}; border-radius: 8px;
+    padding: 7px 11px; color: ${C.text}; background: ${C.panel2};
+    cursor: pointer; font: 600 12px/1.25 ${SANS};
+  }
+  .cad-feature-button-primary {
+    border-color: rgba(94,169,255,.52); color: #dbeafe; background: rgba(94,169,255,.14);
+  }
+  .cad-feature-button:disabled { opacity: .42; cursor: not-allowed; filter: none; }
+
+  .cad-onboarding {
+    padding: 16px; border: 1px solid rgba(94,169,255,.28); border-radius: 12px;
+    background: linear-gradient(135deg, rgba(94,169,255,.09), rgba(17,24,36,.96) 58%);
+    box-shadow: 0 16px 40px -30px rgba(94,169,255,.7);
+  }
+  .cad-onboarding-heading { display: flex; align-items: end; gap: 18px; margin-bottom: 14px; }
+  .cad-onboarding-heading h2 { margin: 0; color: ${C.text}; font: 700 17px/1.3 ${SANS}; }
+  .cad-onboarding-progress {
+    flex: 1 1 120px; max-width: 220px; height: 5px; margin-left: auto;
+    overflow: hidden; border-radius: 999px; background: ${C.line};
+  }
+  .cad-onboarding-progress span, .cad-focus-progress span {
+    display: block; height: 100%; border-radius: inherit; background: ${C.accent};
+    transition: width .3s var(--ease);
+  }
+  .cad-onboarding-steps { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+  .cad-onboarding-steps li {
+    display: flex; align-items: center; gap: 10px; min-width: 0;
+    padding: 10px; border: 1px solid ${C.line}; border-radius: 9px; background: rgba(10,15,24,.55);
+  }
+  .cad-onboarding-steps li.is-current { border-color: rgba(94,169,255,.36); background: rgba(94,169,255,.06); }
+  .cad-onboarding-steps li.is-done { opacity: .65; }
+  .cad-onboarding-step-icon {
+    display: inline-flex; align-items: center; justify-content: center; flex: 0 0 30px;
+    width: 30px; height: 30px; border-radius: 8px; color: ${C.accent}; background: rgba(94,169,255,.12);
+  }
+  .cad-onboarding-steps li.is-done .cad-onboarding-step-icon { color: ${C.good}; background: rgba(52,211,153,.1); }
+  .cad-onboarding-step-copy { flex: 1 1 260px; min-width: 0; }
+  .cad-onboarding-step-copy h3 { margin: 0 0 2px; color: ${C.text}; font: 650 13px/1.3 ${SANS}; }
+  .cad-onboarding-step-copy p { margin: 0; color: ${C.dim}; font: 12px/1.4 ${SANS}; }
+
+  .cad-search-trigger {
+    display: inline-flex; align-items: center; gap: 7px; min-height: 34px;
+    padding: 6px 8px 6px 10px; border: 1px solid ${C.line2}; border-radius: 8px;
+    color: ${C.dim}; background: rgba(17,24,36,.78); cursor: pointer;
+  }
+  .cad-search-trigger kbd {
+    padding: 2px 5px; border: 1px solid ${C.line2}; border-radius: 4px;
+    color: ${C.faint}; background: ${C.inset}; font: 10px ${MONO};
+  }
+  .cad-search-backdrop {
+    position: fixed; inset: 0; z-index: 100; display: grid; place-items: start center;
+    padding: min(14vh, 120px) 16px 24px; background: rgba(3,6,11,.72); backdrop-filter: blur(5px);
+  }
+  .cad-search-dialog {
+    width: min(620px, 100%); max-height: min(680px, 78vh); overflow: hidden;
+    border: 1px solid ${C.line2}; border-radius: 13px; color: ${C.text}; background: #111824;
+    box-shadow: 0 28px 80px -20px rgba(0,0,0,.9); animation: cad-fade-up .2s var(--ease) both;
+  }
+  .cad-search-dialog *:focus-visible { outline: 2px solid ${C.accent}; outline-offset: 2px; border-radius: 4px; }
+  .cad-search-head { display: flex; align-items: center; gap: 9px; padding: 13px 14px 8px; color: ${C.dim}; }
+  .cad-search-head h2 { flex: 1; margin: 0; color: ${C.text}; font: 700 14px ${SANS}; }
+  .cad-search-close {
+    display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px;
+    border: 1px solid transparent; border-radius: 7px; color: ${C.dim}; background: transparent; cursor: pointer;
+  }
+  .cad-search-input {
+    width: calc(100% - 28px); margin: 0 14px 10px; padding: 11px 12px;
+    border: 1px solid ${C.line2}; border-radius: 8px; color: ${C.text}; background: ${C.inset};
+    font: 14px ${SANS};
+  }
+  .cad-search-count { margin: -2px 16px 6px; color: ${C.faint}; font: 10.5px ${MONO}; }
+  .cad-search-results { max-height: min(390px, 48vh); overflow-y: auto; padding: 0 8px; }
+  .cad-search-result {
+    display: flex; align-items: center; gap: 10px; width: 100%; min-height: 52px;
+    padding: 8px 10px; border: 1px solid transparent; border-radius: 8px;
+    color: ${C.text}; background: transparent; cursor: pointer; text-align: left;
+  }
+  .cad-search-result[data-active="true"] { border-color: rgba(94,169,255,.32); background: rgba(94,169,255,.1); }
+  .cad-search-result-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; }
+  .cad-search-result > span:nth-child(2) { display: grid; min-width: 0; flex: 1; }
+  .cad-search-result strong { overflow: hidden; color: ${C.text}; font: 650 13px ${SANS}; text-overflow: ellipsis; white-space: nowrap; }
+  .cad-search-result small { margin-top: 2px; color: ${C.faint}; font: 11.5px ${SANS}; }
+  .cad-search-empty { margin: 6px 0; padding: 24px 14px; color: ${C.dim}; text-align: center; font: 13px/1.5 ${SANS}; }
+  .cad-search-hint { margin: 8px 14px 12px; color: ${C.faint}; font: 10.5px ${MONO}; text-align: center; }
+
+  .cad-focus-shell {
+    padding: 16px; border: 1px solid rgba(94,169,255,.34); border-radius: 12px;
+    background: linear-gradient(145deg, rgba(94,169,255,.08), ${C.panel} 45%);
+  }
+  .cad-focus-header { display: flex; align-items: start; gap: 14px; }
+  .cad-focus-header > div { flex: 1; min-width: 0; }
+  .cad-focus-header h2 { margin: 0; color: ${C.text}; font: 700 18px/1.3 ${SANS}; }
+  .cad-focus-header > div > p:last-child { margin: 4px 0 0; color: ${C.dim}; font: 11.5px ${MONO}; }
+  .cad-focus-exit {
+    display: inline-flex; align-items: center; gap: 6px; padding: 7px 9px;
+    border: 1px solid ${C.line2}; border-radius: 8px; color: ${C.dim}; background: transparent; cursor: pointer;
+    font: 12px ${SANS};
+  }
+  .cad-focus-progress { height: 4px; margin: 12px 0 16px; overflow: hidden; border-radius: 999px; background: ${C.line}; }
+  .cad-focus-card { animation: cad-fade-up .22s var(--ease) both; }
+  .cad-focus-navigation { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+  .cad-focus-navigation > span {
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    flex: 1; color: ${C.faint}; font: 11.5px ${SANS}; text-align: center;
+  }
+  .cad-focus-navigation > span.is-done { color: ${C.good}; }
+  .cad-focus-shortcut { margin: 9px 0 0; color: ${C.faint}; font: 10.5px ${MONO}; text-align: center; }
+  .cad-focus-complete { padding: 22px; color: ${C.good}; text-align: center; }
+  .cad-focus-complete h2 { margin: 8px 0 3px; color: ${C.text}; font: 700 18px ${SANS}; }
+  .cad-focus-complete p { margin: 0 0 13px; color: ${C.dim}; font: 13px ${SANS}; }
+  .cad-target { animation: cad-target 1.35s var(--ease) both; }
+  @keyframes cad-target { 0%, 100% { box-shadow: none; } 35% { box-shadow: 0 0 0 3px rgba(94,169,255,.28); } }
+
+  @media (max-width: 760px) {
+    .cad-search-trigger { margin-left: auto; }
+    .cad-search-label, .cad-search-trigger kbd { display: none; }
+    .cad-onboarding-heading { align-items: start; flex-direction: column; gap: 10px; }
+    .cad-onboarding-progress { width: 100%; max-width: none; margin: 0; }
+    .cad-onboarding-steps li { align-items: start; flex-wrap: wrap; }
+    .cad-onboarding-steps .cad-feature-button { width: calc(100% - 40px); margin-left: 40px; }
+    .cad-focus-header { flex-wrap: wrap; }
+    .cad-focus-navigation { flex-wrap: wrap; }
+    .cad-focus-navigation > span { order: -1; flex-basis: 100%; }
+    .cad-focus-navigation .cad-feature-button { flex: 1; }
+  }
   @media (max-width: 640px) { .cad-tab-label { display: none; } }
+  @media (pointer: coarse) {
+    .cadence button { min-width: 44px; min-height: 44px; }
+    .cadence input[type=range] { min-height: 44px; }
+    .cad-search-dialog button { min-width: 44px; min-height: 44px; }
+  }
 
   .cadence ::-webkit-scrollbar { width: 10px; height: 10px; }
   .cadence ::-webkit-scrollbar-thumb { background: #26303d; border-radius: 5px; }
@@ -732,40 +886,128 @@ function enrichChapter(raw, exams, settings, today) {
 
 export default function Cadence() {
   const store = useMemo(() => makeStore(), []);
-  const [state, setState] = useState(() => {
-    try {
-      const raw = store.getItem(STORAGE_KEY);
-      if (raw) return normalize(JSON.parse(raw)); // migre v1/v2 -> v3 sans perte
-      const legacy = store.getItem(LEGACY_KEY);
-      if (legacy) return normalize(migrateV1(JSON.parse(legacy)));
-    } catch (e) { /* ignore */ }
-    return seedState();
-  });
+  const initialLoad = useMemo(() => loadCadenceState(store), [store]);
+  const [state, setState] = useState(initialLoad.state);
+  const stateRef = useRef(initialLoad.state);
+  const persistenceBlocked = useRef(initialLoad.writeBlocked);
+  const externalWritePending = useRef(false);
+  const recoveryRef = useRef(initialLoad.recovery || null);
+  const [storageNotice, setStorageNotice] = useState(initialLoad.notice);
+  const [externalState, setExternalState] = useState(null);
 
+  const replaceState = (next) => {
+    stateRef.current = next;
+    setState(next);
+  };
+
+  // Écriture vérifiée : une erreur de quota ou de navigateur privé devient
+  // visible et les mutations restent exportables depuis l'état React courant.
   useEffect(() => {
-    try { store.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
-    // Instantané local quotidien (même appareil — pas une sauvegarde externe).
-    try {
-      const t = todayISO();
-      const raw = store.getItem(BACKUP_KEY);
-      const backups = raw ? JSON.parse(raw) : {};
-      if (!backups[t]) {
-        store.setItem(BACKUP_KEY, JSON.stringify(pruneBackups({ ...backups, [t]: state }, t, 7)));
-      }
-    } catch (e) { /* ignore */ }
+    stateRef.current = state;
+    if (persistenceBlocked.current || externalWritePending.current) return;
+    const saved = saveCadenceState(store, state);
+    if (!saved.ok) {
+      setStorageNotice({
+        kind: 'error', code: 'write',
+        text: `Sauvegarde locale impossible (${saved.error}). Exporte tes données avant de fermer la page.`,
+      });
+    } else {
+      setStorageNotice((current) => (current?.code === 'write' ? null : current));
+    }
   }, [state, store]);
 
   const [tab, setTab] = useState('today');
+  const [subjectFocus, setSubjectFocus] = useState(null);
+  const subjectFocusSequence = useRef(0);
   const [toast, setToast] = useState(null); // { text, entryId }
   const toastTimer = useRef(null);
-  const today = todayISO();
+  const today = useCurrentDay();
+
+  // L'instantané est pris au début de chaque journée, pas à chaque frappe.
+  useEffect(() => {
+    if (persistenceBlocked.current || externalWritePending.current) return;
+    const backup = saveDailyBackup(store, stateRef.current, today);
+    if (!backup.ok) {
+      setStorageNotice((current) => current?.kind === 'error' ? current : {
+        kind: 'warning', code: 'backup',
+        text: `L’état principal est enregistré, mais l’instantané quotidien a échoué (${backup.error}).`,
+      });
+    }
+  }, [store, today]);
+
+  // Deux onglets ne doivent plus s'écraser en silence. L'écriture locale est
+  // suspendue jusqu'à ce que l'utilisateur choisisse quelle version garder.
+  useEffect(() => {
+    const onStorage = (event) => {
+      if (event.key !== STORAGE_KEY || !event.newValue) return;
+      if (event.newValue === JSON.stringify(stateRef.current)) return;
+      try {
+        externalWritePending.current = true;
+        setExternalState(deserializeCadenceState(event.newValue));
+      } catch (error) {
+        setStorageNotice({
+          kind: 'error', code: 'external-invalid',
+          text: 'Une autre fenêtre a écrit des données incompatibles. Les écritures sont suspendues : exporte cette version ou recharge la page.',
+        });
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
   const {
     subjects, chapters, exams, settings, parallelLog, reviewLog, skips,
     capacityOverrides, examDebriefs, lastExportAt,
   } = state;
 
+  const goToSubjects = ({ subjectId = null, chapterId = null, target = 'subject' } = {}) => {
+    setSubjectFocus({ subjectId, chapterId, target, token: ++subjectFocusSequence.current });
+    setTab('subjects');
+  };
+
+  const useExternalState = () => {
+    if (!externalState) return;
+    externalWritePending.current = false;
+    replaceState(externalState);
+    setExternalState(null);
+    setStorageNotice(null);
+  };
+  const keepCurrentState = () => {
+    externalWritePending.current = false;
+    setExternalState(null);
+    const saved = saveCadenceState(store, stateRef.current);
+    setStorageNotice(saved.ok ? null : {
+      kind: 'error', code: 'write',
+      text: `Impossible de conserver cette version (${saved.error}). Exporte tes données avant de fermer la page.`,
+    });
+  };
+  const downloadRecovery = () => {
+    const raw = recoveryRef.current?.raw;
+    if (!raw) return;
+    const url = URL.createObjectURL(new Blob([raw], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `cadence-donnees-illisibles-${today}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+  const startFreshAfterCorruption = () => {
+    if (!confirm('Créer un nouvel état CADENCE ? Le contenu illisible reste disponible dans le fichier de secours.')) return;
+    try { store.removeItem(STORAGE_KEY); } catch (error) { /* l'écriture vérifiée signalera le problème */ }
+    persistenceBlocked.current = false;
+    const next = seedState();
+    replaceState(next);
+    setStorageNotice({
+      kind: 'warning', code: 'fresh-after-corruption',
+      text: 'Un nouvel état a été créé. Le contenu illisible reste conservé comme secours local.',
+    });
+  };
+
   /* ----- Mutations ----- */
-  const patch = (fn) => setState((prev) => fn(prev));
+  const patch = (fn) => setState((prev) => {
+    const next = fn(prev);
+    stateRef.current = next;
+    return next;
+  });
 
   const addSubject = (name) => patch((p) => ({
     ...p, subjects: [...p.subjects, { id: uid(), name, color: '#7c9cf5', type: 'core' }],
@@ -776,12 +1018,19 @@ export default function Cadence() {
   const deleteSubject = (id) => patch((p) => {
     const chapIds = p.chapters.filter((c) => c.subjectId === id).map((c) => c.id);
     const idSet = new Set(chapIds);
+    const examIds = new Set(p.exams.filter((e) => e.subjectId === id).map((e) => e.id));
     return {
       ...p,
       subjects: p.subjects.filter((s) => s.id !== id),
       chapters: p.chapters.filter((c) => c.subjectId !== id),
       exams: stripChapterIds(p.exams.filter((e) => e.subjectId !== id), chapIds),
       reviewLog: p.reviewLog.filter((r) => !idSet.has(r.chapterId)),
+      archivedReviews: (p.archivedReviews || []).filter((r) => !idSet.has(r.chapterId)),
+      skips: Object.fromEntries(Object.entries(p.skips || {}).filter(([chapterId]) => !idSet.has(chapterId))),
+      parallelLog: Object.fromEntries(Object.entries(p.parallelLog || {}).map(([week, values]) => [
+        week, Object.fromEntries(Object.entries(values || {}).filter(([subjectId]) => subjectId !== id)),
+      ])),
+      examDebriefs: Object.fromEntries(Object.entries(p.examDebriefs || {}).filter(([examId]) => !examIds.has(examId))),
     };
   });
 
@@ -800,6 +1049,8 @@ export default function Cadence() {
     chapters: p.chapters.filter((c) => c.id !== id),
     exams: stripChapterIds(p.exams, [id]),
     reviewLog: p.reviewLog.filter((r) => r.chapterId !== id),
+    archivedReviews: (p.archivedReviews || []).filter((r) => r.chapterId !== id),
+    skips: Object.fromEntries(Object.entries(p.skips || {}).filter(([chapterId]) => chapterId !== id)),
   }));
   // Recalibrer : confirmation, puis les 3 axes repartent du niveau + historique
   // du chapitre archivé (cohérence garantie entre niveau, dates et journal).
@@ -821,20 +1072,30 @@ export default function Cadence() {
 
   // Noter un TEST sur UN AXE : ne modifie que cet axe. Une note par axe et par
   // jour ; une seconde du même axe le même jour demande confirmation.
-  const gradeEvidence = (id, evidenceType, grade) => {
+  const gradeEvidence = (id, evidenceType, grade, options = {}) => {
     const axis = evidenceAxis(evidenceType);
-    const existing = reviewLog.find((r) => r.chapterId === id && r.date === today
-      && evidenceAxis(r.evidenceType) === axis);
+    const evidenceDate = options.date || today;
+    const sameSlot = (r) => r.chapterId === id && evidenceAxis(r.evidenceType) === axis
+      && (options.examId ? r.examId === options.examId : !r.examId && r.date === evidenceDate);
+    const existing = reviewLog.find(sameSlot);
     if (existing && !confirm(
-      `Tu as déjà noté l'axe « ${AXES[axis].label} » pour ce chapitre aujourd'hui.\nRemplacer par cette nouvelle note ?`)) return;
+      `Tu as déjà noté l'axe « ${AXES[axis].label} » pour ce test.\nRemplacer par cette nouvelle note ?`)) return;
     const entryId = uid();
     patch((p) => {
       const ch = p.chapters.find((c) => c.id === id);
       if (!ch) return p;
-      const { chapter, before, after } = applyEvidence(ch, evidenceType, grade, today);
-      // Remplace une note existante du même axe/jour (après confirmation).
-      const log = p.reviewLog.filter((r) => !(r.chapterId === id && r.date === today && evidenceAxis(r.evidenceType) === axis));
-      const entry = { id: entryId, chapterId: id, date: today, grade, evidenceType, axis, before, after };
+      const prior = p.reviewLog.find(sameSlot);
+      // Un remplacement repart de l'état AVANT la preuve remplacée : il ne
+      // cumule pas deux transitions dont une disparaîtrait du journal.
+      const base = prior ? { ...ch, [axis]: { ...prior.before } } : ch;
+      const { chapter, before, after } = applyEvidence(base, evidenceType, grade, evidenceDate);
+      const log = p.reviewLog.filter((r) => !sameSlot(r));
+      const entry = {
+        id: entryId, chapterId: id, date: evidenceDate, grade, evidenceType, axis, before, after,
+        ...(options.source ? { source: options.source } : {}),
+        ...(options.examId ? { examId: options.examId } : {}),
+        ...(options.examId ? { recordedAt: today } : {}),
+      };
       return {
         ...p,
         chapters: p.chapters.map((c) => (c.id === id ? chapter : c)),
@@ -880,7 +1141,7 @@ export default function Cadence() {
       const backups = raw ? JSON.parse(raw) : {};
       if (!backups[date]) return;
       if (confirm(`Restaurer la sauvegarde du ${date} ? L'état actuel sera remplacé.`)) {
-        setState(normalize(backups[date]));
+        replaceState(normalize(backups[date]));
       }
     } catch (e) { alert('Restauration impossible.'); }
   };
@@ -900,7 +1161,11 @@ export default function Cadence() {
   const updateExam = (id, up) => patch((p) => ({
     ...p, exams: p.exams.map((e) => (e.id === id ? { ...e, ...up } : e)),
   }));
-  const deleteExam = (id) => patch((p) => ({ ...p, exams: p.exams.filter((e) => e.id !== id) }));
+  const deleteExam = (id) => patch((p) => ({
+    ...p,
+    exams: p.exams.filter((e) => e.id !== id),
+    examDebriefs: Object.fromEntries(Object.entries(p.examDebriefs || {}).filter(([examId]) => examId !== id)),
+  }));
   const toggleExamChapter = (examId, chapterId) => patch((p) => ({
     ...p,
     exams: p.exams.map((e) => {
@@ -933,19 +1198,26 @@ export default function Cadence() {
     }
     const nb = (obj.chapters || []).length;
     if (!confirm(`Remplacer les données actuelles par ce fichier ?\n(${(obj.subjects || []).length} matières, ${nb} chapitres — l'état actuel sera écrasé.)`)) return false;
-    setState(normalize(obj));
+    replaceState(normalize(obj));
     return true;
   };
   const markExported = () => patch((p) => ({ ...p, lastExportAt: today }));
   const resetAll = () => {
-    if (confirm('Réinitialiser CADENCE ? Tes chapitres, épreuves, historique et réglages seront effacés.')) setState(seedState());
+    if (!confirm('Réinitialiser CADENCE ? Tes chapitres, épreuves, historique, sauvegardes et réglages seront effacés.')) return;
+    try {
+      [STORAGE_KEY, LEGACY_KEY, BACKUP_KEY, QUARANTINE_KEY].forEach((key) => store.removeItem(key));
+    } catch (error) { /* la prochaine écriture vérifiée affichera l'erreur */ }
+    persistenceBlocked.current = false;
+    recoveryRef.current = null;
+    replaceState(seedState());
+    setStorageNotice(null);
   };
 
   // Capacité réelle du jour (dérogation datée ; null = revenir au défaut).
   const setTodayCapacity = (minutes) => patch((p) => {
     const overrides = { ...(p.capacityOverrides || {}) };
     if (minutes == null) delete overrides[today];
-    else overrides[today] = Math.max(0, Math.round(minutes / 30) * 30);
+    else overrides[today] = clamp(Math.round(minutes / 30) * 30, 0, 720);
     return { ...p, capacityOverrides: overrides };
   });
 
@@ -997,9 +1269,12 @@ export default function Cadence() {
     () => planningRanked.filter((c) => isWorthReviewing(c) || doneByChapter[c.id]),
     [planningRanked, doneByChapter]);
   // Backlog = travail réellement dû aujourd'hui (en minutes, par axe dominant).
-  const backlogList = worthToday.filter((c) => !doneByChapter[c.id]);
+  const backlogList = worthToday.filter((c) => !doneByChapter[c.id]
+    && subjectById[c.subjectId]?.type === 'core');
   const overdue = backlogList.length;
   const overdueMinutes = backlogList.reduce((a, c) => a + c.minutes, 0);
+  const shortestDueMinutes = backlogList.length
+    ? Math.min(...backlogList.map((c) => c.minutes)) : 0;
   const sessions = useMemo(
     () => planDay(worthToday, subjects, {
       subjectsPerDay: settings.subjectsPerDay,
@@ -1062,11 +1337,21 @@ export default function Cadence() {
             <Flame size={18} color={C.accent} />
             <span style={{ fontFamily: MONO, fontWeight: 700, letterSpacing: '.22em', fontSize: 16 }}>CADENCE</span>
           </div>
-          <nav style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginLeft: 'auto' }}>
+          <ChapterSearch
+            chapters={chapters}
+            subjects={subjects}
+            onSelect={(chapter) => goToSubjects({
+              subjectId: chapter.subjectId,
+              chapterId: chapter.id,
+              target: 'chapter',
+            })}
+          />
+          <nav aria-label="Navigation principale" style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginLeft: 'auto' }}>
             {TABS.map((t) => {
               const active = tab === t.id;
               return (
-                <button key={t.id} onClick={() => setTab(t.id)} title={t.label} style={{
+                <button key={t.id} onClick={() => setTab(t.id)} title={t.label}
+                  aria-current={active ? 'page' : undefined} style={{
                   display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer',
                   fontFamily: SANS, fontSize: 13, padding: '7px 12px', borderRadius: 8,
                   border: `1px solid ${active ? 'rgba(94,169,255,.5)' : 'transparent'}`,
@@ -1081,11 +1366,60 @@ export default function Cadence() {
         </div>
       </header>
 
+      {externalState && (
+        <div role="alert" style={{
+          maxWidth: 1000, margin: '12px auto 0', padding: '10px 14px',
+          display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+          border: '1px solid rgba(251,191,36,.45)', borderRadius: 9,
+          background: 'rgba(251,191,36,.09)', color: C.text, fontFamily: SANS, fontSize: 13,
+        }}>
+          <AlertTriangle size={17} color={C.warn} />
+          <span style={{ flex: '1 1 360px' }}>
+            <b>Une autre fenêtre a modifié CADENCE.</b> Les écritures sont suspendues pour éviter un écrasement silencieux.
+          </span>
+          <Btn onClick={useExternalState}>Charger l’autre version</Btn>
+          <Btn variant="primary" onClick={keepCurrentState}>Garder cette version</Btn>
+        </div>
+      )}
+
+      {storageNotice && (
+        <div role={storageNotice.kind === 'error' ? 'alert' : 'status'} style={{
+          maxWidth: 1000, margin: '12px auto 0', padding: '10px 14px',
+          display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+          border: `1px solid ${storageNotice.kind === 'error' ? 'rgba(248,113,113,.45)' : 'rgba(251,191,36,.4)'}`,
+          borderRadius: 9,
+          background: storageNotice.kind === 'error' ? 'rgba(248,113,113,.08)' : 'rgba(251,191,36,.07)',
+          color: C.text, fontFamily: SANS, fontSize: 13,
+        }}>
+          <AlertTriangle size={17} color={storageNotice.kind === 'error' ? C.bad : C.warn} />
+          <span style={{ flex: '1 1 360px' }}>{storageNotice.text}</span>
+          {recoveryRef.current?.raw && (
+            <Btn onClick={downloadRecovery}><Download size={14} /> Fichier de secours</Btn>
+          )}
+          {storageNotice.code === 'corrupt' && (
+            <Btn variant="danger" onClick={startFreshAfterCorruption}>Créer un état neuf</Btn>
+          )}
+          {['volatile', 'write'].includes(storageNotice.code) && (
+            <Btn variant="primary" onClick={() => setTab('settings')}>Exporter maintenant</Btn>
+          )}
+          {storageNotice.code === 'external-invalid' && (
+            <>
+              <Btn variant="primary" onClick={() => setTab('settings')}>Exporter cette version</Btn>
+              <Btn onClick={() => window.location.reload()}>Recharger la page</Btn>
+            </>
+          )}
+          {!['corrupt', 'volatile', 'write', 'external-invalid'].includes(storageNotice.code) && (
+            <Btn variant="bare" onClick={() => setStorageNotice(null)}>Fermer</Btn>
+          )}
+        </div>
+      )}
+
       <main style={{ maxWidth: 1000, margin: '0 auto', padding: '18px 16px 72px' }}>
         <div key={tab} className="cad-view">
           {tab === 'today' && (
             <TodayView
               today={today} overdue={overdue} overdueMinutes={overdueMinutes}
+              shortestDueMinutes={shortestDueMinutes}
               nextExam={nextExam} subjectById={subjectById}
               annalesBanners={annalesBanners} debriefs={debriefs} sessions={sessions} ranked={ranked}
               plannedCount={plannedCount} plannedMinutes={plannedMinutes}
@@ -1093,12 +1427,23 @@ export default function Cadence() {
               skippedToday={skippedToday} readinessByExam={readinessByExam}
               todayMinutes={todayMinutes} defaultMinutes={defaultMinutes}
               hasCoreChapters={hasCoreChapters} exportStale={exportStale}
+              hasChapters={hasCoreChapters}
+              hasCoveredExam={exams.some((exam) => (exam.chapterIds || []).length > 0)}
+              hasReview={reviewLog.length > 0}
               parallelSubjects={parallelSubjects} parallelLog={parallelLog} settings={settings}
               onGrade={gradeEvidence} onUndo={undoReview} onSkip={skipChapter} onUnskip={unskipToday}
               onDismissDebrief={dismissDebrief}
               onSetTodayCapacity={setTodayCapacity} onSetAxisMinutes={setChapterAxisMinutes}
               onAdjustParallel={adjustParallel}
-              onGoSubjects={() => setTab('subjects')}
+              onGoSubjects={goToSubjects}
+              onAddChapters={() => goToSubjects({
+                subjectId: coreSubjects[0]?.id,
+                target: coreSubjects.length ? 'chapter-add' : 'subject-add',
+              })}
+              onConfigureExam={() => {
+                const chapter = chapters.find((item) => subjectById[item.subjectId]?.type === 'core');
+                goToSubjects({ subjectId: chapter?.subjectId || coreSubjects[0]?.id, target: 'exam-add' });
+              }}
               onSetSimpleMode={(v) => updateSetting('simpleMode', v)}
             />
           )}
@@ -1116,6 +1461,8 @@ export default function Cadence() {
               onSetLevel={setChapterLevel} onSetAxisMinutes={setChapterAxisMinutes}
               onAddExam={addExam} onUpdateExam={updateExam} onDeleteExam={deleteExam}
               onToggleExamChapter={toggleExamChapter}
+              focusRequest={subjectFocus}
+              onFocusHandled={setSubjectFocus}
             />
           )}
           {tab === 'progress' && (
@@ -1151,18 +1498,37 @@ export default function Cadence() {
 const CAPACITY_PRESETS = [0, 120, 240, 360];
 
 function TodayView({
-  today, overdue, overdueMinutes, nextExam, subjectById, annalesBanners, debriefs, sessions, ranked,
+  today, overdue, overdueMinutes, shortestDueMinutes, nextExam, subjectById, annalesBanners, debriefs, sessions, ranked,
   plannedCount, plannedMinutes, doneCount, doneByChapter, skippedToday, readinessByExam,
-  todayMinutes, defaultMinutes, hasCoreChapters, exportStale,
+  todayMinutes, defaultMinutes, hasCoreChapters, hasChapters, hasCoveredExam, hasReview, exportStale,
   parallelSubjects, parallelLog, settings,
   onGrade, onUndo, onSkip, onUnskip, onDismissDebrief, onSetTodayCapacity, onSetAxisMinutes,
-  onAdjustParallel, onGoSubjects, onSetSimpleMode,
+  onAdjustParallel, onGoSubjects, onAddChapters, onConfigureExam, onSetSimpleMode,
 }) {
   const [showAll, setShowAll] = useState(false);
   const [customCap, setCustomCap] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
+  const focusToggleRef = useRef(null);
   const wk = mondayOf(today);
   const isOverride = todayMinutes !== defaultMinutes;
   const isPreset = CAPACITY_PRESETS.includes(todayMinutes);
+  const enterFocusMode = () => {
+    setShowAll(false);
+    setFocusMode(true);
+  };
+  const exitFocusMode = () => {
+    setFocusMode(false);
+    requestAnimationFrame(() => focusToggleRef.current?.focus());
+  };
+  const toggleRanking = () => {
+    const next = !showAll;
+    setShowAll(next);
+    if (next) setFocusMode(false);
+  };
+
+  useEffect(() => {
+    if (focusMode && sessions.length === 0) setFocusMode(false);
+  }, [focusMode, sessions.length]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -1186,6 +1552,16 @@ function TodayView({
         </div>
       </div>
 
+      <OnboardingChecklist
+        hasChapters={hasChapters}
+        hasCoveredExam={hasCoveredExam}
+        hasReview={hasReview}
+        canStartTest={sessions.length > 0}
+        onAddChapters={onAddChapters}
+        onConfigureExam={onConfigureExam}
+        onStartFirstTest={enterFocusMode}
+      />
+
       {/* Capacité réelle du jour */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
         <Clock3 size={14} color={C.dim} />
@@ -1195,6 +1571,7 @@ function TodayView({
             const on = !customCap && todayMinutes === m;
             return (
               <button key={m} type="button"
+                aria-pressed={on}
                 onClick={() => { setCustomCap(false); onSetTodayCapacity(m === defaultMinutes ? null : m); }}
                 style={{
                   fontFamily: MONO, fontSize: 12, padding: '4px 11px', borderRadius: 999, cursor: 'pointer',
@@ -1206,7 +1583,8 @@ function TodayView({
               </button>
             );
           })}
-          <button type="button" onClick={() => setCustomCap((v) => !v)}
+          <button type="button" aria-pressed={customCap || (!isPreset && isOverride)}
+            onClick={() => setCustomCap((v) => !v)}
             style={{
               fontFamily: SANS, fontSize: 12, padding: '4px 11px', borderRadius: 999, cursor: 'pointer',
               border: `1px solid ${customCap || (!isPreset && isOverride) ? 'rgba(94,169,255,.5)' : C.line2}`,
@@ -1267,7 +1645,9 @@ function TodayView({
                     <Chip color={C.good} bg="rgba(52,211,153,.12)"><Check size={11} /> constat noté</Chip>
                   ) : (
                     <GradeButtons compact evidenceType="problem"
-                      onGrade={(g) => onGrade(chapter.id, 'problem', g)} />
+                      onGrade={(g) => onGrade(chapter.id, 'problem', g, {
+                        date: exam.date, source: 'exam-debrief', examId: exam.id,
+                      })} />
                   )}
                 </div>
               ))}
@@ -1337,7 +1717,7 @@ function TodayView({
       <div>
         <SectionTitle icon={Activity} right={
           ranked.length > 0 ? (
-            <Btn variant="bare" onClick={() => setShowAll((v) => !v)} style={{ color: C.dim, fontSize: 12 }}>
+            <Btn variant="bare" onClick={toggleRanking} style={{ color: C.dim, fontSize: 12 }}>
               {showAll ? 'voir le plan du jour' : 'voir tout le classement'}
               {showAll ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
             </Btn>
@@ -1372,7 +1752,20 @@ function TodayView({
             </div>
           </div>
         ) : sessions.length === 0 ? (
-          hasCoreChapters ? (
+          overdue > 0 ? (
+            <div className="cad-in" style={{
+              display: 'flex', alignItems: 'center', gap: 12, padding: '18px 16px',
+              border: `1px solid rgba(251,191,36,.4)`, borderRadius: 9, background: 'rgba(251,191,36,.07)',
+            }}>
+              <AlertTriangle size={18} color={C.warn} />
+              <div style={{ fontFamily: SANS, fontSize: 13.5, lineHeight: 1.5 }}>
+                <b style={{ color: C.warn }}>Du travail est dû, mais aucun bloc ne tient dans tes réglages.</b>
+                <div style={{ color: C.dim, fontSize: 12.5 }}>
+                  Le plus court demande {fmtMinutes(shortestDueMinutes)}. Augmente la durée d’une séance ou ajuste la durée de l’axe depuis « voir tout le classement ».
+                </div>
+              </div>
+            </div>
+          ) : hasCoreChapters ? (
             <div className="cad-in" style={{
               display: 'flex', alignItems: 'center', gap: 12, padding: '18px 16px',
               border: `1px solid rgba(52,211,153,.35)`, borderRadius: 9, background: 'rgba(52,211,153,.06)',
@@ -1387,7 +1780,7 @@ function TodayView({
               </div>
             </div>
           ) : (
-            <Empty>Tes chapitres sont dans des matières « parallèle ». Passe une UE en « core » (onglet Matières) pour qu’elle entre dans le plan.</Empty>
+            <Empty>Tes chapitres sont dans des matières « minimum hebdo ». Passe une UE en « planifiée » (onglet Matières) pour qu’elle entre dans le plan.</Empty>
           )
         ) : (
           <>
@@ -1399,6 +1792,19 @@ function TodayView({
               <Mono style={{ fontSize: 11, color: C.dim }}>
                 plan ≈ {fmtMinutes(plannedMinutes)} / {fmtMinutes(todayMinutes)}
               </Mono>
+              <button
+                ref={focusToggleRef}
+                type="button"
+                className={focusMode ? 'cad-feature-button cad-feature-button-primary' : 'cad-feature-button'}
+                aria-pressed={focusMode}
+                aria-controls="cad-focus-panel"
+                onClick={() => {
+                  if (focusMode) exitFocusMode();
+                  else enterFocusMode();
+                }}
+              >
+                {focusMode ? 'Quitter le focus' : 'Mode focus'}
+              </button>
               <div style={{ flex: 1 }} />
               <ThermalLegend />
             </div>
@@ -1407,6 +1813,20 @@ function TodayView({
               teste-toi <b>sans correction</b>, puis note le résultat. Chaque axe est indépendant — tu peux en noter plusieurs le même jour.
             </div>
             {!showAll ? (
+              focusMode ? (
+                <FocusMode
+                  sessions={sessions}
+                  doneByChapter={doneByChapter}
+                  onExit={exitFocusMode}
+                  renderCard={({ chapter, subject }, index) => (
+                    <QueueCard key={chapter.id} idx={index} ch={chapter} subject={subject}
+                      simpleMode={settings.simpleMode} done={doneByChapter[chapter.id]}
+                      today={today} settings={settings}
+                      onGrade={onGrade} onUndo={onUndo} onSkip={onSkip}
+                      onSetAxisMinutes={onSetAxisMinutes} />
+                  )}
+                />
+              ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
                 {sessions.map((session, si) => {
                   const sDone = session.chapters.filter((c) => doneByChapter[c.id]).length;
@@ -1451,6 +1871,7 @@ function TodayView({
                   </div>
                 )}
               </div>
+              )
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {ranked.map((ch, i) => (
@@ -1574,8 +1995,8 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
 
   return (
     <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', alignItems: 'flex-start' }}>
-      <div style={{ flex: '1 1 380px', minWidth: 300 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+      <div style={{ flex: '1 1 380px', minWidth: 0, width: '100%' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
           <IconBtn icon={ChevronLeft} title="Mois précédent" onClick={() => move(-1)} />
           <Mono style={{ fontSize: 16, textTransform: 'capitalize', minWidth: 150, textAlign: 'center' }}>{monthLabel}</Mono>
           <IconBtn icon={ChevronRight} title="Mois suivant" onClick={() => move(1)} />
@@ -1791,7 +2212,7 @@ function LevelPicker({ current, onPick, compact }) {
       {LEVELS.map((l) => {
         const on = l.key === active.key;
         return (
-          <button key={l.key} type="button" onClick={() => onPick(l)}
+          <button key={l.key} type="button" aria-pressed={on} onClick={() => onPick(l)}
             title={`repartir de « ${l.label} »`}
             style={{
               fontFamily: SANS, fontSize: compact ? 11 : 12, padding: compact ? '3px 8px' : '4px 10px',
@@ -1813,9 +2234,58 @@ function SubjectsView({
   onAddSubject, onUpdateSubject, onDeleteSubject,
   onAddChapter, onAddChaptersBulk, onUpdateChapter, onDeleteChapter, onSetLevel, onSetAxisMinutes,
   onAddExam, onUpdateExam, onDeleteExam, onToggleExamChapter,
+  focusRequest, onFocusHandled,
 }) {
   const [open, setOpen] = useState({});
   const toggle = (id) => setOpen((o) => ({ ...o, [id]: !o[id] }));
+
+  useEffect(() => {
+    if (!focusRequest) return undefined;
+    if (focusRequest.subjectId) {
+      setOpen((current) => ({ ...current, [focusRequest.subjectId]: true }));
+    }
+
+    let highlightTimer;
+    let highlightedTarget;
+    let handled = false;
+    const markHandled = () => {
+      if (handled) return;
+      handled = true;
+      onFocusHandled?.((current) => current?.token === focusRequest.token ? null : current);
+    };
+    const focusTimer = window.setTimeout(() => {
+      let targetId = 'subject-adder';
+      if (focusRequest.subjectId) {
+        if (focusRequest.target === 'chapter' && focusRequest.chapterId) targetId = `chapter-${focusRequest.chapterId}`;
+        else if (focusRequest.target === 'chapter-add') targetId = `chapter-adder-${focusRequest.subjectId}`;
+        else if (focusRequest.target === 'exam-add') targetId = `exam-adder-${focusRequest.subjectId}`;
+        else targetId = `subject-${focusRequest.subjectId}`;
+      }
+      const target = document.getElementById(targetId)
+        || (focusRequest.subjectId ? document.getElementById(`subject-${focusRequest.subjectId}`) : null);
+      if (!target) {
+        markHandled();
+        return;
+      }
+      const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      target.scrollIntoView?.({ block: 'center', behavior: reduceMotion ? 'auto' : 'smooth' });
+      const focusable = target.querySelector('input[type="text"], input:not([type="color"]), button');
+      focusable?.focus({ preventScroll: true });
+      target.classList.add('cad-target');
+      highlightedTarget = target;
+      highlightTimer = window.setTimeout(() => {
+        target.classList.remove('cad-target');
+        markHandled();
+      }, 1400);
+    }, 0);
+
+    return () => {
+      window.clearTimeout(focusTimer);
+      if (highlightTimer) window.clearTimeout(highlightTimer);
+      highlightedTarget?.classList.remove('cad-target');
+      markHandled();
+    };
+  }, [focusRequest, onFocusHandled]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -1827,51 +2297,55 @@ function SubjectsView({
         const subExams = exams.filter((e) => e.subjectId === s.id);
         const expanded = !!open[s.id];
         return (
-          <div key={s.id} className="cad-in" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, animationDelay: `${Math.min(sidx, 8) * 40}ms` }}>
+          <div id={`subject-${s.id}`} key={s.id} className="cad-in" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, animationDelay: `${Math.min(sidx, 8) * 40}ms` }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 12, flexWrap: 'wrap' }}>
               {isCore ? (
-                <button onClick={() => toggle(s.id)} aria-label="déplier" style={{
+                <button id={`subject-toggle-${s.id}`} onClick={() => toggle(s.id)} aria-expanded={expanded}
+                  aria-controls={`subject-panel-${s.id}`}
+                  aria-label={`${expanded ? 'Replier' : 'Déplier'} ${s.name}`} style={{
                   background: 'transparent', border: 'none', cursor: 'pointer', color: C.dim, display: 'flex', padding: 2,
                 }}>
                   <ChevronRight size={18} style={{ transition: 'transform .22s var(--ease)', transform: expanded ? 'rotate(90deg)' : 'none' }} />
                 </button>
               ) : <span style={{ width: 22 }} />}
 
-              <input type="color" value={s.color} aria-label="couleur"
+              <input type="color" value={s.color} aria-label={`Couleur de ${s.name}`}
                 onChange={(e) => onUpdateSubject(s.id, { color: e.target.value })}
                 style={{ width: 26, height: 26, padding: 0, border: 'none', background: 'transparent', cursor: 'pointer' }} />
 
-              <TextInput value={s.name} onChange={(v) => onUpdateSubject(s.id, { name: v })} ariaLabel="nom de la matière" style={{ maxWidth: 280 }} />
+              <TextInput value={s.name} onChange={(v) => onUpdateSubject(s.id, { name: v })}
+                ariaLabel={`Nom de la matière ${s.name}`} style={{ maxWidth: 280 }} />
 
               {isCore && subChapters.length > 0 && (
                 <Chip color={C.dim} title="chapitres">{subChapters.length} chap.</Chip>
               )}
 
               <button onClick={() => onUpdateSubject(s.id, { type: isCore ? 'parallel' : 'core', weeklyFloor: isCore ? 4 : undefined })}
-                title="core = planifiée par CADENCE · parallèle = minimum hebdo à tenir"
+                title="Planifiée = entre dans le plan du jour · minimum hebdo = compteur séparé"
                 style={{ background: 'transparent', border: `1px solid ${C.line}`, color: C.faint, borderRadius: 7, fontSize: 11, padding: '4px 7px', cursor: 'pointer', fontFamily: SANS }}>
-                ↔ {isCore ? 'parallèle' : 'core'}
+                ↔ {isCore ? 'minimum hebdo' : 'planifiée'}
               </button>
 
               {!isCore && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>minimum</span>
                   <input type="number" min={0} max={20} value={s.weeklyFloor ?? 0}
-                    onChange={(e) => onUpdateSubject(s.id, { weeklyFloor: Math.max(0, Number(e.target.value) || 0) })}
-                    aria-label="minimum hebdo"
+                    onChange={(e) => onUpdateSubject(s.id, { weeklyFloor: clamp(Number(e.target.value) || 0, 0, 20) })}
+                    aria-label={`Minimum hebdomadaire pour ${s.name}`}
                     style={{ width: 52, fontFamily: MONO, fontSize: 13, color: C.text, background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 6, padding: '5px 6px' }} />
                   <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>/sem</span>
                 </div>
               )}
 
               <div style={{ marginLeft: 'auto' }}>
-                <IconBtn icon={Trash2} danger title="Supprimer la matière"
+              <IconBtn icon={Trash2} danger title={`Supprimer la matière ${s.name}`}
                   onClick={() => { if (confirm(`Supprimer « ${s.name} » et tout son contenu ?`)) onDeleteSubject(s.id); }} />
               </div>
             </div>
 
             {isCore && expanded && (
-              <div style={{ borderTop: `1px solid ${C.line}`, padding: 12, display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div id={`subject-panel-${s.id}`} role="region" aria-labelledby={`subject-toggle-${s.id}`}
+                style={{ borderTop: `1px solid ${C.line}`, padding: 12, display: 'flex', flexDirection: 'column', gap: 16 }}>
                 {/* Chapitres */}
                 <div>
                   <SectionTitle icon={BookOpen}>Chapitres</SectionTitle>
@@ -1887,11 +2361,15 @@ function SubjectsView({
                         : 'rappel jamais testé';
                       const info = axisInfoOf(m, c);
                       return (
-                        <div key={c.id} className="cad-card" style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 10, background: C.panel2, border: `1px solid ${C.line}`, borderLeft: `3px solid ${tcol}`, borderRadius: 8 }}>
+                        <div id={`chapter-${c.id}`} key={c.id} className="cad-card" style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 10, background: C.panel2, border: `1px solid ${C.line}`, borderLeft: `3px solid ${tcol}`, borderRadius: 8 }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                             <MemGauge R={m.R} size={26} />
-                            <TextInput value={c.name} onChange={(v) => onUpdateChapter(c.id, { name: v })} ariaLabel="nom du chapitre" />
-                            <IconBtn icon={Trash2} danger title="Supprimer le chapitre" onClick={() => onDeleteChapter(c.id)} />
+                            <TextInput value={c.name} onChange={(v) => onUpdateChapter(c.id, { name: v })}
+                              ariaLabel={`Nom du chapitre ${c.name}`} />
+                            <IconBtn icon={Trash2} danger title={`Supprimer le chapitre ${c.name}`}
+                              onClick={() => {
+                                if (confirm(`Supprimer « ${c.name} » ? Son historique et ses références d’épreuve seront aussi supprimés.`)) onDeleteChapter(c.id);
+                              }} />
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', paddingLeft: 34 }}>
                             <Pencil size={12} color={C.faint} />
@@ -1938,8 +2416,10 @@ function SubjectsView({
                       );
                     })}
                   </div>
-                  <ChapterAdder onAdd={(name) => onAddChapter(s.id, name)}
-                    onAddMany={(names) => onAddChaptersBulk(s.id, names)} />
+                  <div id={`chapter-adder-${s.id}`}>
+                    <ChapterAdder onAdd={(name) => onAddChapter(s.id, name)}
+                      onAddMany={(names) => onAddChaptersBulk(s.id, names)} />
+                  </div>
                 </div>
 
                 {/* Épreuves */}
@@ -1956,7 +2436,9 @@ function SubjectsView({
                             <div key={e.id} style={{ padding: 10, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                                 <TextInput value={e.name} onChange={(v) => onUpdateExam(e.id, { name: v })} ariaLabel="nom de l'épreuve" style={{ maxWidth: 220 }} />
-                                <TextInput type="date" value={e.date} onChange={(v) => onUpdateExam(e.id, { date: v })} ariaLabel="date de l'épreuve" style={{ maxWidth: 160 }} />
+                                <TextInput type="date" value={e.date}
+                                  onChange={(v) => { if (v) onUpdateExam(e.id, { date: v }); }}
+                                  ariaLabel={`Date de l'épreuve ${e.name}`} style={{ maxWidth: 160 }} />
                                 <Segmented value={e.importance || 'normal'} ariaLabel="importance de l'épreuve"
                                   onChange={(v) => onUpdateExam(e.id, { importance: v })}
                                   options={[
@@ -1968,12 +2450,14 @@ function SubjectsView({
                                   {days < 0 ? 'passée' : `J−${days}`}
                                 </Mono>
                                 <div style={{ marginLeft: 'auto' }}>
-                                  <IconBtn icon={Trash2} danger title="Supprimer l'épreuve" onClick={() => onDeleteExam(e.id)} />
+                                  <IconBtn icon={Trash2} danger title={`Supprimer l'épreuve ${e.name}`}
+                                    onClick={() => { if (confirm(`Supprimer l’épreuve « ${e.name} » ?`)) onDeleteExam(e.id); }} />
                                 </div>
                               </div>
                               <div>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: SANS, fontSize: 11, color: C.faint, marginBottom: 5 }}>
                                   <span>Chapitres couverts ({(e.chapterIds || []).length})</span>
+                                  {(e.chapterIds || []).length === 0 && <Chip color={C.warn}>aucune pression appliquée</Chip>}
                                   <button type="button" onClick={() => onUpdateExam(e.id, { chapterIds: subChapters.map((c) => c.id) })}
                                     style={{ fontFamily: SANS, fontSize: 10.5, color: C.accent, background: 'transparent', border: 'none', cursor: 'pointer', padding: '1px 4px' }}>
                                     tout
@@ -1988,7 +2472,8 @@ function SubjectsView({
                                   {subChapters.map((c) => {
                                     const on = (e.chapterIds || []).includes(c.id);
                                     return (
-                                      <button key={c.id} onClick={() => onToggleExamChapter(e.id, c.id)} style={{
+                                      <button key={c.id} type="button" aria-pressed={on}
+                                        onClick={() => onToggleExamChapter(e.id, c.id)} style={{
                                         display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer',
                                         fontFamily: SANS, fontSize: 12, padding: '4px 9px', borderRadius: 999,
                                         border: `1px solid ${on ? 'rgba(94,169,255,.5)' : C.line2}`,
@@ -2005,7 +2490,9 @@ function SubjectsView({
                           );
                         })}
                       </div>
-                      <AddExam subjectId={s.id} today={today} onAdd={onAddExam} />
+                      <div id={`exam-adder-${s.id}`}>
+                        <AddExam subjectId={s.id} today={today} onAdd={onAddExam} />
+                      </div>
                     </>
                   )}
                 </div>
@@ -2015,7 +2502,7 @@ function SubjectsView({
         );
       })}
 
-      <div style={{ marginTop: 4 }}>
+      <div id="subject-adder" style={{ marginTop: 4 }}>
         <AddRow placeholder="Nouvelle matière (ex. Thermodynamique)" cta="Matière" onAdd={onAddSubject} />
       </div>
     </div>

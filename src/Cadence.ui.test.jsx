@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import React from 'react';
-import { render, screen, within, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, within, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import Cadence from './Cadence.jsx';
 import { STORAGE_KEY, AXIS_MINUTES, emptyPractice, todayISO, addDays } from './engine.js';
 
@@ -130,7 +130,7 @@ describe('Cadence — interactions réelles (jsdom)', () => {
   it('ajout de chapitres en lot : un par ligne, niveaux et durées par défaut', () => {
     render(<Cadence />);
     fireEvent.click(screen.getByRole('button', { name: /Matières/ }));
-    fireEvent.click(screen.getByLabelText('déplier'));
+    fireEvent.click(screen.getByRole('button', { name: /Déplier Maths/i }));
     fireEvent.click(screen.getByRole('button', { name: /en lot/ }));
     fireEvent.change(screen.getByLabelText('chapitres en lot (un par ligne)'), {
       target: { value: 'Espaces vectoriels\n  Déterminants  \n\nRéduction\n' },
@@ -153,6 +153,56 @@ describe('Cadence — interactions réelles (jsdom)', () => {
     expect(screen.getByText(/Pas de séance prévue aujourd’hui/)).toBeTruthy();
     expect(readState().capacityOverrides[Object.keys(readState().capacityOverrides)[0]]).toBe(0);
     expect(screen.queryByText('Oublié')).toBeNull(); // plus de carte à noter
+  });
+
+  it('les raccourcis 1–4 fonctionnent avec les touches physiques d’un clavier AZERTY', () => {
+    render(<Cadence />);
+    fireEvent.keyDown(card(), { key: '&', code: 'Digit1' });
+    expect(readState().reviewLog[0]).toMatchObject({ grade: 1, axis: 'recall' });
+  });
+
+  it('n’annonce pas « tout est à jour » quand un bloc dû ne tient pas dans la séance', () => {
+    const st = baseState();
+    st.settings.sessionHours = 1;
+    st.capacityOverrides = { [todayISO()]: 120 };
+    st.chapters[0] = {
+      ...st.chapters[0],
+      recall: { stability: 30, difficulty: 8.5, lastReviewed: todayISO(), source: 'seed' },
+      exercise: { score: 1, attempts: 1, lastTested: todayISO(), recentFails: 0 },
+      problem: emptyPractice(),
+      minutes: { recall: 15, exercise: 30, problem: 90 },
+    };
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(st));
+
+    render(<Cadence />);
+
+    expect(screen.getByText(/Du travail est dû, mais aucun bloc ne tient/)).toBeTruthy();
+    expect(screen.queryByText(/tout est à jour/)).toBeNull();
+  });
+
+  it('ne remplace jamais silencieusement un stockage local corrompu', () => {
+    const broken = '{"version":4,';
+    window.localStorage.setItem(STORAGE_KEY, broken);
+
+    render(<Cadence />);
+
+    expect(screen.getByRole('alert').textContent).toMatch(/données locales sont illisibles/i);
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBe(broken);
+  });
+
+  it('détecte une modification provenant d’un autre onglet avant tout écrasement', () => {
+    render(<Cadence />);
+    const other = baseState();
+    other.subjects[0] = { ...other.subjects[0], name: 'Maths — autre onglet' };
+
+    fireEvent(window, new StorageEvent('storage', {
+      key: STORAGE_KEY,
+      newValue: JSON.stringify(other),
+    }));
+
+    expect(screen.getByText(/Une autre fenêtre a modifié CADENCE/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /Charger l’autre version/ }));
+    expect(readState().subjects[0].name).toBe('Maths — autre onglet');
   });
 
   it('les indicateurs de Progrès séparent les trois axes et affichent « non testé »', () => {
@@ -185,6 +235,101 @@ describe('Cadence — interactions réelles (jsdom)', () => {
     fireEvent.change(within(card()).getByLabelText('durée rappel du cours'), { target: { value: '45' } });
     expect(readState().chapters[0].minutes.recall).toBe(45);
     expect(readState().chapters[0].minutes.exercise).toBe(30); // les autres axes ne bougent pas
+  });
+
+  it('le démarrage rapide mène directement au champ d’ajout de chapitre', async () => {
+    const st = baseState();
+    st.chapters = [];
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(st));
+
+    render(<Cadence />);
+
+    expect(screen.getByRole('heading', { name: /plan devient précis en trois étapes/i })).toBeTruthy();
+    expect(screen.getByRole('progressbar', { name: /progression de la configuration/i }).getAttribute('aria-valuenow')).toBe('0');
+    fireEvent.click(screen.getByRole('button', { name: /Ajouter mes chapitres/i }));
+
+    const chapterInput = await screen.findByLabelText(/Nouveau chapitre/i);
+    await waitFor(() => expect(document.activeElement).toBe(chapterInput));
+    expect(screen.getByRole('heading', { name: /Matières \(UE\)/i })).toBeTruthy();
+  });
+
+  it('la recherche rapide est insensible aux accents et ouvre le chapitre exact', async () => {
+    const st = baseState();
+    st.chapters[0].name = 'Électromagnétisme';
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(st));
+
+    render(<Cadence />);
+    fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+
+    const input = screen.getByRole('searchbox', { name: /Rechercher un chapitre/i });
+    fireEvent.change(input, { target: { value: 'electromagnetisme' } });
+    expect(screen.getByRole('status').textContent).toBe('1 résultat');
+    fireEvent.click(screen.getByRole('button', { name: /Électromagnétisme.*Maths/i }));
+
+    const chapterName = await screen.findByLabelText('Nom du chapitre Électromagnétisme');
+    await waitFor(() => expect(document.activeElement).toBe(chapterName));
+    expect(screen.queryByRole('dialog', { name: /Trouver un chapitre/i })).toBeNull();
+  });
+
+  it('le raccourci / ne vole pas le clavier pendant la saisie', () => {
+    render(<Cadence />);
+    fireEvent.click(screen.getByRole('button', { name: /Matières/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Déplier Maths/i }));
+    const chapterName = screen.getByLabelText('Nom du chapitre Endomorphismes');
+    chapterName.focus();
+    fireEvent.keyDown(chapterName, { key: '/' });
+    expect(screen.queryByRole('dialog', { name: /Trouver un chapitre/i })).toBeNull();
+  });
+
+  it('le mode focus n’affiche qu’un chapitre, réinitialise son état local et rend le focus à la sortie', async () => {
+    const st = baseState();
+    st.chapters.push({
+      id: 'c2', subjectId: 's1', name: 'Espaces vectoriels', initialLevel: 'new',
+      recall: { ...SEED_RECALL }, exercise: emptyPractice(), problem: emptyPractice(),
+      minutes: { ...AXIS_MINUTES },
+    });
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(st));
+
+    render(<Cadence />);
+    const toggle = screen.getByRole('button', { name: 'Mode focus' });
+    fireEvent.click(toggle);
+
+    let currentCard = screen.getByText('Endomorphismes').closest('.cad-card');
+    expect(screen.queryByText('Espaces vectoriels')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /Rechercher/ }));
+    const searchInput = screen.getByRole('searchbox', { name: /Rechercher un chapitre/i });
+    fireEvent.keyDown(searchInput, { key: 'ArrowRight', altKey: true });
+    const focusPanel = document.getElementById('cad-focus-panel');
+    expect(within(focusPanel).getByText('Endomorphismes')).toBeTruthy();
+    expect(within(focusPanel).queryByText('Espaces vectoriels')).toBeNull();
+    fireEvent.keyDown(searchInput, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: /Trouver un chapitre/i })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Quitter le focus' })).toBeTruthy();
+
+    fireEvent.click(within(currentCard).getByRole('button', { name: /^Exercice/ }));
+    expect(within(currentCard).getByText('Autonome et propre')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Suivant' }));
+
+    currentCard = screen.getByText('Espaces vectoriels').closest('.cad-card');
+    expect(screen.queryByText('Endomorphismes')).toBeNull();
+    expect(within(currentCard).getByText('Immédiat')).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(document.activeElement).toBe(toggle));
+    expect(screen.getByText('Endomorphismes')).toBeTruthy();
+    expect(screen.getByText('Espaces vectoriels')).toBeTruthy();
+  });
+
+  it('entrer en focus depuis le classement complet rend immédiatement la carte', () => {
+    render(<Cadence />);
+    fireEvent.click(screen.getByRole('button', { name: /voir tout le classement/i }));
+    expect(screen.queryByRole('group', { name: /Endomorphismes — rappel du cours/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /Commencer mon plan/i }));
+
+    expect(screen.getByRole('region', { name: 'Maths' })).toBeTruthy();
+    expect(screen.getByRole('group', { name: /Endomorphismes — rappel du cours/i })).toBeTruthy();
   });
 });
 
@@ -220,7 +365,10 @@ describe('Bilan d’épreuve (épreuve passée hier)', () => {
     expect(c1.exercise.attempts).toBe(0);          // exercice intact
     // la ligne passe en « constat noté », l'autre chapitre reste à noter
     expect(within(screen.getByText(/passée hier/).closest('.cad-card')).getByText('constat noté')).toBeTruthy();
-    expect(st.reviewLog[0]).toMatchObject({ evidenceType: 'problem', axis: 'problem' });
+    expect(st.reviewLog[0]).toMatchObject({
+      evidenceType: 'problem', axis: 'problem', source: 'exam-debrief', examId: 'e1',
+      date: addDays(todayISO(), -1), recordedAt: todayISO(),
+    });
   });
 
   it('tout noter fait disparaître le bilan ; « masquer » le range définitivement', () => {
