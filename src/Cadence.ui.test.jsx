@@ -237,20 +237,15 @@ describe('Cadence — interactions réelles (jsdom)', () => {
     expect(readState().chapters[0].minutes.exercise).toBe(30); // les autres axes ne bougent pas
   });
 
-  it('le démarrage rapide mène directement au champ d’ajout de chapitre', async () => {
+  it('n’affiche plus le guide de démarrage rapide', () => {
     const st = baseState();
     st.chapters = [];
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(st));
 
     render(<Cadence />);
 
-    expect(screen.getByRole('heading', { name: /plan devient précis en trois étapes/i })).toBeTruthy();
-    expect(screen.getByRole('progressbar', { name: /progression de la configuration/i }).getAttribute('aria-valuenow')).toBe('0');
-    fireEvent.click(screen.getByRole('button', { name: /Ajouter mes chapitres/i }));
-
-    const chapterInput = await screen.findByLabelText(/Nouveau chapitre/i);
-    await waitFor(() => expect(document.activeElement).toBe(chapterInput));
-    expect(screen.getByRole('heading', { name: /Matières \(UE\)/i })).toBeTruthy();
+    expect(screen.queryByText(/Démarrage rapide/i)).toBeNull();
+    expect(screen.queryByRole('heading', { name: /plan devient précis en trois étapes/i })).toBeNull();
   });
 
   it('la recherche rapide est insensible aux accents et ouvre le chapitre exact', async () => {
@@ -326,7 +321,7 @@ describe('Cadence — interactions réelles (jsdom)', () => {
     fireEvent.click(screen.getByRole('button', { name: /voir tout le classement/i }));
     expect(screen.queryByRole('group', { name: /Endomorphismes — rappel du cours/i })).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: /Commencer mon plan/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Mode focus/i }));
 
     expect(screen.getByRole('region', { name: 'Maths' })).toBeTruthy();
     expect(screen.getByRole('group', { name: /Endomorphismes — rappel du cours/i })).toBeTruthy();

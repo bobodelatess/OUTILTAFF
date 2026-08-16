@@ -43,7 +43,6 @@ import {
 import { useCurrentDay } from './useCurrentDay.js';
 import ChapterSearch from './ChapterSearch.jsx';
 import FocusMode from './FocusMode.jsx';
-import OnboardingChecklist from './OnboardingChecklist.jsx';
 
 /* ================================================================== *
  *  Thème & aides d'affichage
@@ -707,36 +706,10 @@ const GLOBAL_CSS = `
   }
   .cad-feature-button:disabled { opacity: .42; cursor: not-allowed; filter: none; }
 
-  .cad-onboarding {
-    padding: 16px; border: 1px solid rgba(94,169,255,.28); border-radius: 12px;
-    background: linear-gradient(135deg, rgba(94,169,255,.09), rgba(17,24,36,.96) 58%);
-    box-shadow: 0 16px 40px -30px rgba(94,169,255,.7);
-  }
-  .cad-onboarding-heading { display: flex; align-items: end; gap: 18px; margin-bottom: 14px; }
-  .cad-onboarding-heading h2 { margin: 0; color: ${C.text}; font: 700 17px/1.3 ${SANS}; }
-  .cad-onboarding-progress {
-    flex: 1 1 120px; max-width: 220px; height: 5px; margin-left: auto;
-    overflow: hidden; border-radius: 999px; background: ${C.line};
-  }
-  .cad-onboarding-progress span, .cad-focus-progress span {
+  .cad-focus-progress span {
     display: block; height: 100%; border-radius: inherit; background: ${C.accent};
     transition: width .3s var(--ease);
   }
-  .cad-onboarding-steps { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-  .cad-onboarding-steps li {
-    display: flex; align-items: center; gap: 10px; min-width: 0;
-    padding: 10px; border: 1px solid ${C.line}; border-radius: 9px; background: rgba(10,15,24,.55);
-  }
-  .cad-onboarding-steps li.is-current { border-color: rgba(94,169,255,.36); background: rgba(94,169,255,.06); }
-  .cad-onboarding-steps li.is-done { opacity: .65; }
-  .cad-onboarding-step-icon {
-    display: inline-flex; align-items: center; justify-content: center; flex: 0 0 30px;
-    width: 30px; height: 30px; border-radius: 8px; color: ${C.accent}; background: rgba(94,169,255,.12);
-  }
-  .cad-onboarding-steps li.is-done .cad-onboarding-step-icon { color: ${C.good}; background: rgba(52,211,153,.1); }
-  .cad-onboarding-step-copy { flex: 1 1 260px; min-width: 0; }
-  .cad-onboarding-step-copy h3 { margin: 0 0 2px; color: ${C.text}; font: 650 13px/1.3 ${SANS}; }
-  .cad-onboarding-step-copy p { margin: 0; color: ${C.dim}; font: 12px/1.4 ${SANS}; }
 
   .cad-search-trigger {
     display: inline-flex; align-items: center; gap: 7px; min-height: 34px;
@@ -814,10 +787,6 @@ const GLOBAL_CSS = `
   @media (max-width: 760px) {
     .cad-search-trigger { margin-left: auto; }
     .cad-search-label, .cad-search-trigger kbd { display: none; }
-    .cad-onboarding-heading { align-items: start; flex-direction: column; gap: 10px; }
-    .cad-onboarding-progress { width: 100%; max-width: none; margin: 0; }
-    .cad-onboarding-steps li { align-items: start; flex-wrap: wrap; }
-    .cad-onboarding-steps .cad-feature-button { width: calc(100% - 40px); margin-left: 40px; }
     .cad-focus-header { flex-wrap: wrap; }
     .cad-focus-navigation { flex-wrap: wrap; }
     .cad-focus-navigation > span { order: -1; flex-basis: 100%; }
@@ -1427,23 +1396,12 @@ export default function Cadence() {
               skippedToday={skippedToday} readinessByExam={readinessByExam}
               todayMinutes={todayMinutes} defaultMinutes={defaultMinutes}
               hasCoreChapters={hasCoreChapters} exportStale={exportStale}
-              hasChapters={hasCoreChapters}
-              hasCoveredExam={exams.some((exam) => (exam.chapterIds || []).length > 0)}
-              hasReview={reviewLog.length > 0}
               parallelSubjects={parallelSubjects} parallelLog={parallelLog} settings={settings}
               onGrade={gradeEvidence} onUndo={undoReview} onSkip={skipChapter} onUnskip={unskipToday}
               onDismissDebrief={dismissDebrief}
               onSetTodayCapacity={setTodayCapacity} onSetAxisMinutes={setChapterAxisMinutes}
               onAdjustParallel={adjustParallel}
               onGoSubjects={goToSubjects}
-              onAddChapters={() => goToSubjects({
-                subjectId: coreSubjects[0]?.id,
-                target: coreSubjects.length ? 'chapter-add' : 'subject-add',
-              })}
-              onConfigureExam={() => {
-                const chapter = chapters.find((item) => subjectById[item.subjectId]?.type === 'core');
-                goToSubjects({ subjectId: chapter?.subjectId || coreSubjects[0]?.id, target: 'exam-add' });
-              }}
               onSetSimpleMode={(v) => updateSetting('simpleMode', v)}
             />
           )}
@@ -1500,10 +1458,10 @@ const CAPACITY_PRESETS = [0, 120, 240, 360];
 function TodayView({
   today, overdue, overdueMinutes, shortestDueMinutes, nextExam, subjectById, annalesBanners, debriefs, sessions, ranked,
   plannedCount, plannedMinutes, doneCount, doneByChapter, skippedToday, readinessByExam,
-  todayMinutes, defaultMinutes, hasCoreChapters, hasChapters, hasCoveredExam, hasReview, exportStale,
+  todayMinutes, defaultMinutes, hasCoreChapters, exportStale,
   parallelSubjects, parallelLog, settings,
   onGrade, onUndo, onSkip, onUnskip, onDismissDebrief, onSetTodayCapacity, onSetAxisMinutes,
-  onAdjustParallel, onGoSubjects, onAddChapters, onConfigureExam, onSetSimpleMode,
+  onAdjustParallel, onGoSubjects, onSetSimpleMode,
 }) {
   const [showAll, setShowAll] = useState(false);
   const [customCap, setCustomCap] = useState(false);
@@ -1551,16 +1509,6 @@ function TodayView({
           )}
         </div>
       </div>
-
-      <OnboardingChecklist
-        hasChapters={hasChapters}
-        hasCoveredExam={hasCoveredExam}
-        hasReview={hasReview}
-        canStartTest={sessions.length > 0}
-        onAddChapters={onAddChapters}
-        onConfigureExam={onConfigureExam}
-        onStartFirstTest={enterFocusMode}
-      />
 
       {/* Capacité réelle du jour */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>

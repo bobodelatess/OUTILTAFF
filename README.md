@@ -133,11 +133,8 @@ moyenne. La répartition des notes est **séparée par type de preuve**. Pas de
 « série de jours » : rien qui pousse à multiplier des tests faciles pour
 entretenir un compteur.
 
-## Expérience guidée et navigation rapide
+## Navigation rapide
 
-- Un **démarrage guidé en trois étapes** accompagne la première configuration :
-  chapitres, épreuve couverte, puis premier test. Chaque action ouvre directement
-  la bonne matière et le bon champ.
 - Une **recherche de chapitres** accessible depuis l'en-tête (`Ctrl/Cmd+K` ou
   `/`) retrouve un chapitre par son nom ou sa matière, sans tenir compte des
   accents, puis ouvre et met en évidence le résultat exact.
@@ -148,8 +145,8 @@ entretenir un compteur.
 
 ## Les cinq vues
 
-1. **Aujourd'hui** — démarrage guidé, capacité du jour, plan par séances
-   (minutes réelles), **mode focus chapitre par chapitre**,
+1. **Aujourd'hui** — capacité du jour, plan par séances (minutes réelles),
+   **mode focus chapitre par chapitre**,
    axe proposé + choix d'axe par carte, notation 4 issues, annulation,
    reporter, **bilan d'épreuve**, clavier (Tab, r/e/p pour l'axe, 1–4 pour
    noter), minimums hebdo *à protéger si possible*.
@@ -244,8 +241,8 @@ npm test         # 137 tests : moteur, stockage/récupération, changement de jo
   Testé directement.
 - `src/Cadence.jsx` — interface React (un composant par vue), mutations et
   états visibles de sauvegarde/conflit.
-- `src/OnboardingChecklist.jsx`, `src/ChapterSearch.jsx`, `src/FocusMode.jsx` —
-  parcours guidé, recherche clavier accessible et séance chapitre par chapitre.
+- `src/ChapterSearch.jsx`, `src/FocusMode.jsx` — recherche clavier accessible
+  et séance chapitre par chapitre.
 - `src/storage.js` — chargement sûr, quarantaine/récupération, écritures
   vérifiées et instantanés quotidiens.
 - `src/useCurrentDay.js` — bascule à minuit et resynchronisation au retour au
