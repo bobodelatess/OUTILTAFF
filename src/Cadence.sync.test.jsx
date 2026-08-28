@@ -295,6 +295,25 @@ describe('synchronisation — activation et confidentialité', () => {
     expect(pc.getItem(STORAGE_KEY)).not.toContain('ghp_ultra_secret');
   });
 
+  it('pas d’emballement : le nombre d’échanges reste borné après une note', async () => {
+    const pc = makeDevice('dev-pc');
+    pc.setItem(STORAGE_KEY, JSON.stringify(stateWith([chapterOn('c1', 'Diagonalisation')])));
+    await boot(pc);
+    await untilVault((st) => st.chapters.length === 1);
+
+    const before = global.fetch.mock.calls.length;
+    fireEvent.click(within(card('Diagonalisation')).getByRole('button', { name: /^Exercice/ }));
+    fireEvent.click(within(card('Diagonalisation')).getByText('Autonome'));
+    fireEvent.click(screen.getByRole('button', { name: /Synchronisation/i }));
+    await untilVault((st) => st.reviewLog.length === 1);
+
+    // Laisser le temps à d'éventuelles boucles de se manifester.
+    await act(async () => { await new Promise((r) => setTimeout(r, 250)); });
+    // Une note = une poignée d'appels (lecture + écriture, plus une lecture de
+    // contrôle), certainement pas une boucle.
+    expect(global.fetch.mock.calls.length - before).toBeLessThan(8);
+  });
+
   it('détacher un appareil coupe le lien sans toucher aux données', async () => {
     const pc = makeDevice('dev-pc');
     pc.setItem(STORAGE_KEY, JSON.stringify(stateWith([chapterOn('c1', 'Diagonalisation')])));

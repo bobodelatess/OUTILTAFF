@@ -11,7 +11,7 @@
  * l'interface React et la persistance locale (PWA, hors-ligne).
  */
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, CalendarDays, Layers, Settings as SettingsIcon, TrendingUp,
   Plus, Trash2, ChevronDown, ChevronRight, ChevronLeft, Check,
@@ -1084,14 +1084,17 @@ export default function Cadence() {
   if (deviceIdRef.current === null) deviceIdRef.current = getDeviceId(store, newDeviceId);
 
   // Synchronisation multi-appareils (inactive tant qu'elle n'est pas activée).
-  const sync = useSync({
-    store,
-    getState: () => stateRef.current,
-    // Un état venu de la fusion garde SON horodatage : il ne doit pas être
-    // re-marqué comme une modification locale, sinon les appareils se
-    // renverraient indéfiniment le même contenu.
-    applyMerged: (merged) => replaceState(merged),
-  });
+  // Les deux rappels sont stables : sinon `syncNow` changerait d'identité à
+  // chaque rendu et réarmerait sans cesse la minuterie d'envoi.
+  const getSyncState = useCallback(() => stateRef.current, []);
+  // Un état venu de la fusion garde SON horodatage : il ne doit pas être
+  // re-marqué comme une modification locale, sinon les appareils se
+  // renverraient indéfiniment le même contenu.
+  const applyMergedState = useCallback((merged) => {
+    stateRef.current = merged;
+    setState(merged);
+  }, []);
+  const sync = useSync({ store, getState: getSyncState, applyMerged: applyMergedState });
   useSyncTriggers({
     configured: sync.configured,
     signature: contentSignature(state),
