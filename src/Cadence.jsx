@@ -17,6 +17,7 @@ import {
   Plus, Trash2, ChevronDown, ChevronRight, ChevronLeft, Check,
   Download, Upload, RotateCcw, AlertTriangle, Lock, Undo2,
   BookOpen, FlaskConical, Flame, Pencil, Clock3,
+  RefreshCw, Cloud, CloudOff, Smartphone,
 } from 'lucide-react';
 
 import {
@@ -31,8 +32,11 @@ import {
   defaultDailyMinutes, todayCapacityMinutes, planDay,
   cruiseLoad, observedRetention, forecastDue, examReadiness,
   validateImport, normalize, seedState, newChapter,
-  stripChapterIds, recalibrateState, makeStore,
+  stripChapterIds, recalibrateState, makeStore, markDeleted,
 } from './engine.js';
+import { stampState, contentSignature, newDeviceId } from './sync.js';
+import { getDeviceId } from './remote.js';
+import { useSync, useSyncTriggers } from './useSync.js';
 import {
   QUARANTINE_KEY,
   deserializeCadenceState,
@@ -625,6 +629,210 @@ function Stat({ label, value, unit, tone }) {
   );
 }
 
+/* ------------------------------------------------------------------ *
+ *  Synchronisation : pastille d'état (en-tête)
+ * ------------------------------------------------------------------ */
+
+const SYNC_LOOK = {
+  ok: { icon: Cloud, color: C.good, label: 'à jour' },
+  sync: { icon: RefreshCw, color: C.accent, label: 'synchronisation…' },
+  offline: { icon: CloudOff, color: C.dim, label: 'hors-ligne' },
+  error: { icon: CloudOff, color: C.bad, label: 'erreur de synchro' },
+  idle: { icon: Cloud, color: C.faint, label: 'à jour' },
+};
+
+function fmtClock(ts) {
+  if (!ts) return null;
+  try { return new Date(ts).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }); }
+  catch (e) { return null; }
+}
+
+function SyncBadge({ sync, onOpenSettings }) {
+  if (!sync?.configured) return null;
+  const state = sync.pending && sync.status === 'ok' ? 'sync' : sync.status;
+  const look = SYNC_LOOK[state] || SYNC_LOOK.idle;
+  const Icon = look.icon;
+  const at = fmtClock(sync.lastSyncAt);
+  const title = sync.error
+    ? `Synchronisation : ${sync.error}`
+    : `Synchronisation ${look.label}${at ? ` · dernier échange à ${at}` : ''} — cliquer pour synchroniser maintenant`;
+  return (
+    <button type="button" onClick={() => sync.syncNow()} onDoubleClick={onOpenSettings}
+      title={title} aria-label={title}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+        fontFamily: SANS, fontSize: 11.5, padding: '5px 9px', borderRadius: 999,
+        border: `1px solid ${state === 'error' ? 'rgba(248,113,113,.4)' : C.line}`,
+        background: 'transparent', color: look.color,
+      }}>
+      <Icon size={13} className={state === 'sync' ? 'cad-spin' : undefined} />
+      <span className="cad-sync-label">{sync.pending && sync.status !== 'sync' ? 'à envoyer' : look.label}</span>
+    </button>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ *  Synchronisation : réglages (activation, second appareil, état)
+ * ------------------------------------------------------------------ */
+
+const TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=gist&description=CADENCE';
+
+function SyncSettings({ sync }) {
+  const [mode, setMode] = useState(null); // null | 'create' | 'join'
+  const [token, setToken] = useState('');
+  const [gistId, setGistId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const run = async (fn) => {
+    setBusy(true);
+    const res = await fn();
+    setBusy(false);
+    if (res?.ok) { setToken(''); setGistId(''); setMode(null); }
+  };
+
+  const copyVaultId = async () => {
+    try {
+      await navigator.clipboard.writeText(sync.config.gistId);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 3000);
+    } catch (e) { alert(`Identifiant du coffre : ${sync.config.gistId}`); }
+  };
+
+  const at = fmtClock(sync.lastSyncAt);
+
+  return (
+    <div>
+      <SectionTitle icon={Smartphone}>Synchronisation entre appareils</SectionTitle>
+
+      {sync.configured ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <Chip color={sync.status === 'error' ? C.bad : sync.status === 'offline' ? C.dim : C.good}
+              bg={sync.status === 'error' ? 'rgba(248,113,113,.1)' : 'rgba(52,211,153,.1)'}>
+              {sync.status === 'error' ? <AlertTriangle size={11} /> : <Cloud size={11} />}
+              {sync.status === 'error' ? 'erreur' : sync.status === 'offline' ? 'hors-ligne' : 'active'}
+            </Chip>
+            <span style={{ fontFamily: SANS, fontSize: 12, color: C.dim }}>
+              {sync.pending ? 'modifications à envoyer' : at ? `dernier échange à ${at}` : 'en attente du premier échange'}
+            </span>
+            <Btn onClick={() => sync.syncNow()} disabled={sync.status === 'sync'}>
+              <RefreshCw size={13} className={sync.status === 'sync' ? 'cad-spin' : undefined} /> Synchroniser maintenant
+            </Btn>
+          </div>
+
+          {sync.error && (
+            <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.bad, lineHeight: 1.5 }}>{sync.error}</div>
+          )}
+
+          <div style={{
+            padding: 11, borderRadius: 9, background: C.panel2, border: `1px solid ${C.line}`,
+            display: 'flex', flexDirection: 'column', gap: 8,
+          }}>
+            <div style={{ fontFamily: SANS, fontSize: 12, color: C.text, fontWeight: 600 }}>
+              Ajouter un autre appareil
+            </div>
+            <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.dim, lineHeight: 1.5 }}>
+              Sur ton téléphone : ouvre CADENCE → Réglages → « J’ai déjà un coffre »,
+              puis colle ton jeton et cet identifiant de coffre.
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <Mono style={{ fontSize: 11.5, color: C.accent, wordBreak: 'break-all' }}>{sync.config.gistId}</Mono>
+              <Btn variant="bare" onClick={copyVaultId} style={{ color: copied ? C.good : C.dim, fontSize: 12 }}>
+                {copied ? <Check size={13} /> : <Download size={13} />} {copied ? 'copié' : 'copier'}
+              </Btn>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Btn variant="danger" onClick={() => {
+              if (confirm('Détacher CET appareil de la synchronisation ?\nTes données restent ici et dans le coffre — seul le lien est coupé.')) sync.disconnect();
+            }}>
+              <CloudOff size={13} /> Détacher cet appareil
+            </Btn>
+            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>
+              appareil « {sync.deviceId} »
+            </span>
+          </div>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ fontFamily: SANS, fontSize: 12.5, color: C.dim, lineHeight: 1.6, maxWidth: 640 }}>
+            Garde les mêmes données sur ton téléphone et ton ordinateur. CADENCE n’a
+            toujours <b>aucun serveur</b> : tes données sont déposées dans un
+            <b> gist privé de ton propre compte GitHub</b> — tu peux le consulter,
+            le révoquer ou le supprimer quand tu veux. Le jeton reste sur cet
+            appareil et n’est <b>jamais</b> inclus dans un export JSON.
+          </div>
+
+          {!mode && (
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              <Btn variant="primary" onClick={() => setMode('create')}>
+                <Cloud size={14} /> Activer la synchronisation
+              </Btn>
+              <Btn onClick={() => setMode('join')}>
+                <Smartphone size={14} /> J’ai déjà un coffre
+              </Btn>
+            </div>
+          )}
+
+          {mode && (
+            <div className="cad-in" style={{
+              padding: 12, borderRadius: 9, background: C.panel2,
+              border: `1px solid ${C.line}`, display: 'flex', flexDirection: 'column', gap: 9,
+            }}>
+              <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.dim, lineHeight: 1.6 }}>
+                1. Crée un jeton GitHub avec la <b>seule</b> portée « gist » :{' '}
+                <a href={TOKEN_URL} target="_blank" rel="noreferrer" style={{ color: C.accent }}>
+                  ouvrir la page GitHub
+                </a>{' '}
+                (aucun accès à ton code n’est demandé).<br />
+                2. Colle-le ici. Il reste sur cet appareil.
+              </div>
+              <input type="password" value={token} onChange={(e) => setToken(e.target.value)}
+                aria-label="jeton GitHub" placeholder="ghp_… ou github_pat_…"
+                autoComplete="off" spellCheck={false}
+                style={{
+                  fontFamily: MONO, fontSize: 12, color: C.text, background: C.inset,
+                  border: `1px solid ${C.line2}`, borderRadius: 7, padding: '8px 10px', width: '100%', boxSizing: 'border-box',
+                }} />
+              {mode === 'join' && (
+                <input type="text" value={gistId} onChange={(e) => setGistId(e.target.value)}
+                  aria-label="identifiant du coffre" placeholder="identifiant du coffre (copié depuis l’autre appareil)"
+                  autoComplete="off" spellCheck={false}
+                  style={{
+                    fontFamily: MONO, fontSize: 12, color: C.text, background: C.inset,
+                    border: `1px solid ${C.line2}`, borderRadius: 7, padding: '8px 10px', width: '100%', boxSizing: 'border-box',
+                  }} />
+              )}
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <Btn variant="primary" disabled={busy || !token.trim() || (mode === 'join' && !gistId.trim())}
+                  onClick={() => run(() => (mode === 'create'
+                    ? sync.connect(token.trim())
+                    : sync.join(token.trim(), gistId.trim())))}>
+                  {busy ? <RefreshCw size={14} className="cad-spin" /> : <Cloud size={14} />}
+                  {mode === 'create' ? 'Créer mon coffre privé' : 'Rejoindre le coffre'}
+                </Btn>
+                <Btn variant="bare" onClick={() => { setMode(null); setToken(''); setGistId(''); }}
+                  style={{ color: C.faint, fontSize: 12 }}>annuler</Btn>
+              </div>
+              {sync.error && (
+                <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.bad, lineHeight: 1.5 }}>{sync.error}</div>
+              )}
+              {mode === 'join' && (
+                <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint, lineHeight: 1.5 }}>
+                  Les données des deux appareils sont <b>fusionnées</b>, jamais écrasées :
+                  aucun test noté ne peut être perdu.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ================================================================== *
  *  Styles globaux (mouvement, repli fluide, reduced-motion)
  * ================================================================== */
@@ -677,6 +885,8 @@ const GLOBAL_CSS = `
   @keyframes cad-fade-up { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: none; } }
   @keyframes cad-fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
   @keyframes cad-pop { 0% { transform: scale(.5); opacity: .3; } 60% { transform: scale(1.18); } 100% { transform: scale(1); opacity: 1; } }
+  @keyframes cad-spin { to { transform: rotate(360deg); } }
+  .cad-spin { animation: cad-spin 1.1s linear infinite; }
   @keyframes cad-toast { from { opacity: 0; transform: translate(-50%, 14px); } to { opacity: 1; transform: translate(-50%, 0); } }
   .cad-in { animation: cad-fade-up .36s var(--ease) both; }
   .cad-view { animation: cad-fade .24s var(--ease) both; }
@@ -786,7 +996,7 @@ const GLOBAL_CSS = `
 
   @media (max-width: 760px) {
     .cad-search-trigger { margin-left: auto; }
-    .cad-search-label, .cad-search-trigger kbd { display: none; }
+    .cad-search-label, .cad-search-trigger kbd, .cad-sync-label { display: none; }
     .cad-focus-header { flex-wrap: wrap; }
     .cad-focus-navigation { flex-wrap: wrap; }
     .cad-focus-navigation > span { order: -1; flex-basis: 100%; }
@@ -868,6 +1078,26 @@ export default function Cadence() {
     stateRef.current = next;
     setState(next);
   };
+
+  // Identifiant de CET appareil : local, stable, jamais mêlé aux données.
+  const deviceIdRef = useRef(null);
+  if (deviceIdRef.current === null) deviceIdRef.current = getDeviceId(store, newDeviceId);
+
+  // Synchronisation multi-appareils (inactive tant qu'elle n'est pas activée).
+  const sync = useSync({
+    store,
+    getState: () => stateRef.current,
+    // Un état venu de la fusion garde SON horodatage : il ne doit pas être
+    // re-marqué comme une modification locale, sinon les appareils se
+    // renverraient indéfiniment le même contenu.
+    applyMerged: (merged) => replaceState(merged),
+  });
+  useSyncTriggers({
+    configured: sync.configured,
+    signature: contentSignature(state),
+    syncNow: sync.syncNow,
+    markPending: sync.markPending,
+  });
 
   // Écriture vérifiée : une erreur de quota ou de navigateur privé devient
   // visible et les mutations restent exportables depuis l'état React courant.
@@ -972,8 +1202,10 @@ export default function Cadence() {
   };
 
   /* ----- Mutations ----- */
+  // Chaque modification faite ici est horodatée : c'est ce qui permet à la
+  // fusion multi-appareils de départager deux versions d'un même élément.
   const patch = (fn) => setState((prev) => {
-    const next = fn(prev);
+    const next = stampState(fn(prev), deviceIdRef.current);
     stateRef.current = next;
     return next;
   });
@@ -1000,6 +1232,12 @@ export default function Cadence() {
         week, Object.fromEntries(Object.entries(values || {}).filter(([subjectId]) => subjectId !== id)),
       ])),
       examDebriefs: Object.fromEntries(Object.entries(p.examDebriefs || {}).filter(([examId]) => !examIds.has(examId))),
+      // Traces de suppression : sans elles, un autre appareil ressusciterait
+      // la matière (et son contenu) à la prochaine synchronisation.
+      deleted: markDeleted(
+        markDeleted(markDeleted(p.deleted, 'subjects', [id], today), 'chapters', chapIds, today),
+        'exams', [...examIds], today,
+      ),
     };
   });
 
@@ -1020,6 +1258,7 @@ export default function Cadence() {
     reviewLog: p.reviewLog.filter((r) => r.chapterId !== id),
     archivedReviews: (p.archivedReviews || []).filter((r) => r.chapterId !== id),
     skips: Object.fromEntries(Object.entries(p.skips || {}).filter(([chapterId]) => chapterId !== id)),
+    deleted: markDeleted(p.deleted, 'chapters', [id], today),
   }));
   // Recalibrer : confirmation, puis les 3 axes repartent du niveau + historique
   // du chapitre archivé (cohérence garantie entre niveau, dates et journal).
@@ -1134,6 +1373,7 @@ export default function Cadence() {
     ...p,
     exams: p.exams.filter((e) => e.id !== id),
     examDebriefs: Object.fromEntries(Object.entries(p.examDebriefs || {}).filter(([examId]) => examId !== id)),
+    deleted: markDeleted(p.deleted, 'exams', [id], today),
   }));
   const toggleExamChapter = (examId, chapterId) => patch((p) => ({
     ...p,
@@ -1315,6 +1555,7 @@ export default function Cadence() {
               target: 'chapter',
             })}
           />
+          <SyncBadge sync={sync} onOpenSettings={() => setTab('settings')} />
           <nav aria-label="Navigation principale" style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginLeft: 'auto' }}>
             {TABS.map((t) => {
               const active = tab === t.id;
@@ -1431,7 +1672,7 @@ export default function Cadence() {
             <SettingsView settings={settings} state={state} chapters={chapters}
               onUpdate={updateSetting} lastExportAt={lastExportAt} onExported={markExported}
               onImport={importState} onReset={resetAll} today={today}
-              listBackups={listBackups} onRestore={restoreBackup} />
+              listBackups={listBackups} onRestore={restoreBackup} sync={sync} />
           )}
         </div>
       </main>
@@ -2763,7 +3004,7 @@ const ADVANCED_SLIDERS = [
   { key: 'maxInterval', label: 'Stabilité initiale « Solide »', min: 7, max: 60, step: 1, unit: ' j', help: 'point de départ d’un chapitre déjà maîtrisé' },
 ];
 
-function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, today, listBackups, onRestore, lastExportAt, onExported }) {
+function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, today, listBackups, onRestore, lastExportAt, onExported, sync }) {
   const fileRef = useRef(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -2971,6 +3212,8 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
           </div>
         </div>
       </div>
+
+      {sync && <SyncSettings sync={sync} />}
 
       <div>
         <SectionTitle icon={Download}>Données &amp; sauvegarde</SectionTitle>

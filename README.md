@@ -7,13 +7,17 @@ Outil d'étude **spécialisé** qui répond à une seule question :
 > réellement disponible ? »
 
 Répétition espacée au niveau **chapitre** (maths / physique), pilotée par les
-examens et bornée par la capacité réelle du jour. PWA 100 % locale : aucun
-backend, aucune authentification, données sur l'appareil (export/import JSON).
+examens et bornée par la capacité réelle du jour. PWA locale : **aucun serveur
+CADENCE**, aucun compte à créer, données sur l'appareil (export/import JSON).
+Pour retrouver les mêmes données sur téléphone et ordinateur, une
+[synchronisation optionnelle](#synchronisation-entre-appareils-schéma-v5)
+passe par un **espace privé du compte GitHub de l'utilisateur** — c'est lui
+qui héberge ses données, personne d'autre.
 
 CADENCE n'est volontairement **pas** : un emploi du temps, un gestionnaire
 d'habitudes ou de tâches, une prise de notes, un clone d'Anki, un Pomodoro.
 
-## Les trois axes (schéma v4)
+## Les trois axes (schéma v5)
 
 Savoir un chapitre, ce sont **trois compétences distinctes** — CADENCE les
 suit **séparément**, et une note n'affecte JAMAIS un autre axe :
@@ -164,12 +168,50 @@ entretenir un compteur.
    simple/détaillé, paramètres du modèle repliés en section **experte**,
    export/import validé, instantanés locaux (7 j).
 
-## Données, migration v3 → v4, fiabilité
+## Synchronisation entre appareils (schéma v5)
 
-- Un état principal (`cadence.v2`) au **schéma v4 versionné** ; les données
-  v1/v2/v3 sont migrées automatiquement, y compris par import JSON. Une
+Téléphone et ordinateur, les mêmes données, à jour partout — et toujours
+**aucun serveur CADENCE**. Les données sont déposées dans un **gist privé du
+compte GitHub de l'utilisateur** : c'est lui qui les héberge, les consulte, et
+peut les révoquer ou les supprimer à tout moment.
+
+- **Activation** : un jeton GitHub avec la **seule** portée « gists » (aucun
+  accès au code ni aux dépôts). Le jeton vit sous sa propre clé de stockage
+  (`cadence.sync`), **jamais** dans l'état CADENCE : un export JSON ne peut
+  pas le divulguer (testé).
+- **Second appareil** : « J'ai déjà un coffre » + l'identifiant affiché sur le
+  premier. Un appareil neuf **adopte** le coffre au lieu de fusionner, pour que
+  ses matières d'exemple ne polluent pas les vraies données.
+- **Fusion, jamais écrasement.** La boucle est toujours : lire le coffre →
+  valider → fusionner → appliquer → réécrire. Les propriétés sont testées :
+
+  | Garantie | Ce que ça veut dire |
+  | --- | --- |
+  | Convergence | `merge(a,b)` = `merge(b,a)`, et refusionner ne change plus rien |
+  | Aucun test perdu | le journal est une **union par identifiant** |
+  | Ordre sans importance | après fusion, les trois axes sont **rejoués** depuis le journal fusionné |
+  | Suppressions tenues | une suppression laisse une trace datée, sinon l'union la ressusciterait |
+
+- Règles de départage, écrites et testées : reports → date la plus tardive ;
+  capacité d'un jour et réglages → appareil modifié en dernier ; compteurs
+  hebdo → maximum (un compteur manuel ne recule pas) ; bilan masqué → reste
+  masqué ; dernier export → date la plus récente.
+- **Le réseau ne fait jamais perdre de données** : le local reste la source de
+  vérité ; un coffre illisible ou un jeton refusé n'écrase rien et affiche une
+  erreur explicite. Hors-ligne, l'application fonctionne et se resynchronise au
+  retour. Échanges au chargement, après une pause de saisie, au retour sur
+  l'onglet et au retour du réseau ; une pastille dans l'en-tête indique l'état.
+- **Limite assumée** : une suppression n'est retenue que 180 jours. Un appareil
+  resté hors-ligne plus longtemps pourrait ressusciter un élément supprimé.
+
+## Données, migrations, fiabilité
+
+- Un état principal (`cadence.v2`) au **schéma v5 versionné** ; les données
+  v1/v2/v3/v4 sont migrées automatiquement, y compris par import JSON. Une
   version future/inconnue est refusée : elle n'est jamais rétrogradée comme
   si elle était ancienne.
+- Migration v4 → v5 : ajout de l'horodatage de modification et de l'historique
+  de suppression. **Aucune donnée existante n'est touchée.**
 - Migration v3 → v4 **déterministe et non destructive** : le journal est
   intégralement conservé (les notes sans type deviennent `legacy` = rappel).
   L'état de rappel est **reconstruit en rejouant uniquement les événements de
@@ -227,7 +269,7 @@ Prérequis : Node.js 22.12+ ou Node.js 24 LTS.
 npm ci
 npm run dev      # serveur de dev Vite
 npm run build    # build de production + précache PWA révisionné -> dist/
-npm test         # 137 tests : moteur, stockage/récupération, changement de jour,
+npm test         # 191 tests : moteur, fusion multi-appareils, stockage,
                  # interactions réelles (RTL + jsdom), PWA/service worker
                  # et génération déterministe du build hors-ligne
 ```
@@ -245,6 +287,11 @@ npm test         # 137 tests : moteur, stockage/récupération, changement de jo
   et séance chapitre par chapitre.
 - `src/storage.js` — chargement sûr, quarantaine/récupération, écritures
   vérifiées et instantanés quotidiens.
+- `src/sync.js` — **fusion pure** de deux états (convergente, sans réseau) ;
+  `src/remote.js` — transport vers le coffre privé (jeton, création, lecture,
+  écriture, erreurs lisibles) ; `src/useSync.js` — quand lire et écrire.
+  Les trois sont testés séparément, puis de bout en bout dans
+  `src/Cadence.sync.test.jsx` (deux appareils simulés qui convergent).
 - `src/useCurrentDay.js` — bascule à minuit et resynchronisation au retour au
   premier plan, pour qu'une PWA laissée ouverte date toujours correctement.
 - `src/Cadence.test.js` — tests du moteur ; `src/Cadence.ui.test.jsx` — tests
@@ -254,7 +301,7 @@ npm test         # 137 tests : moteur, stockage/récupération, changement de jo
   la liste exhaustive des assets dans le service worker, puis vérifie que le
   shell, le manifeste et les icônes sont bien précachés.
 - CI/CD GitHub Pages (`.github/workflows/deploy.yml`) : Node 24, audit npm,
-  137 tests et build sur chaque push/PR ; permissions Pages limitées au job
+  191 tests et build sur chaque push/PR ; permissions Pages limitées au job
   de déploiement.
 
 Défauts : `requestRetention=0.90`, `subjectsPerDay=3`, `sessionHours=2`,

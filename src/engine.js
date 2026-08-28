@@ -34,8 +34,41 @@
 export const STORAGE_KEY = 'cadence.v2'; // clé stable ; la version vit DANS l'état
 export const LEGACY_KEY = 'cadence.v1';
 export const BACKUP_KEY = 'cadence.backups';
-export const SCHEMA_VERSION = 4;
-export const KNOWN_VERSIONS = [1, 2, 3, 4];
+export const SCHEMA_VERSION = 5;
+export const KNOWN_VERSIONS = [1, 2, 3, 4, 5];
+
+// v5 — synchronisation multi-appareils :
+//   syncMeta = { deviceId, updatedAt (ms), rev }   qui a modifié en dernier
+//   deleted  = { subjects:{id:date}, chapters:{…}, exams:{…} }
+// Les pierres tombales sont indispensables : sans elles, fusionner deux
+// appareils ressusciterait ce que l'un des deux vient de supprimer.
+export const DELETABLE = ['subjects', 'chapters', 'exams'];
+export const TOMBSTONE_DAYS = 180;
+
+export function emptyDeleted() {
+  return { subjects: {}, chapters: {}, exams: {} };
+}
+
+export function markDeleted(deleted, kind, ids, today) {
+  const next = { ...emptyDeleted(), ...(deleted || {}) };
+  next[kind] = { ...(next[kind] || {}) };
+  for (const id of [].concat(ids)) if (id != null) next[kind][id] = today;
+  return next;
+}
+
+// Au-delà de TOMBSTONE_DAYS, la suppression est oubliée : un appareil resté
+// hors-ligne plus longtemps pourrait ressusciter l'élément — compromis assumé
+// pour que l'état ne grossisse pas indéfiniment.
+export function pruneTombstones(deleted, today, days = TOMBSTONE_DAYS) {
+  const cutoff = addDays(today, -days);
+  const out = emptyDeleted();
+  for (const kind of DELETABLE) {
+    for (const [id, date] of Object.entries((deleted || {})[kind] || {})) {
+      if (isValidISODate(date) && date >= cutoff) out[kind][id] = date;
+    }
+  }
+  return out;
+}
 
 export const DEFAULT_SETTINGS = {
   requestRetention: 0.9, // rétention cible du rappel
@@ -846,6 +879,27 @@ export function validateImport(obj) {
         if (!isValidISODate(v)) push('Bilan d’épreuve : date invalide.');
       }
     }
+
+    // v5 : historique de suppression et métadonnées de synchronisation.
+    if (hasOwn(obj, 'deleted')) {
+      if (!isRecord(obj.deleted)) push('« deleted » doit être un objet { type: { id: date } }.');
+      else for (const [kind, map] of Object.entries(obj.deleted)) {
+        if (!DELETABLE.includes(kind)) { push(`Suppressions : type inconnu (${kind}).`); continue; }
+        if (!isRecord(map)) { push(`Suppressions « ${kind} » : objet attendu.`); continue; }
+        for (const [, d] of Object.entries(map)) {
+          if (!isValidISODate(d)) push(`Suppressions « ${kind} » : date invalide.`);
+        }
+      }
+    }
+    if (hasOwn(obj, 'syncMeta') && obj.syncMeta != null) {
+      if (!isRecord(obj.syncMeta)) push('« syncMeta » doit être un objet.');
+      else {
+        const m = obj.syncMeta;
+        if (m.deviceId != null && typeof m.deviceId !== 'string') push('syncMeta : identifiant d’appareil invalide.');
+        if (m.updatedAt != null && !Number.isFinite(m.updatedAt)) push('syncMeta : horodatage non numérique.');
+        if (m.rev != null && !Number.isFinite(m.rev)) push('syncMeta : révision non numérique.');
+      }
+    }
   } catch (e) {
     // Dernier garde-fou : une validation d'import ne doit jamais faire tomber
     // l'interface, même face à un objet exotique fourni par un test/hôte.
@@ -975,9 +1029,12 @@ export function migrateV3(v3) {
 // S'assure qu'un état déjà v4 a tous les champs (idempotent, sans rejeu).
 // `today` sert uniquement à l'hygiène (purge des vieux reports) — passer une
 // date fixe dans les tests garde la fonction déterministe.
-export function ensureV4(s, today = todayISO()) {
+export function ensureV5(s, today = todayISO()) {
   const settings = { ...DEFAULT_SETTINGS, ...(s?.settings || {}) };
-  const exams = (Array.isArray(s.exams) ? s.exams : []).map((e) => ({ ...e, importance: e.importance ?? 'normal' }));
+  const deleted = pruneTombstones(s.deleted, today);
+  const exams = (Array.isArray(s.exams) ? s.exams : [])
+    .filter((e) => !deleted.exams[e?.id])
+    .map((e) => ({ ...e, importance: e.importance ?? 'normal' }));
   const examIds = new Set(exams.map((e) => e.id));
   const clampMinutes = (v, fallback) => (Number.isFinite(v)
     ? Math.round(clamp(v, IMPORT_BOUNDS.axisMinutes[0], IMPORT_BOUNDS.axisMinutes[1]))
@@ -987,9 +1044,9 @@ export function ensureV4(s, today = todayISO()) {
   const skips = Object.fromEntries(Object.entries(s.skips && typeof s.skips === 'object' ? s.skips : {})
     .filter(([, d]) => typeof d === 'string' && d >= addDays(today, -1)));
   return {
-    version: 4,
-    subjects: Array.isArray(s.subjects) ? s.subjects : [],
-    chapters: (Array.isArray(s.chapters) ? s.chapters : []).map((c) => {
+    version: 5,
+    subjects: (Array.isArray(s.subjects) ? s.subjects : []).filter((x) => !deleted.subjects[x?.id]),
+    chapters: (Array.isArray(s.chapters) ? s.chapters : []).filter((x) => !deleted.chapters[x?.id]).map((c) => {
       const initialLevel = c.initialLevel ?? closestLevel(c.recall?.difficulty ?? c.difficulty ?? 5).key;
       const level = LEVELS.find((l) => l.key === initialLevel) || LEVELS[0];
       const rec = c.recall || {};
@@ -1020,6 +1077,14 @@ export function ensureV4(s, today = todayISO()) {
     examDebriefs: Object.fromEntries(Object.entries(
       s.examDebriefs && typeof s.examDebriefs === 'object' ? s.examDebriefs : {},
     ).filter(([id]) => examIds.has(id))),
+    deleted,
+    syncMeta: s.syncMeta && typeof s.syncMeta === 'object' && s.syncMeta.deviceId
+      ? {
+        deviceId: String(s.syncMeta.deviceId),
+        updatedAt: Number.isFinite(s.syncMeta.updatedAt) ? s.syncMeta.updatedAt : 0,
+        rev: Number.isFinite(s.syncMeta.rev) ? s.syncMeta.rev : 0,
+      }
+      : null,
     lastExportAt: s.lastExportAt ?? null,
   };
 }
@@ -1033,14 +1098,22 @@ function normPractice(p) {
   };
 }
 
-// Accepte v1, v2, v3 ou v4 -> renvoie toujours un état v4 sain.
-// Tout passe par ensureV4 (bornes + hygiène), y compris après migration.
+// v4 -> v5 : ajout des champs de synchronisation. Aucune donnée n'est touchée
+// (un état v4 est un état v5 sans historique de suppression ni horodatage) —
+// c'est ensureV5 qui pose les valeurs par défaut.
+export function migrateV4(v4) {
+  return { ...v4, version: 5, deleted: v4?.deleted ?? emptyDeleted(), syncMeta: v4?.syncMeta ?? null };
+}
+
+// Accepte v1 à v5 -> renvoie toujours un état v5 sain.
+// Tout passe par ensureV5 (bornes + hygiène), y compris après migration.
 export function normalize(s, today = todayISO()) {
   if (!s || typeof s !== 'object') return seedState();
-  if (s.version === 4) return ensureV4(s, today);
-  if (s.version === 3) return ensureV4(migrateV3(s), today);
-  if (s.version === 2) return ensureV4(migrateV3(migrateV2(s)), today);
-  return ensureV4(migrateV3(migrateV2(migrateV1(s))), today);
+  if (s.version === 5) return ensureV5(s, today);
+  if (s.version === 4) return ensureV5(migrateV4(s), today);
+  if (s.version === 3) return ensureV5(migrateV4(migrateV3(s)), today);
+  if (s.version === 2) return ensureV5(migrateV4(migrateV3(migrateV2(s))), today);
+  return ensureV5(migrateV4(migrateV3(migrateV2(migrateV1(s)))), today);
 }
 
 export function newChapter(subjectId, name, level, s) {
@@ -1069,9 +1142,10 @@ export function seedState() {
     { id: uid(), name: 'Anki', color: '#fca5a5', type: 'parallel', weeklyFloor: 6 },
   ];
   return {
-    version: 4, subjects: [...core, ...parallel], chapters: [], exams: [],
+    version: 5, subjects: [...core, ...parallel], chapters: [], exams: [],
     settings: { ...DEFAULT_SETTINGS }, parallelLog: {}, reviewLog: [],
     archivedReviews: [], skips: {}, capacityOverrides: {}, examDebriefs: {},
+    deleted: emptyDeleted(), syncMeta: null,
     lastExportAt: null,
   };
 }

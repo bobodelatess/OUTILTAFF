@@ -407,7 +407,7 @@ describe('Import par collage (Réglages)', () => {
       { target: { value: '{"subjects":[]}' } });
     fireEvent.click(screen.getByRole('button', { name: /Valider l’import/ }));
     const st = readState();
-    expect(st.version).toBe(4);
+    expect(st.version).toBe(5);
     expect(st.subjects.length).toBe(0);
     expect(st.chapters.length).toBe(0);
   });
