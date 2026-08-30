@@ -17,7 +17,7 @@ qui héberge ses données, personne d'autre.
 CADENCE n'est volontairement **pas** : un emploi du temps, un gestionnaire
 d'habitudes ou de tâches, une prise de notes, un clone d'Anki, un Pomodoro.
 
-## Les trois axes (schéma v6)
+## Les trois axes (schéma v7)
 
 Savoir un chapitre, ce sont **trois compétences distinctes** — CADENCE les
 suit **séparément**, et une note n'affecte JAMAIS un autre axe :
@@ -71,7 +71,30 @@ ou depuis Matières. Il n'entre dans **aucun calcul** — ce n'est pas une note,
 pas une échéance, pas une tâche : juste de quoi reprendre où tu t'es arrêté.
 
 CADENCE reste ce qu'il est : pas de sous-tâches, pas de cases à cocher, pas de
-rappels arbitraires.
+rappels arbitraires, et **aucun fichier stocké** — des repères, pas un cloud.
+
+## Retrouver ce qu'on a vu
+
+Chaque élément porte une petite liste de **documents**, qu'on ajoute depuis la
+carte du jour (bouton « document ») ou en **déposant un lien dessus**. À la
+session suivante, ils sont là, **le plus récemment ouvert en tête** — c'est
+exactement ce qu'on cherche quand un chapitre revient trois semaines plus tard.
+Ouvrir un document le marque « utilisé aujourd'hui ».
+
+**Un document est une référence, jamais un fichier.** C'est une contrainte
+mesurée, pas un choix esthétique : un état réaliste (120 chapitres, ~2 900
+tests notés) pèse déjà 1,1 Mo pour ~5 Mo de budget navigateur, et un seul PDF
+de 2 Mo en occuperait 2,7 — retransmis **en entier à chaque synchronisation**.
+On stocke donc un lien (Drive, iCloud, une page), qui coûte une centaine
+d'octets et se synchronise partout. Déposer un fichier garde **son nom** comme
+repère de ce qui a été vu, en le disant clairement.
+
+Garde-fous : seuls les liens **http/https** sont acceptés — `javascript:`,
+`data:` et consorts sont refusés à la saisie **et** à l'import, puisque ces
+liens sont rendus cliquables. Ouverture en `noopener noreferrer`, 24 documents
+par élément au maximum. Entre appareils, les documents sont **réunis** par
+identifiant : un ajout sur le téléphone et un autre sur l'ordinateur donnent
+les deux.
 
 ## Priorité et plan du jour
 
@@ -235,11 +258,12 @@ peut les révoquer ou les supprimer à tout moment.
 
 ## Données, migrations, fiabilité
 
-- Un état principal (`cadence.v2`) au **schéma v6 versionné** ; les données
-  v1 à v5 sont migrées automatiquement, y compris par import JSON. Une
+- Un état principal (`cadence.v2`) au **schéma v7 versionné** ; les données
+  v1 à v6 sont migrées automatiquement, y compris par import JSON. Une
   version future/inconnue est refusée : elle n'est jamais rétrogradée comme
   si elle était ancienne.
 - Migration v4 → v5 : horodatage de modification et historique de suppression.
+- Migration v6 → v7 : chaque élément reçoit une liste de documents vide.
 - Migration v5 → v6 : tout élément existant devient un « chapitre de cours »
   avec les trois axes — c'est-à-dire exactement son comportement actuel.
   **Aucune donnée existante n'est touchée** (vérifié : priorité identique
@@ -301,7 +325,7 @@ Prérequis : Node.js 22.12+ ou Node.js 24 LTS.
 npm ci
 npm run dev      # serveur de dev Vite
 npm run build    # build de production + précache PWA révisionné -> dist/
-npm test         # 225 tests : moteur, ressources, fusion multi-appareils,
+npm test         # 255 tests : moteur, ressources, documents, fusion multi-appareils,
                  # interactions réelles (RTL + jsdom), PWA/service worker
                  # et génération déterministe du build hors-ligne
 ```
@@ -333,7 +357,7 @@ npm test         # 225 tests : moteur, ressources, fusion multi-appareils,
   la liste exhaustive des assets dans le service worker, puis vérifie que le
   shell, le manifeste et les icônes sont bien précachés.
 - CI/CD GitHub Pages (`.github/workflows/deploy.yml`) : Node 24, audit npm,
-  225 tests et build sur chaque push/PR ; permissions Pages limitées au job
+  255 tests et build sur chaque push/PR ; permissions Pages limitées au job
   de déploiement.
 
 Défauts : `requestRetention=0.90`, `subjectsPerDay=3`, `sessionHours=2`,

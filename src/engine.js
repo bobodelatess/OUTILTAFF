@@ -34,8 +34,8 @@
 export const STORAGE_KEY = 'cadence.v2'; // clé stable ; la version vit DANS l'état
 export const LEGACY_KEY = 'cadence.v1';
 export const BACKUP_KEY = 'cadence.backups';
-export const SCHEMA_VERSION = 6;
-export const KNOWN_VERSIONS = [1, 2, 3, 4, 5, 6];
+export const SCHEMA_VERSION = 7;
+export const KNOWN_VERSIONS = [1, 2, 3, 4, 5, 6, 7];
 
 // v5 — synchronisation multi-appareils :
 //   syncMeta = { deviceId, updatedAt (ms), rev }   qui a modifié en dernier
@@ -129,6 +129,75 @@ export const RESOURCE_PRESETS = [
 // Longueur maximale du point de reprise (« p. 47 », « unité 5 »). Court
 // volontairement : c'est un repère, pas un carnet de notes.
 export const POSITION_MAX = 60;
+
+/* ---- Documents attachés (v7) --------------------------------------
+ * Un document est une RÉFÉRENCE, jamais un fichier : un lien (Drive,
+ * iCloud, une URL) ou, à défaut, un simple nom de fichier servant de
+ * rappel. Le contenu n'est pas stocké — mettre des fichiers dans l'état
+ * synchronisé le ferait exploser (un PDF de 2 Mo = 2,7 Mo encodés,
+ * retransmis à chaque synchronisation, pour ~4 Mo de marge disponible).
+ * Ici, un document coûte une centaine d'octets et se synchronise partout.
+ */
+export const DOC_LABEL_MAX = 80;
+export const DOC_URL_MAX = 2000;
+export const DOCS_PER_CHAPTER_MAX = 24;
+
+// Seuls http(s) sont acceptés. `javascript:`, `data:` et consorts seraient
+// une faille : ces liens sont rendus cliquables dans l'interface.
+export function isSafeDocUrl(url) {
+  if (typeof url !== 'string' || !url.trim()) return false;
+  if (url.length > DOC_URL_MAX) return false;
+  try {
+    const proto = new URL(url.trim()).protocol;
+    return proto === 'http:' || proto === 'https:';
+  } catch (e) { return false; }
+}
+
+// Normalise un document. Renvoie null si inexploitable (ni lien sûr ni nom).
+export function normDoc(doc) {
+  if (!doc || typeof doc !== 'object') return null;
+  const label = typeof doc.label === 'string'
+    ? doc.label.replace(/\s+/g, ' ').trim().slice(0, DOC_LABEL_MAX) : '';
+  const url = isSafeDocUrl(doc.url) ? doc.url.trim() : null;
+  if (!url && !label) return null;
+  return {
+    id: typeof doc.id === 'string' && doc.id ? doc.id : uid(),
+    label: label || url,
+    url,
+    addedAt: isValidISODate(doc.addedAt) ? doc.addedAt : null,
+    lastUsedAt: isValidISODate(doc.lastUsedAt) ? doc.lastUsedAt : null,
+  };
+}
+
+// Liste normalisée : documents valides, dédupliqués par identifiant, plafonnée.
+export function normDocs(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const d of list) {
+    const doc = normDoc(d);
+    if (!doc || seen.has(doc.id)) continue;
+    seen.add(doc.id);
+    out.push(doc);
+    if (out.length >= DOCS_PER_CHAPTER_MAX) break;
+  }
+  return out;
+}
+
+export function newDoc(label, url, today) {
+  return normDoc({ id: uid(), label, url, addedAt: today, lastUsedAt: null });
+}
+
+// Documents d'un chapitre, les plus récemment utilisés d'abord — c'est ce
+// qu'on veut retrouver quand le chapitre revient dans le plan.
+export function sortedDocs(chapter) {
+  return normDocs(chapter?.docs).slice().sort((a, b) => {
+    const ka = a.lastUsedAt || a.addedAt || '';
+    const kb = b.lastUsedAt || b.addedAt || '';
+    if (ka !== kb) return ka < kb ? 1 : -1;
+    return a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
+  });
+}
 
 // Axes réellement applicables à un élément. Un élément sans `axes` explicite
 // (données antérieures à la v6) est un cours : les trois s'appliquent.
@@ -842,6 +911,19 @@ export function validateImport(obj) {
       if (c.position != null && (typeof c.position !== 'string' || c.position.length > POSITION_MAX)) {
         push(`« ${label} » : point de reprise invalide ou trop long.`);
       }
+      // v7 : documents attachés (références, jamais de fichiers).
+      if (c.docs != null) {
+        if (!Array.isArray(c.docs)) push(`« ${label} » : « docs » doit être une liste.`);
+        else if (c.docs.length > DOCS_PER_CHAPTER_MAX) push(`« ${label} » : trop de documents (max ${DOCS_PER_CHAPTER_MAX}).`);
+        else for (const d of c.docs) {
+          if (!d || typeof d !== 'object') { push(`« ${label} » : document invalide.`); continue; }
+          if (d.url != null && !isSafeDocUrl(d.url)) push(`« ${label} » : lien non autorisé (http/https uniquement).`);
+          if (d.label != null && (typeof d.label !== 'string' || d.label.length > DOC_LABEL_MAX)) push(`« ${label} » : libellé de document trop long.`);
+          if (d.url == null && !d.label) push(`« ${label} » : document sans lien ni libellé.`);
+          if (d.addedAt != null && !isValidISODate(d.addedAt)) push(`« ${label} » : date de document invalide.`);
+          if (d.lastUsedAt != null && !isValidISODate(d.lastUsedAt)) push(`« ${label} » : date d'utilisation invalide.`);
+        }
+      }
 
       // Le schéma v4 exige les trois axes indépendants. Les schémas v1-v3
       // gardent leurs champs plats, mais tout axe éventuellement présent doit
@@ -1101,7 +1183,7 @@ export function migrateV3(v3) {
 // S'assure qu'un état déjà v4 a tous les champs (idempotent, sans rejeu).
 // `today` sert uniquement à l'hygiène (purge des vieux reports) — passer une
 // date fixe dans les tests garde la fonction déterministe.
-export function ensureV6(s, today = todayISO()) {
+export function ensureV7(s, today = todayISO()) {
   const settings = { ...DEFAULT_SETTINGS, ...(s?.settings || {}) };
   const deleted = pruneTombstones(s.deleted, today);
   const exams = (Array.isArray(s.exams) ? s.exams : [])
@@ -1116,7 +1198,7 @@ export function ensureV6(s, today = todayISO()) {
   const skips = Object.fromEntries(Object.entries(s.skips && typeof s.skips === 'object' ? s.skips : {})
     .filter(([, d]) => typeof d === 'string' && d >= addDays(today, -1)));
   return {
-    version: 6,
+    version: 7,
     subjects: (Array.isArray(s.subjects) ? s.subjects : []).filter((x) => !deleted.subjects[x?.id]),
     chapters: (Array.isArray(s.chapters) ? s.chapters : []).filter((x) => !deleted.chapters[x?.id]).map((c) => {
       const initialLevel = c.initialLevel ?? closestLevel(c.recall?.difficulty ?? c.difficulty ?? 5).key;
@@ -1127,6 +1209,7 @@ export function ensureV6(s, today = todayISO()) {
         kind: KIND_KEYS.includes(c.kind) ? c.kind : 'course',
         axes: normAxes(c.axes, KIND_KEYS.includes(c.kind) ? c.kind : 'course'),
         position: normPosition(c.position),
+        docs: normDocs(c.docs),
         recall: {
           stability: Math.max(S_MIN, rec.stability ?? targetInterval(level.m, settings)),
           difficulty: clamp(rec.difficulty ?? level.D, 1, 10),
@@ -1175,7 +1258,7 @@ function normPractice(p) {
 
 // v4 -> v5 : ajout des champs de synchronisation. Aucune donnée n'est touchée
 // (un état v4 est un état v5 sans historique de suppression ni horodatage) —
-// c'est ensureV6 qui pose les valeurs par défaut.
+// c'est ensureV7 qui pose les valeurs par défaut.
 export function migrateV4(v4) {
   return { ...v4, version: 5, deleted: v4?.deleted ?? emptyDeleted(), syncMeta: v4?.syncMeta ?? null };
 }
@@ -1192,16 +1275,26 @@ export function migrateV5(v5) {
   };
 }
 
-// Accepte v1 à v6 -> renvoie toujours un état v6 sain.
-// Tout passe par ensureV6 (bornes + hygiène), y compris après migration.
+// v6 -> v7 : chaque élément reçoit une liste de documents vide. Aucune
+// donnée existante n'est touchée.
+export function migrateV6(v6) {
+  return {
+    ...v6, version: 7,
+    chapters: (v6?.chapters || []).map((c) => ({ ...c, docs: normDocs(c.docs) })),
+  };
+}
+
+// Accepte v1 à v7 -> renvoie toujours un état v7 sain.
+// Tout passe par ensureV7 (bornes + hygiène), y compris après migration.
 export function normalize(s, today = todayISO()) {
   if (!s || typeof s !== 'object') return seedState();
-  if (s.version === 6) return ensureV6(s, today);
-  if (s.version === 5) return ensureV6(migrateV5(s), today);
-  if (s.version === 4) return ensureV6(migrateV5(migrateV4(s)), today);
-  if (s.version === 3) return ensureV6(migrateV5(migrateV4(migrateV3(s))), today);
-  if (s.version === 2) return ensureV6(migrateV5(migrateV4(migrateV3(migrateV2(s)))), today);
-  return ensureV6(migrateV5(migrateV4(migrateV3(migrateV2(migrateV1(s))))), today);
+  if (s.version === 7) return ensureV7(s, today);
+  if (s.version === 6) return ensureV7(migrateV6(s), today);
+  if (s.version === 5) return ensureV7(migrateV6(migrateV5(s)), today);
+  if (s.version === 4) return ensureV7(migrateV6(migrateV5(migrateV4(s))), today);
+  if (s.version === 3) return ensureV7(migrateV6(migrateV5(migrateV4(migrateV3(s)))), today);
+  if (s.version === 2) return ensureV7(migrateV6(migrateV5(migrateV4(migrateV3(migrateV2(s))))), today);
+  return ensureV7(migrateV6(migrateV5(migrateV4(migrateV3(migrateV2(migrateV1(s)))))), today);
 }
 
 // `opts` : { kind, axes, position } — par défaut, un chapitre de cours complet.
@@ -1212,6 +1305,7 @@ export function newChapter(subjectId, name, level, s, opts = {}) {
   return {
     id: uid(), subjectId, name, initialLevel: lv.key,
     kind, axes: normAxes(opts.axes, kind), position: normPosition(opts.position),
+    docs: normDocs(opts.docs),
     recall: { stability: seed.stability, difficulty: seed.difficulty, lastReviewed: null, source: 'seed' },
     exercise: emptyPractice(),
     problem: emptyPractice(),
@@ -1252,7 +1346,7 @@ export function seedState() {
     { id: uid(), name: 'Anki', color: '#fca5a5', type: 'parallel', weeklyFloor: 6 },
   ];
   return {
-    version: 6, subjects: [...core, ...parallel], chapters: [], exams: [],
+    version: 7, subjects: [...core, ...parallel], chapters: [], exams: [],
     settings: { ...DEFAULT_SETTINGS }, parallelLog: {}, reviewLog: [],
     archivedReviews: [], skips: {}, capacityOverrides: {}, examDebriefs: {},
     deleted: emptyDeleted(), syncMeta: null,

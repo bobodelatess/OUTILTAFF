@@ -17,7 +17,7 @@ import {
   Plus, Trash2, ChevronDown, ChevronRight, ChevronLeft, Check,
   Download, Upload, RotateCcw, AlertTriangle, Lock, Undo2,
   BookOpen, FlaskConical, Flame, Pencil, Clock3,
-  RefreshCw, Cloud, CloudOff, Smartphone, Bookmark, Library,
+  RefreshCw, Cloud, CloudOff, Smartphone, Bookmark, Library, Link2, X,
 } from 'lucide-react';
 
 import {
@@ -34,6 +34,7 @@ import {
   validateImport, normalize, seedState, newChapter,
   stripChapterIds, recalibrateState, makeStore, markDeleted,
   KINDS, RESOURCE_PRESETS, POSITION_MAX, applicableAxes, normPosition, newResource,
+  newDoc, sortedDocs, isSafeDocUrl, normDocs, DOCS_PER_CHAPTER_MAX,
 } from './engine.js';
 import { stampState, contentSignature, newDeviceId } from './sync.js';
 import { getDeviceId } from './remote.js';
@@ -478,7 +479,132 @@ function PositionField({ value, onSave, compact }) {
   );
 }
 
-function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrade, onUndo, onSkip, onSetAxisMinutes, onSetPosition }) {
+// Documents attachés à un élément : des RÉFÉRENCES (liens), jamais des
+// fichiers — le contenu ne doit pas entrer dans l'état synchronisé. On les
+// retrouve tels quels à la session suivante, le plus récemment ouvert d'abord.
+function DocsRow({ chapter, today, onAddDoc, onUseDoc, onRemoveDoc, compact }) {
+  const [adding, setAdding] = useState(false);
+  const [url, setUrl] = useState('');
+  const [label, setLabel] = useState('');
+  const [dropping, setDropping] = useState(false);
+  const [notice, setNotice] = useState(null);
+  const docs = sortedDocs(chapter);
+  const full = docs.length >= DOCS_PER_CHAPTER_MAX;
+
+  const commit = () => {
+    const u = url.trim();
+    if (u && !isSafeDocUrl(u)) { setNotice('Lien non valide (http ou https uniquement).'); return; }
+    if (!u && !label.trim()) { setAdding(false); return; }
+    onAddDoc(chapter.id, label.trim(), u || null);
+    setUrl(''); setLabel(''); setAdding(false); setNotice(null);
+  };
+
+  // Glisser-déposer : un lien devient un document. Un FICHIER ne peut pas être
+  // stocké, mais son nom est conservé comme repère de ce qui a été vu.
+  const onDrop = (e) => {
+    e.preventDefault();
+    setDropping(false);
+    const uri = e.dataTransfer?.getData('text/uri-list') || e.dataTransfer?.getData('text/plain') || '';
+    const dropped = uri.split('\n').map((x) => x.trim()).filter(Boolean).find(isSafeDocUrl);
+    if (dropped) { onAddDoc(chapter.id, '', dropped); return; }
+    const file = e.dataTransfer?.files?.[0];
+    if (file?.name) {
+      onAddDoc(chapter.id, file.name, null);
+      setNotice('Fichier non stocké : seul son nom est gardé comme repère. Ajoute son lien pour l’ouvrir d’ici.');
+      setTimeout(() => setNotice(null), 8000);
+      return;
+    }
+    setNotice('Rien d’exploitable dans ce dépôt.');
+    setTimeout(() => setNotice(null), 5000);
+  };
+
+  return (
+    <div
+      onDragOver={(e) => { e.preventDefault(); setDropping(true); }}
+      onDragLeave={() => setDropping(false)}
+      onDrop={onDrop}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
+        padding: dropping ? '4px 6px' : 0, borderRadius: 7,
+        border: `1px dashed ${dropping ? C.accent : 'transparent'}`,
+        background: dropping ? 'rgba(94,169,255,.08)' : 'transparent',
+      }}>
+      {docs.map((d) => {
+        const used = d.lastUsedAt === today;
+        const common = {
+          title: d.url
+            ? `${d.url}\n${d.lastUsedAt ? `dernière ouverture : ${d.lastUsedAt}` : 'jamais ouvert d’ici'}`
+            : 'Repère de document (aucun lien enregistré)',
+          style: {
+            display: 'inline-flex', alignItems: 'center', gap: 5,
+            fontFamily: SANS, fontSize: compact ? 10.5 : 11, padding: '3px 8px', borderRadius: 999,
+            border: `1px solid ${used ? 'rgba(52,211,153,.4)' : C.line2}`,
+            background: used ? 'rgba(52,211,153,.08)' : 'transparent',
+            color: d.url ? C.text : C.dim, textDecoration: 'none', maxWidth: 220,
+          },
+        };
+        const inner = (
+          <>
+            <Link2 size={11} color={d.url ? C.accent : C.faint} />
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.label}</span>
+            {d.lastUsedAt && (
+              <Mono style={{ fontSize: 9.5, color: used ? C.good : C.faint }}>
+                {used ? 'auj.' : d.lastUsedAt.slice(5)}
+              </Mono>
+            )}
+          </>
+        );
+        return (
+          <span key={d.id} style={{ display: 'inline-flex', alignItems: 'center' }}>
+            {d.url ? (
+              <a href={d.url} target="_blank" rel="noopener noreferrer"
+                onClick={() => onUseDoc(chapter.id, d.id)} {...common}>{inner}</a>
+            ) : (
+              <span {...common}>{inner}</span>
+            )}
+            {onRemoveDoc && (
+              <button type="button" onClick={() => onRemoveDoc(chapter.id, d.id)}
+                aria-label={`Retirer le document ${d.label}`} title="Retirer ce document"
+                style={{ background: 'transparent', border: 'none', color: C.faint, cursor: 'pointer', padding: '0 2px', display: 'inline-flex' }}>
+                <X size={11} />
+              </button>
+            )}
+          </span>
+        );
+      })}
+
+      {!adding ? (
+        <button type="button" onClick={() => setAdding(true)} disabled={full}
+          title={full ? `Maximum ${DOCS_PER_CHAPTER_MAX} documents` : 'Ajouter un document (lien) — tu peux aussi en déposer un ici'}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 5, cursor: full ? 'not-allowed' : 'pointer',
+            fontFamily: SANS, fontSize: compact ? 10.5 : 11, padding: '3px 8px', borderRadius: 999,
+            border: `1px dashed ${C.line}`, background: 'transparent', color: C.faint,
+          }}>
+          <Link2 size={11} /> document
+        </button>
+      ) : (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+          <input autoFocus value={url} onChange={(e) => setUrl(e.target.value)}
+            aria-label="lien du document" placeholder="https://… (Drive, iCloud, une page)"
+            onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setAdding(false); setNotice(null); } }}
+            style={{ fontFamily: MONO, fontSize: 11, color: C.text, background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 6, padding: '3px 6px', width: 210 }} />
+          <input value={label} onChange={(e) => setLabel(e.target.value)}
+            aria-label="nom du document" placeholder="nom (facultatif)"
+            onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setAdding(false); setNotice(null); } }}
+            style={{ fontFamily: SANS, fontSize: 11, color: C.text, background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 6, padding: '3px 6px', width: 130 }} />
+          <Btn variant="bare" onClick={commit} style={{ color: C.accent, fontSize: 11 }}>ajouter</Btn>
+          <Btn variant="bare" onClick={() => { setAdding(false); setNotice(null); }} style={{ color: C.faint, fontSize: 11 }}>annuler</Btn>
+        </span>
+      )}
+      {notice && (
+        <span role="status" style={{ fontFamily: SANS, fontSize: 10.5, color: C.warn, flex: '1 1 100%' }}>{notice}</span>
+      )}
+    </div>
+  );
+}
+
+function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrade, onUndo, onSkip, onSetAxisMinutes, onSetPosition, onAddDoc, onUseDoc, onRemoveDoc }) {
   const [expanded, setExpanded] = useState(false);
   const doneEntries = done || [];
   const doneAxes = useMemo(
@@ -572,6 +698,14 @@ function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrad
           <PositionField value={ch.position} onSave={(v) => onSetPosition(ch.id, v)} />
         )}
       </div>
+
+      {/* Ce qui a été vu : on le retrouve tel quel à la session suivante. */}
+      {onAddDoc && (
+        <div style={{ paddingLeft: 26 }}>
+          <DocsRow chapter={ch.raw ?? ch} today={today}
+            onAddDoc={onAddDoc} onUseDoc={onUseDoc} onRemoveDoc={onRemoveDoc} />
+        </div>
+      )}
 
       {/* Détails (repliés en mode simple) : chiffres transparents, par axe */}
       <div className={`cad-collapse${open ? ' open' : ''}`}>
@@ -1318,6 +1452,31 @@ export default function Cadence() {
   const updateChapter = (id, up) => patch((p) => ({
     ...p, chapters: p.chapters.map((c) => (c.id === id ? { ...c, ...up } : c)),
   }));
+  // Documents : des RÉFÉRENCES attachées à un élément. Le contenu des fichiers
+  // n'est jamais stocké — il ferait exploser l'état synchronisé.
+  const addChapterDoc = (id, label, url) => patch((p) => ({
+    ...p,
+    chapters: p.chapters.map((c) => {
+      if (c.id !== id) return c;
+      const doc = newDoc(label, url, today);
+      if (!doc || normDocs(c.docs).length >= DOCS_PER_CHAPTER_MAX) return c;
+      return { ...c, docs: normDocs([...(c.docs || []), doc]) };
+    }),
+  }));
+  // Ouvrir un document = l'avoir utilisé aujourd'hui. C'est ce qui le fait
+  // remonter en tête à la session suivante.
+  const useChapterDoc = (id, docId) => patch((p) => ({
+    ...p,
+    chapters: p.chapters.map((c) => (c.id === id
+      ? { ...c, docs: normDocs((c.docs || []).map((d) => (d.id === docId ? { ...d, lastUsedAt: today } : d))) }
+      : c)),
+  }));
+  const removeChapterDoc = (id, docId) => patch((p) => ({
+    ...p,
+    chapters: p.chapters.map((c) => (c.id === id
+      ? { ...c, docs: normDocs((c.docs || []).filter((d) => d.id !== docId)) } : c)),
+  }));
+
   // Point de reprise : « où j'en suis ». N'entre dans aucun calcul.
   const setChapterPosition = (id, value) => patch((p) => ({
     ...p, chapters: p.chapters.map((c) => (c.id === id ? { ...c, position: normPosition(value) } : c)),
@@ -1722,6 +1881,7 @@ export default function Cadence() {
               onDismissDebrief={dismissDebrief}
               onSetTodayCapacity={setTodayCapacity} onSetAxisMinutes={setChapterAxisMinutes}
               onSetPosition={setChapterPosition}
+              onAddDoc={addChapterDoc} onUseDoc={useChapterDoc} onRemoveDoc={removeChapterDoc}
               onAdjustParallel={adjustParallel}
               onGoSubjects={goToSubjects}
               onSetSimpleMode={(v) => updateSetting('simpleMode', v)}
@@ -1738,6 +1898,7 @@ export default function Cadence() {
               onAddSubject={addSubject} onUpdateSubject={updateSubject} onDeleteSubject={deleteSubject}
               onAddChapter={addChapter} onAddChaptersBulk={addChaptersBulk}
               onAddResource={addResource} onSetPosition={setChapterPosition} onSetAxes={setChapterAxes}
+              onAddDoc={addChapterDoc} onUseDoc={useChapterDoc} onRemoveDoc={removeChapterDoc}
               onUpdateChapter={updateChapter} onDeleteChapter={deleteChapter}
               onSetLevel={setChapterLevel} onSetAxisMinutes={setChapterAxisMinutes}
               onAddExam={addExam} onUpdateExam={updateExam} onDeleteExam={deleteExam}
@@ -1784,7 +1945,8 @@ function TodayView({
   todayMinutes, defaultMinutes, hasCoreChapters, exportStale,
   parallelSubjects, parallelLog, settings,
   onGrade, onUndo, onSkip, onUnskip, onDismissDebrief, onSetTodayCapacity, onSetAxisMinutes,
-  onSetPosition, onAdjustParallel, onGoSubjects, onSetSimpleMode,
+  onSetPosition, onAddDoc, onUseDoc, onRemoveDoc,
+  onAdjustParallel, onGoSubjects, onSetSimpleMode,
 }) {
   const [showAll, setShowAll] = useState(false);
   const [customCap, setCustomCap] = useState(false);
@@ -2094,7 +2256,8 @@ function TodayView({
                       simpleMode={settings.simpleMode} done={doneByChapter[chapter.id]}
                       today={today} settings={settings}
                       onGrade={onGrade} onUndo={onUndo} onSkip={onSkip}
-                      onSetAxisMinutes={onSetAxisMinutes} onSetPosition={onSetPosition} />
+                      onSetAxisMinutes={onSetAxisMinutes} onSetPosition={onSetPosition}
+                      onAddDoc={onAddDoc} onUseDoc={onUseDoc} onRemoveDoc={onRemoveDoc} />
                   )}
                 />
               ) : (
@@ -2127,7 +2290,8 @@ function TodayView({
                             simpleMode={settings.simpleMode} done={doneByChapter[ch.id]}
                             today={today} settings={settings}
                             onGrade={onGrade} onUndo={onUndo} onSkip={onSkip}
-                            onSetAxisMinutes={onSetAxisMinutes} onSetPosition={onSetPosition} />
+                            onSetAxisMinutes={onSetAxisMinutes} onSetPosition={onSetPosition}
+                            onAddDoc={onAddDoc} onUseDoc={onUseDoc} onRemoveDoc={onRemoveDoc} />
                         ))}
                       </div>
                     </div>
@@ -2505,6 +2669,7 @@ function SubjectsView({
   onAddSubject, onUpdateSubject, onDeleteSubject,
   onAddChapter, onAddChaptersBulk, onAddResource, onUpdateChapter, onDeleteChapter,
   onSetLevel, onSetAxisMinutes, onSetPosition, onSetAxes,
+  onAddDoc, onUseDoc, onRemoveDoc,
   onAddExam, onUpdateExam, onDeleteExam, onToggleExamChapter,
   focusRequest, onFocusHandled,
 }) {
@@ -2707,6 +2872,10 @@ function SubjectsView({
                               );
                             })}
                             <PositionField value={c.position} onSave={(v) => onSetPosition(c.id, v)} compact />
+                          </div>
+                          <div style={{ paddingLeft: 34 }}>
+                            <DocsRow chapter={c} today={today} compact
+                              onAddDoc={onAddDoc} onUseDoc={onUseDoc} onRemoveDoc={onRemoveDoc} />
                           </div>
                           {/* Maîtrise observée des axes pratiques (score heuristique, pas une proba) */}
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', paddingLeft: 34 }}>

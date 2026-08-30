@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import React from 'react';
 import { render, screen, within, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import Cadence from './Cadence.jsx';
-import { STORAGE_KEY, AXIS_MINUTES, emptyPractice, emptyDeleted } from './engine.js';
+import { STORAGE_KEY, AXIS_MINUTES, emptyPractice, emptyDeleted, todayISO } from './engine.js';
 
 /*
  * Parcours réel : ajouter une ressource qui n'est pas un cours, la travailler,
@@ -194,6 +194,93 @@ describe('point de reprise — « où j’en suis »', () => {
     fireEvent.click(within(card('Vocabulaire TOEIC')).getByText('Correct'));
     expect(read(st).chapters[0].position).toBe('p. 47');
     expect(read(st).chapters[0].recall.lastReviewed).toBeTruthy();
+  });
+});
+
+describe('documents — retrouver ce qui a été vu', () => {
+  beforeEach(() => {
+    st.setItem(STORAGE_KEY, JSON.stringify(stateWith([chapterOn('c1', 'Diagonalisation')])));
+  });
+
+  const dataTransfer = ({ uri, file } = {}) => ({
+    getData: (type) => (type === 'text/uri-list' || type === 'text/plain' ? (uri || '') : ''),
+    files: file ? [file] : [],
+  });
+
+  it('ajoute un lien depuis la carte, et il réapparaît ensuite', async () => {
+    render(<Cadence />);
+    fireEvent.click(within(card('Diagonalisation')).getByRole('button', { name: /document/i }));
+    fireEvent.change(screen.getByLabelText('lien du document'), { target: { value: 'https://drive.exemple.org/td3.pdf' } });
+    fireEvent.change(screen.getByLabelText('nom du document'), { target: { value: 'TD 3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'ajouter' }));
+
+    await waitFor(() => expect(read(st).chapters[0].docs).toHaveLength(1));
+    expect(read(st).chapters[0].docs[0]).toMatchObject({ label: 'TD 3', url: 'https://drive.exemple.org/td3.pdf' });
+    // visible sur la carte, prêt pour la session suivante
+    const link = within(card('Diagonalisation')).getByText('TD 3').closest('a');
+    expect(link.getAttribute('href')).toBe('https://drive.exemple.org/td3.pdf');
+    expect(link.getAttribute('rel')).toContain('noopener');
+  });
+
+  it('un lien piégé est refusé et rien n’est enregistré', async () => {
+    render(<Cadence />);
+    fireEvent.click(within(card('Diagonalisation')).getByRole('button', { name: /document/i }));
+    fireEvent.change(screen.getByLabelText('lien du document'), { target: { value: 'javascript:alert(1)' } });
+    fireEvent.click(screen.getByRole('button', { name: 'ajouter' }));
+    await waitFor(() => expect(screen.getByText(/Lien non valide/i)).toBeTruthy());
+    expect(read(st).chapters[0].docs).toHaveLength(0);
+  });
+
+  it('ouvrir un document le marque utilisé aujourd’hui', async () => {
+    const base = stateWith([chapterOn('c1', 'Diagonalisation', {
+      docs: [{ id: 'd1', label: 'Annale', url: 'https://exemple.org/a.pdf', addedAt: '2026-01-01', lastUsedAt: null }],
+    })]);
+    st.setItem(STORAGE_KEY, JSON.stringify(base));
+    render(<Cadence />);
+    fireEvent.click(within(card('Diagonalisation')).getByText('Annale'));
+    await waitFor(() => expect(read(st).chapters[0].docs[0].lastUsedAt).toBe(todayISO()));
+    expect(within(card('Diagonalisation')).getByText('auj.')).toBeTruthy();
+  });
+
+  it('déposer un lien sur la carte l’attache directement', async () => {
+    render(<Cadence />);
+    const zone = within(card('Diagonalisation')).getByRole('button', { name: /document/i }).parentElement;
+    fireEvent.drop(zone, { dataTransfer: dataTransfer({ uri: 'https://exemple.org/annale.pdf' }) });
+    await waitFor(() => expect(read(st).chapters[0].docs).toHaveLength(1));
+    expect(read(st).chapters[0].docs[0].url).toBe('https://exemple.org/annale.pdf');
+  });
+
+  it('déposer un FICHIER garde son nom comme repère et le dit clairement', async () => {
+    render(<Cadence />);
+    const zone = within(card('Diagonalisation')).getByRole('button', { name: /document/i }).parentElement;
+    fireEvent.drop(zone, { dataTransfer: dataTransfer({ file: { name: 'TD3_optique.pdf' } }) });
+    await waitFor(() => expect(read(st).chapters[0].docs).toHaveLength(1));
+    const saved = read(st).chapters[0].docs[0];
+    expect(saved.label).toBe('TD3_optique.pdf');
+    expect(saved.url).toBeNull(); // le contenu n'est pas stocké
+    expect(screen.getByText(/Fichier non stocké/i)).toBeTruthy();
+  });
+
+  it('retirer un document', async () => {
+    const base = stateWith([chapterOn('c1', 'Diagonalisation', {
+      docs: [{ id: 'd1', label: 'Annale', url: 'https://exemple.org/a.pdf', addedAt: '2026-01-01', lastUsedAt: null }],
+    })]);
+    st.setItem(STORAGE_KEY, JSON.stringify(base));
+    render(<Cadence />);
+    fireEvent.click(within(card('Diagonalisation')).getByRole('button', { name: /Retirer le document Annale/ }));
+    await waitFor(() => expect(read(st).chapters[0].docs).toHaveLength(0));
+  });
+
+  it('noter le chapitre ne touche pas ses documents', async () => {
+    const base = stateWith([chapterOn('c1', 'Diagonalisation', {
+      docs: [{ id: 'd1', label: 'Annale', url: 'https://exemple.org/a.pdf', addedAt: '2026-01-01', lastUsedAt: '2026-01-05' }],
+    })]);
+    st.setItem(STORAGE_KEY, JSON.stringify(base));
+    render(<Cadence />);
+    fireEvent.click(within(card('Diagonalisation')).getByText('Correct'));
+    await waitFor(() => expect(read(st).chapters[0].recall.lastReviewed).toBeTruthy());
+    expect(read(st).chapters[0].docs).toHaveLength(1);
+    expect(read(st).chapters[0].docs[0].lastUsedAt).toBe('2026-01-05');
   });
 });
 

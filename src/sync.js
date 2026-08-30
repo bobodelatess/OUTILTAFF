@@ -33,8 +33,28 @@
 
 import {
   DELETABLE, LEVELS, DEFAULT_SETTINGS, levelSeed, applyRecall, applyPractice,
-  emptyPractice, emptyDeleted, evidenceAxis, uid,
+  emptyPractice, emptyDeleted, evidenceAxis, uid, normDocs,
 } from './engine.js';
+
+// Documents : UNION par identifiant, comme le journal. Ajouter un document sur
+// le téléphone et un autre sur l'ordinateur doit donner les deux, jamais un
+// seul. En cas de doublon d'identifiant, on garde la date d'utilisation la plus
+// récente — c'est celle qui compte pour « retrouver ce que j'ai vu ».
+function mergeDocs(a, b) {
+  const map = new Map();
+  for (const d of [...normDocs(a), ...normDocs(b)]) {
+    const prev = map.get(d.id);
+    if (!prev) { map.set(d.id, d); continue; }
+    map.set(d.id, {
+      ...prev,
+      label: prev.label || d.label,
+      url: prev.url || d.url,
+      addedAt: [prev.addedAt, d.addedAt].filter(Boolean).sort()[0] ?? null,
+      lastUsedAt: [prev.lastUsedAt, d.lastUsedAt].filter(Boolean).sort().pop() ?? null,
+    });
+  }
+  return normDocs([...map.values()]);
+}
 
 export function newDeviceId() {
   return `dev-${uid().slice(0, 8)}`;
@@ -179,7 +199,11 @@ export function mergeStates(a, b) {
 
   const archived = unionEntries(a.archivedReviews, b.archivedReviews);
   const archivedKeys = new Set(archived.map(entryKey));
-  const chapters = mergeById(hi.chapters, lo.chapters, deleted.chapters);
+  // Les champs simples d'un chapitre suivent l'appareil modifié en dernier…
+  const otherById = new Map((lo.chapters || []).map((c) => [c.id, c]));
+  const chapters = mergeById(hi.chapters, lo.chapters, deleted.chapters)
+    // …mais ses documents sont réunis des deux côtés.
+    .map((c) => ({ ...c, docs: mergeDocs(c.docs, otherById.get(c.id)?.docs) }));
   const chapterIds = new Set(chapters.map((c) => c.id));
 
   // Journal actif : union, moins ce qui a été archivé (recalibrage sur un

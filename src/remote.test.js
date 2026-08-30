@@ -75,7 +75,7 @@ describe('opérations sur le coffre', () => {
       history: [{ version: 'v2' }],
     }));
     const { state: pulled, version } = await pullVault({ token: 't', gistId: 'g' }, f);
-    expect(pulled.version).toBe(6);
+    expect(pulled.version).toBe(7);
     expect(version).toBe('v2');
   });
 
@@ -91,7 +91,7 @@ describe('opérations sur le coffre', () => {
       return ok({ files: { [VAULT_FILE]: { truncated: true, raw_url: 'https://raw/x', content: '' } }, history: [] });
     });
     const { state: pulled } = await pullVault({ token: 't', gistId: 'g' }, f);
-    expect(pulled.version).toBe(6);
+    expect(pulled.version).toBe(7);
   });
 
   it('coffre corrompu : erreur explicite, rien n’est écrasé', async () => {
