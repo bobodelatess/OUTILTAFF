@@ -247,7 +247,7 @@ describe('schéma v5 & interopérabilité', () => {
     const v4 = { ...baseState(), version: 4 };
     delete v4.deleted; delete v4.syncMeta;
     const out = normalize(v4, TODAY);
-    expect(out.version).toBe(5);
+    expect(out.version).toBe(6);
     expect(out.deleted).toEqual(emptyDeleted());
     expect(out.syncMeta).toBeNull();
     expect(out.chapters.map((c) => c.id)).toEqual(['c1']);

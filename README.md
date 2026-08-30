@@ -10,14 +10,14 @@ Répétition espacée au niveau **chapitre** (maths / physique), pilotée par le
 examens et bornée par la capacité réelle du jour. PWA locale : **aucun serveur
 CADENCE**, aucun compte à créer, données sur l'appareil (export/import JSON).
 Pour retrouver les mêmes données sur téléphone et ordinateur, une
-[synchronisation optionnelle](#synchronisation-entre-appareils-schéma-v5)
+[synchronisation optionnelle](#synchronisation-entre-appareils)
 passe par un **espace privé du compte GitHub de l'utilisateur** — c'est lui
 qui héberge ses données, personne d'autre.
 
 CADENCE n'est volontairement **pas** : un emploi du temps, un gestionnaire
 d'habitudes ou de tâches, une prise de notes, un clone d'Anki, un Pomodoro.
 
-## Les trois axes (schéma v5)
+## Les trois axes (schéma v6)
 
 Savoir un chapitre, ce sont **trois compétences distinctes** — CADENCE les
 suit **séparément**, et une note n'affecte JAMAIS un autre axe :
@@ -44,13 +44,42 @@ Toutes les constantes sont **nommées et centralisées** dans `src/engine.js`
 (`RISK`, `AXIS_MINUTES`, `PRACTICE_GRADE`, `WORTH_RISK`…) — pas de
 coefficient caché.
 
+## Cours et ressources — tout ne se révise pas pareil
+
+Un **chapitre de cours** porte les trois axes. Mais beaucoup de choses se
+révisent sans être un cours : une liste de vocabulaire, un recueil d'exercices,
+des annales, un entraînement. Une **ressource** déclare donc *ce qui la
+concerne* :
+
+| Profil | Axes appliqués | Exemples |
+| --- | --- | --- |
+| À mémoriser | rappel | vocabulaire, cartes, formulaire |
+| À pratiquer | exercice | recueil d'exercices, entraînement |
+| Annales | problème | sujets complets, conditions réelles |
+| Complet | les trois | comme un chapitre de cours |
+
+Un axe non déclaré n'est **jamais** réclamé, ni compté dans les indicateurs, ni
+dans la couverture d'une épreuve — sinon une liste de vocabulaire afficherait
+éternellement « annales non testées ». Les axes restent modifiables case par
+case depuis **Matières**, et au moins un doit rester actif.
+
+## Où j'en suis
+
+Chaque élément porte un **point de reprise** : un repère court (« p. 47 »,
+« unité 5 », « exercice 12 »), modifiable en un clic depuis la carte du jour
+ou depuis Matières. Il n'entre dans **aucun calcul** — ce n'est pas une note,
+pas une échéance, pas une tâche : juste de quoi reprendre où tu t'es arrêté.
+
+CADENCE reste ce qu'il est : pas de sous-tâches, pas de cases à cocher, pas de
+rappels arbitraires.
+
 ## Priorité et plan du jour
 
 ```
 risque_rappel   = temps écoulé / intervalle visé      (urgence mémoire)
 risque_exercice = déficit observé + ancienneté + échecs (+ jamais testé)
 risque_problème = idem, sur les annales
-priorité        = max(risques) × pression_d'examen
+priorité        = max(risques des axes DÉCLARÉS) × pression_d'examen
 ```
 
 La pression d'examen **multiplie** (elle n'additionne pas), modulée par
@@ -168,7 +197,7 @@ entretenir un compteur.
    simple/détaillé, paramètres du modèle repliés en section **experte**,
    export/import validé, instantanés locaux (7 j).
 
-## Synchronisation entre appareils (schéma v5)
+## Synchronisation entre appareils
 
 Téléphone et ordinateur, les mêmes données, à jour partout — et toujours
 **aucun serveur CADENCE**. Les données sont déposées dans un **gist privé du
@@ -206,12 +235,15 @@ peut les révoquer ou les supprimer à tout moment.
 
 ## Données, migrations, fiabilité
 
-- Un état principal (`cadence.v2`) au **schéma v5 versionné** ; les données
-  v1/v2/v3/v4 sont migrées automatiquement, y compris par import JSON. Une
+- Un état principal (`cadence.v2`) au **schéma v6 versionné** ; les données
+  v1 à v5 sont migrées automatiquement, y compris par import JSON. Une
   version future/inconnue est refusée : elle n'est jamais rétrogradée comme
   si elle était ancienne.
-- Migration v4 → v5 : ajout de l'horodatage de modification et de l'historique
-  de suppression. **Aucune donnée existante n'est touchée.**
+- Migration v4 → v5 : horodatage de modification et historique de suppression.
+- Migration v5 → v6 : tout élément existant devient un « chapitre de cours »
+  avec les trois axes — c'est-à-dire exactement son comportement actuel.
+  **Aucune donnée existante n'est touchée** (vérifié : priorité identique
+  avant et après migration).
 - Migration v3 → v4 **déterministe et non destructive** : le journal est
   intégralement conservé (les notes sans type deviennent `legacy` = rappel).
   L'état de rappel est **reconstruit en rejouant uniquement les événements de
@@ -269,7 +301,7 @@ Prérequis : Node.js 22.12+ ou Node.js 24 LTS.
 npm ci
 npm run dev      # serveur de dev Vite
 npm run build    # build de production + précache PWA révisionné -> dist/
-npm test         # 191 tests : moteur, fusion multi-appareils, stockage,
+npm test         # 225 tests : moteur, ressources, fusion multi-appareils,
                  # interactions réelles (RTL + jsdom), PWA/service worker
                  # et génération déterministe du build hors-ligne
 ```
@@ -301,7 +333,7 @@ npm test         # 191 tests : moteur, fusion multi-appareils, stockage,
   la liste exhaustive des assets dans le service worker, puis vérifie que le
   shell, le manifeste et les icônes sont bien précachés.
 - CI/CD GitHub Pages (`.github/workflows/deploy.yml`) : Node 24, audit npm,
-  191 tests et build sur chaque push/PR ; permissions Pages limitées au job
+  225 tests et build sur chaque push/PR ; permissions Pages limitées au job
   de déploiement.
 
 Défauts : `requestRetention=0.90`, `subjectsPerDay=3`, `sessionHours=2`,

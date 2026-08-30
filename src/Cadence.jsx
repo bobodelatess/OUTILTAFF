@@ -17,7 +17,7 @@ import {
   Plus, Trash2, ChevronDown, ChevronRight, ChevronLeft, Check,
   Download, Upload, RotateCcw, AlertTriangle, Lock, Undo2,
   BookOpen, FlaskConical, Flame, Pencil, Clock3,
-  RefreshCw, Cloud, CloudOff, Smartphone,
+  RefreshCw, Cloud, CloudOff, Smartphone, Bookmark, Library,
 } from 'lucide-react';
 
 import {
@@ -33,6 +33,7 @@ import {
   cruiseLoad, observedRetention, forecastDue, examReadiness,
   validateImport, normalize, seedState, newChapter,
   stripChapterIds, recalibrateState, makeStore, markDeleted,
+  KINDS, RESOURCE_PRESETS, POSITION_MAX, applicableAxes, normPosition, newResource,
 } from './engine.js';
 import { stampState, contentSignature, newDeviceId } from './sync.js';
 import { getDeviceId } from './remote.js';
@@ -345,7 +346,8 @@ function PriorityReader({ m, compact }) {
 
 const REASON_ICON = { exam: CalendarDays, late: AlertTriangle, calm: Check };
 function ReasonLine({ m, size = 13.5 }) {
-  const r = reasonPhrase(m);
+  // `m` porte déjà l'élément enrichi (kind inclus) : la formulation s'adapte.
+  const r = reasonPhrase(m, m.raw ?? m);
   const col = thermal(m.priority);
   const Icon = REASON_ICON[r.tone] || Check;
   return (
@@ -392,10 +394,14 @@ function GradeButtons({ onGrade, titleFor, evidenceType = 'recall', compact }) {
 // Petit sélecteur d'axe (rappel / exercice / problème) DANS une carte.
 // Chaque axe montre son état (rappel estimé ou maîtrise observée, ou « non
 // testé ») et sa durée. Un axe déjà noté aujourd'hui est coché.
+// Seuls les axes déclarés par l'élément sont proposés : une liste de
+// vocabulaire n'a pas d'onglet « annales ». Un seul axe -> pas de sélecteur.
 function AxisPicker({ ch, axis, onPick, doneAxes }) {
+  const axes = ch.axes || AXIS_KEYS;
+  if (axes.length <= 1) return null;
   return (
     <div role="group" aria-label="Axe à travailler" style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-      {AXIS_KEYS.map((ax) => {
+      {axes.map((ax) => {
         const on = ax === axis;
         const done = doneAxes.has(ax);
         const info = ch.axisInfo[ax];
@@ -426,19 +432,67 @@ function AxisPicker({ ch, axis, onPick, doneAxes }) {
 // Trois axes indépendants : on choisit l'axe (défaut = axe dominant), on note
 // le RÉSULTAT du test ; seul cet axe est modifié. On peut noter plusieurs axes
 // le même jour. Clavier : Tab pour sélectionner la carte, 1–4 pour noter.
-function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrade, onUndo, onSkip, onSetAxisMinutes }) {
+// Point de reprise : « où j'en étais quand je me suis arrêté ». Un repère
+// court, modifiable en un clic. Il n'entre dans aucun calcul — c'est une note
+// pour toi, pas une donnée du modèle.
+function PositionField({ value, onSave, compact }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value || '');
+  useEffect(() => { setDraft(value || ''); }, [value]);
+
+  const commit = () => { onSave(draft); setEditing(false); };
+  const cancel = () => { setDraft(value || ''); setEditing(false); };
+
+  if (!editing) {
+    return (
+      <button type="button" onClick={() => setEditing(true)}
+        title={value ? `Reprendre à : ${value} — cliquer pour modifier` : 'Noter où tu t’arrêtes (ex. « p. 47 », « unité 5 »)'}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer',
+          fontFamily: SANS, fontSize: compact ? 10.5 : 11, padding: '3px 8px', borderRadius: 999,
+          border: `1px dashed ${value ? C.line2 : C.line}`, background: 'transparent',
+          color: value ? C.text : C.faint,
+        }}>
+        <Bookmark size={11} color={value ? C.accent : C.faint} />
+        {value ? <span style={{ fontFamily: MONO, fontSize: 10.5 }}>{value}</span> : 'où j’en suis'}
+      </button>
+    );
+  }
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+      <Bookmark size={11} color={C.accent} />
+      <input autoFocus value={draft} maxLength={POSITION_MAX}
+        aria-label="point de reprise"
+        placeholder="ex. p. 47, unité 5, exercice 12"
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { commit(); e.preventDefault(); }
+          if (e.key === 'Escape') { cancel(); e.preventDefault(); }
+        }}
+        onBlur={commit}
+        style={{
+          fontFamily: MONO, fontSize: 11, color: C.text, background: C.inset,
+          border: `1px solid ${C.line2}`, borderRadius: 6, padding: '3px 6px', width: 160,
+        }} />
+    </span>
+  );
+}
+
+function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrade, onUndo, onSkip, onSetAxisMinutes, onSetPosition }) {
   const [expanded, setExpanded] = useState(false);
   const doneEntries = done || [];
   const doneAxes = useMemo(
     () => new Set(doneEntries.map((d) => d.axis || evidenceAxis(d.evidenceType))), [doneEntries]);
+  // Seuls les axes déclarés par l'élément entrent en jeu.
+  const axes = ch.axes || AXIS_KEYS;
   // Axe par défaut : l'axe dominant, ou le premier axe non encore noté aujourd'hui.
   const preferred = !doneAxes.has(ch.dominant)
-    ? ch.dominant : (AXIS_KEYS.find((a) => !doneAxes.has(a)) || ch.dominant);
+    ? ch.dominant : (axes.find((a) => !doneAxes.has(a)) || ch.dominant);
   const [axis, setAxis] = useState(preferred);
   // Si l'axe choisi vient d'être noté, avancer vers un axe restant.
   useEffect(() => {
     if (doneAxes.has(axis)) {
-      const next = AXIS_KEYS.find((a) => !doneAxes.has(a));
+      const next = axes.find((a) => !doneAxes.has(a));
       if (next) setAxis(next);
     }
   }, [doneAxes]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -446,7 +500,7 @@ function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrad
   const open = !simpleMode || expanded;
   const tcol = thermal(ch.priority);
   const axisDone = doneAxes.has(axis);
-  const allDone = AXIS_KEYS.every((a) => doneAxes.has(a));
+  const allDone = axes.every((a) => doneAxes.has(a));
   const accent = doneEntries.length ? C.good : tcol;
 
   // Aperçu de l'effet de la note sur l'axe choisi (jours pour le rappel,
@@ -462,6 +516,7 @@ function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrad
 
   // Clavier : 1–4 note l'axe choisi ; r / e / p change d'axe.
   const AXIS_KEYBOARD = { r: 'recall', e: 'exercise', p: 'problem' };
+  const canUse = (ax) => axes.includes(ax);
   const GRADE_KEYBOARD = {
     Digit1: 1, Digit2: 2, Digit3: 3, Digit4: 4,
     Numpad1: 1, Numpad2: 2, Numpad3: 3, Numpad4: 4,
@@ -469,7 +524,7 @@ function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrad
   const onKey = (e) => {
     if (e.target !== e.currentTarget) return;
     if (GRADE_KEYBOARD[e.code] && !axisDone) { onGrade(ch.id, axis, GRADE_KEYBOARD[e.code]); e.preventDefault(); }
-    else if (AXIS_KEYBOARD[e.key?.toLowerCase()]) { setAxis(AXIS_KEYBOARD[e.key.toLowerCase()]); e.preventDefault(); }
+    else if (canUse(AXIS_KEYBOARD[e.key?.toLowerCase()])) { setAxis(AXIS_KEYBOARD[e.key.toLowerCase()]); e.preventDefault(); }
   };
 
   const rec = ch.recall; // info rappel : { risk, ti, since, R, dueIn, tested }
@@ -513,6 +568,9 @@ function QueueCard({ idx, ch, subject, simpleMode, done, today, settings, onGrad
         <Mono style={{ fontSize: 11, color: C.faint }}>
           ~{fmtMinutes(ch.axisInfo[axis].minutes)}
         </Mono>
+        {onSetPosition && (
+          <PositionField value={ch.position} onSave={(v) => onSetPosition(ch.id, v)} />
+        )}
       </div>
 
       {/* Détails (repliés en mode simple) : chiffres transparents, par axe */}
@@ -1251,8 +1309,27 @@ export default function Cadence() {
   const addChaptersBulk = (subjectId, names, level) => patch((p) => ({
     ...p, chapters: [...p.chapters, ...names.map((n) => newChapter(subjectId, n, level || LEVELS[0], p.settings))],
   }));
+  // Ressource : tout ce qui se révise sans être un chapitre de cours
+  // (vocabulaire, recueil d'exercices, annales…). Seuls les axes choisis
+  // s'appliquent — sinon elle réclamerait éternellement des tests hors sujet.
+  const addResource = (subjectId, name, axes) => patch((p) => ({
+    ...p, chapters: [...p.chapters, newResource(subjectId, name, axes, p.settings)],
+  }));
   const updateChapter = (id, up) => patch((p) => ({
     ...p, chapters: p.chapters.map((c) => (c.id === id ? { ...c, ...up } : c)),
+  }));
+  // Point de reprise : « où j'en suis ». N'entre dans aucun calcul.
+  const setChapterPosition = (id, value) => patch((p) => ({
+    ...p, chapters: p.chapters.map((c) => (c.id === id ? { ...c, position: normPosition(value) } : c)),
+  }));
+  // Axes applicables : au moins un, sinon l'élément ne serait jamais planifiable.
+  const setChapterAxes = (id, axes) => patch((p) => ({
+    ...p,
+    chapters: p.chapters.map((c) => {
+      if (c.id !== id) return c;
+      const kept = AXIS_KEYS.filter((a) => axes.includes(a));
+      return kept.length ? { ...c, axes: kept } : c;
+    }),
   }));
   const deleteChapter = (id) => patch((p) => ({
     ...p,
@@ -1644,6 +1721,7 @@ export default function Cadence() {
               onGrade={gradeEvidence} onUndo={undoReview} onSkip={skipChapter} onUnskip={unskipToday}
               onDismissDebrief={dismissDebrief}
               onSetTodayCapacity={setTodayCapacity} onSetAxisMinutes={setChapterAxisMinutes}
+              onSetPosition={setChapterPosition}
               onAdjustParallel={adjustParallel}
               onGoSubjects={goToSubjects}
               onSetSimpleMode={(v) => updateSetting('simpleMode', v)}
@@ -1659,6 +1737,7 @@ export default function Cadence() {
               subjects={subjects} chapters={chapters} exams={exams} settings={settings} today={today}
               onAddSubject={addSubject} onUpdateSubject={updateSubject} onDeleteSubject={deleteSubject}
               onAddChapter={addChapter} onAddChaptersBulk={addChaptersBulk}
+              onAddResource={addResource} onSetPosition={setChapterPosition} onSetAxes={setChapterAxes}
               onUpdateChapter={updateChapter} onDeleteChapter={deleteChapter}
               onSetLevel={setChapterLevel} onSetAxisMinutes={setChapterAxisMinutes}
               onAddExam={addExam} onUpdateExam={updateExam} onDeleteExam={deleteExam}
@@ -1705,7 +1784,7 @@ function TodayView({
   todayMinutes, defaultMinutes, hasCoreChapters, exportStale,
   parallelSubjects, parallelLog, settings,
   onGrade, onUndo, onSkip, onUnskip, onDismissDebrief, onSetTodayCapacity, onSetAxisMinutes,
-  onAdjustParallel, onGoSubjects, onSetSimpleMode,
+  onSetPosition, onAdjustParallel, onGoSubjects, onSetSimpleMode,
 }) {
   const [showAll, setShowAll] = useState(false);
   const [customCap, setCustomCap] = useState(false);
@@ -2015,7 +2094,7 @@ function TodayView({
                       simpleMode={settings.simpleMode} done={doneByChapter[chapter.id]}
                       today={today} settings={settings}
                       onGrade={onGrade} onUndo={onUndo} onSkip={onSkip}
-                      onSetAxisMinutes={onSetAxisMinutes} />
+                      onSetAxisMinutes={onSetAxisMinutes} onSetPosition={onSetPosition} />
                   )}
                 />
               ) : (
@@ -2048,7 +2127,7 @@ function TodayView({
                             simpleMode={settings.simpleMode} done={doneByChapter[ch.id]}
                             today={today} settings={settings}
                             onGrade={onGrade} onUndo={onUndo} onSkip={onSkip}
-                            onSetAxisMinutes={onSetAxisMinutes} />
+                            onSetAxisMinutes={onSetAxisMinutes} onSetPosition={onSetPosition} />
                         ))}
                       </div>
                     </div>
@@ -2424,7 +2503,8 @@ function LevelPicker({ current, onPick, compact }) {
 function SubjectsView({
   subjects, chapters, exams, settings, today,
   onAddSubject, onUpdateSubject, onDeleteSubject,
-  onAddChapter, onAddChaptersBulk, onUpdateChapter, onDeleteChapter, onSetLevel, onSetAxisMinutes,
+  onAddChapter, onAddChaptersBulk, onAddResource, onUpdateChapter, onDeleteChapter,
+  onSetLevel, onSetAxisMinutes, onSetPosition, onSetAxes,
   onAddExam, onUpdateExam, onDeleteExam, onToggleExamChapter,
   focusRequest, onFocusHandled,
 }) {
@@ -2558,6 +2638,11 @@ function SubjectsView({
                             <MemGauge R={m.R} size={26} />
                             <TextInput value={c.name} onChange={(v) => onUpdateChapter(c.id, { name: v })}
                               ariaLabel={`Nom du chapitre ${c.name}`} />
+                            {c.kind === 'resource' && (
+                              <Chip color={C.dim} title="Ressource : seuls les axes cochés s'appliquent.">
+                                <Library size={11} /> ressource
+                              </Chip>
+                            )}
                             <IconBtn icon={Trash2} danger title={`Supprimer le chapitre ${c.name}`}
                               onClick={() => {
                                 if (confirm(`Supprimer « ${c.name} » ? Son historique et ses références d’épreuve seront aussi supprimés.`)) onDeleteChapter(c.id);
@@ -2574,9 +2659,38 @@ function SubjectsView({
                               · {since} · prochain test {m.dueIn <= 0 ? 'auj.' : `dans ~${m.dueIn} j`} · solidité {round1(c.recall?.stability ?? 0)} j
                             </Mono>
                           </div>
+                          {/* Ce qui s'applique à cet élément + où j'en suis */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', paddingLeft: 34 }}>
+                            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}
+                              title="Décoche ce qui n'a pas de sens pour cet élément : un axe décoché n'est jamais réclamé ni compté.">
+                              concerne
+                            </span>
+                            {AXIS_KEYS.map((ax) => {
+                              const on = applicableAxes(c).includes(ax);
+                              const last = on && applicableAxes(c).length === 1;
+                              return (
+                                <button key={ax} type="button" aria-pressed={on} disabled={last}
+                                  aria-label={last ? `${AXES[ax].long} : au moins un axe doit rester actif` : `${on ? 'Retirer' : 'Ajouter'} ${AXES[ax].long}`}
+                                  title={last ? 'Au moins un axe doit rester actif' : `${on ? 'Retirer' : 'Ajouter'} ${AXES[ax].long}`}
+                                  onClick={() => onSetAxes(c.id, on
+                                    ? applicableAxes(c).filter((a) => a !== ax)
+                                    : [...applicableAxes(c), ax])}
+                                  style={{
+                                    fontFamily: SANS, fontSize: 11, padding: '3px 9px', borderRadius: 999,
+                                    cursor: last ? 'not-allowed' : 'pointer',
+                                    border: `1px solid ${on ? 'rgba(94,169,255,.5)' : C.line2}`,
+                                    background: on ? 'rgba(94,169,255,.14)' : 'transparent',
+                                    color: on ? '#dbeafe' : C.faint,
+                                  }}>
+                                  {AXES[ax].label}
+                                </button>
+                              );
+                            })}
+                            <PositionField value={c.position} onSave={(v) => onSetPosition(c.id, v)} compact />
+                          </div>
                           {/* Maîtrise observée des axes pratiques (score heuristique, pas une proba) */}
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', paddingLeft: 34 }}>
-                            {['exercise', 'problem'].map((ax) => (
+                            {['exercise', 'problem'].filter((ax) => applicableAxes(c).includes(ax)).map((ax) => (
                               <Chip key={ax} color={info[ax].tested ? thermal((1 - info[ax].pct / 100) * 4) : C.faint}
                                 title={`${AXES[ax].long} : maîtrise observée (score heuristique)`}>
                                 {AXES[ax].label} {info[ax].tested ? `${info[ax].pct} %` : 'non testé'}
@@ -2610,7 +2724,8 @@ function SubjectsView({
                   </div>
                   <div id={`chapter-adder-${s.id}`}>
                     <ChapterAdder onAdd={(name) => onAddChapter(s.id, name)}
-                      onAddMany={(names) => onAddChaptersBulk(s.id, names)} />
+                      onAddMany={(names) => onAddChaptersBulk(s.id, names)}
+                      onAddResource={(name, axes) => onAddResource(s.id, name, axes)} />
                   </div>
                 </div>
 
@@ -2704,15 +2819,25 @@ function SubjectsView({
 // Ajout de chapitres : un par un, ou EN LOT (un nom par ligne). Les chapitres
 // créés partent au niveau « Jamais vu » (recalibrables ensuite) avec les
 // durées par défaut par axe.
-function ChapterAdder({ onAdd, onAddMany }) {
+function ChapterAdder({ onAdd, onAddMany, onAddResource }) {
   const [bulk, setBulk] = useState(false);
   const [text, setText] = useState('');
+  const [resourceOpen, setResourceOpen] = useState(false);
+  const [resourceName, setResourceName] = useState('');
+  const [preset, setPreset] = useState(RESOURCE_PRESETS[0]);
   const names = text.split('\n').map((l) => l.trim()).filter(Boolean);
   const addBulk = () => {
     if (!names.length) return;
     onAddMany(names);
     setText('');
     setBulk(false);
+  };
+  const addResource = () => {
+    const n = resourceName.trim();
+    if (!n) return;
+    onAddResource(n, preset.axes);
+    setResourceName('');
+    setResourceOpen(false);
   };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -2724,6 +2849,11 @@ function ChapterAdder({ onAdd, onAddMany }) {
           <Btn variant="bare" onClick={() => setBulk(true)} style={{ color: C.dim, fontSize: 12 }}>
             <Plus size={13} /> en lot (un par ligne)
           </Btn>
+          {onAddResource && (
+            <Btn variant="bare" onClick={() => setResourceOpen((v) => !v)} style={{ color: C.dim, fontSize: 12 }}>
+              <Library size={13} /> ressource
+            </Btn>
+          )}
         </div>
       ) : (
         <>
@@ -2745,6 +2875,50 @@ function ChapterAdder({ onAdd, onAddMany }) {
             </span>
           </div>
         </>
+      )}
+
+      {/* Ressource : tout ce qui se révise sans être un chapitre de cours.
+          Le profil choisit les axes qui s'appliquent — ils restent modifiables. */}
+      {resourceOpen && (
+        <div className="cad-in" style={{
+          padding: 12, borderRadius: 9, background: C.panel2,
+          border: `1px solid ${C.line}`, display: 'flex', flexDirection: 'column', gap: 9,
+        }}>
+          <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.dim, lineHeight: 1.5 }}>
+            Une <b>ressource</b> se révise comme un chapitre, mais tu choisis ce qui la
+            concerne — et tu peux noter <b>où tu t’arrêtes</b>.
+          </div>
+          <TextInput value={resourceName} onChange={setResourceName}
+            ariaLabel="nom de la ressource"
+            placeholder="ex. Vocabulaire TOEIC, Annales de mécanique, Recueil d’exos"
+            onKeyDown={(e) => { if (e.key === 'Enter') addResource(); }} />
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {RESOURCE_PRESETS.map((p) => {
+              const on = p.key === preset.key;
+              return (
+                <button key={p.key} type="button" onClick={() => setPreset(p)} aria-pressed={on}
+                  title={`${p.hint} — axes : ${p.axes.map((a) => AXES[a].label).join(', ')}`}
+                  style={{
+                    fontFamily: SANS, fontSize: 11.5, padding: '4px 10px', borderRadius: 999, cursor: 'pointer',
+                    border: `1px solid ${on ? 'rgba(94,169,255,.5)' : C.line2}`,
+                    background: on ? 'rgba(94,169,255,.14)' : 'transparent',
+                    color: on ? '#dbeafe' : C.dim,
+                  }}>
+                  {p.label}
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Btn variant="primary" onClick={addResource} disabled={!resourceName.trim()}>
+              <Library size={14} /> Ajouter la ressource
+            </Btn>
+            <Btn variant="bare" onClick={() => setResourceOpen(false)} style={{ color: C.faint, fontSize: 12 }}>annuler</Btn>
+            <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>
+              {preset.hint} · {preset.axes.map((a) => AXES[a].label).join(' + ')}
+            </span>
+          </div>
+        </div>
       )}
     </div>
   );

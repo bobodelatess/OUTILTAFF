@@ -34,8 +34,8 @@
 export const STORAGE_KEY = 'cadence.v2'; // clé stable ; la version vit DANS l'état
 export const LEGACY_KEY = 'cadence.v1';
 export const BACKUP_KEY = 'cadence.backups';
-export const SCHEMA_VERSION = 5;
-export const KNOWN_VERSIONS = [1, 2, 3, 4, 5];
+export const SCHEMA_VERSION = 6;
+export const KNOWN_VERSIONS = [1, 2, 3, 4, 5, 6];
 
 // v5 — synchronisation multi-appareils :
 //   syncMeta = { deviceId, updatedAt (ms), rev }   qui a modifié en dernier
@@ -98,6 +98,48 @@ export const AXES = {
   problem: { key: 'problem', label: 'Problème/annale', long: 'problème ou annale' },
 };
 export const AXIS_KEYS = ['recall', 'exercise', 'problem'];
+
+// v6 — tout ce qui se révise n'est pas un cours.
+//   'course'   : un chapitre de cours -> les trois axes s'appliquent.
+//   'resource' : une ressource à reprendre régulièrement (liste de
+//                vocabulaire, recueil d'exercices, annales, entraînement) ->
+//                seuls les axes DÉCLARÉS s'appliquent. Sans ça, une liste de
+//                vocabulaire afficherait éternellement « exercices non testés ».
+export const KINDS = {
+  course: {
+    key: 'course', label: 'Chapitre', long: 'chapitre de cours',
+    axes: AXIS_KEYS,
+  },
+  resource: {
+    key: 'resource', label: 'Ressource', long: 'ressource à reprendre',
+    axes: ['recall'],
+  },
+};
+export const KIND_KEYS = ['course', 'resource'];
+
+// Profils proposés à la création d'une ressource — des raccourcis, pas des
+// catégories figées : les axes restent modifiables ensuite.
+export const RESOURCE_PRESETS = [
+  { key: 'memo', label: 'À mémoriser', hint: 'vocabulaire, cartes, formulaire', axes: ['recall'] },
+  { key: 'practice', label: 'À pratiquer', hint: 'recueil d’exercices, entraînement', axes: ['exercise'] },
+  { key: 'annales', label: 'Annales', hint: 'sujets complets, conditions réelles', axes: ['problem'] },
+  { key: 'full', label: 'Complet', hint: 'cours + exercices + annales', axes: AXIS_KEYS },
+];
+
+// Longueur maximale du point de reprise (« p. 47 », « unité 5 »). Court
+// volontairement : c'est un repère, pas un carnet de notes.
+export const POSITION_MAX = 60;
+
+// Axes réellement applicables à un élément. Un élément sans `axes` explicite
+// (données antérieures à la v6) est un cours : les trois s'appliquent.
+export function applicableAxes(chapter) {
+  const declared = Array.isArray(chapter?.axes) ? chapter.axes.filter((a) => AXIS_KEYS.includes(a)) : null;
+  if (declared && declared.length) return AXIS_KEYS.filter((a) => declared.includes(a));
+  return KINDS[chapter?.kind]?.axes ?? AXIS_KEYS;
+}
+export function axisApplies(chapter, axis) {
+  return applicableAxes(chapter).includes(axis);
+}
 
 // Libellés des 4 issues, adaptés à l'axe. La note décrit le RÉSULTAT d'un test
 // sans correction sous les yeux — pas le temps passé ni l'impression.
@@ -401,9 +443,12 @@ export function recallInfo(chapter, s, today) {
   return { risk, ti, since, R, dueIn, tested: since != null };
 }
 
-function argmaxAxis(risks) {
-  let best = 'recall';
-  for (const k of AXIS_KEYS) if (risks[k] > risks[best]) best = k;
+// Axe au risque le plus élevé, parmi ceux qui s'appliquent. À égalité, l'ordre
+// pédagogique tranche (apprendre -> appliquer -> transférer).
+function argmaxAxis(risks, axes = AXIS_KEYS) {
+  const usable = axes.length ? axes : AXIS_KEYS;
+  let best = usable[0];
+  for (const k of usable) if (risks[k] > risks[best]) best = k;
   return best;
 }
 
@@ -418,12 +463,15 @@ export function chapterMetrics(chapter, exams, s, today) {
   const exRisk = chapterPracticeRisk(chapter, 'exercise', today);
   const prRisk = chapterPracticeRisk(chapter, 'problem', today);
   const risks = { recall: rec.risk, exercise: exRisk, problem: prRisk };
-  const dominant = argmaxAxis(risks);
+  // Seuls les axes déclarés pèsent : une liste de vocabulaire ne doit pas
+  // être poussée par un risque « annales jamais testées » qui n'a aucun sens.
+  const axes = applicableAxes(chapter);
+  const dominant = argmaxAxis(risks, axes);
   const { factor, exam, examDays } = chapterExamFactor(chapter, exams, s, today);
   const baseRisk = risks[dominant];
   const priority = baseRisk * factor;
   return {
-    risks, dominant, baseRisk, factor, exam, examDays, priority,
+    risks, axes, dominant, baseRisk, factor, exam, examDays, priority,
     minutes: axisMinutes(chapter, dominant),
     recall: rec,
     exercise: { risk: exRisk, state: chapter.exercise },
@@ -478,11 +526,14 @@ export function annalesModeFor(subjectId, exams, s, today) {
 }
 
 // Étiquette d'axe + explication courte, selon l'axe dominant et le contexte.
-export function reasonPhrase(m) {
+export function reasonPhrase(m, chapter) {
   const axis = m.dominant;
   const examSoon = m.exam && m.examDays != null && m.factor > 1.15;
+  // « cours » n'a de sens que pour un chapitre de cours : une liste de
+  // vocabulaire n'est pas un cours jamais testé, juste un élément jamais testé.
+  const isCourse = (chapter?.kind ?? 'course') === 'course';
   if (axis === 'recall') {
-    if (!m.recall.tested) return { text: 'cours jamais testé', tone: 'late', axis };
+    if (!m.recall.tested) return { text: isCourse ? 'cours jamais testé' : 'jamais testé', tone: 'late', axis };
     if (m.recall.risk >= 1) {
       const over = Math.round((m.recall.since ?? 0) - m.recall.ti);
       return { text: over > 1 ? `rappel en retard de ${over} j` : 'rappel à retester', tone: 'late', axis };
@@ -571,6 +622,7 @@ export function planDay(ranked, subjects, opts) {
 export function cruiseLoad(chapters, s) {
   let minutes = 0;
   for (const c of chapters) {
+    if (!axisApplies(c, 'recall')) continue; // pas de rappel -> pas d'entretien périodique
     const I = Math.max(1, optimalInterval(c.recall.stability, s.requestRetention));
     minutes += (c.minutes?.recall ?? AXIS_MINUTES.recall) / I;
   }
@@ -596,6 +648,7 @@ export function observedRetention(reviewLog) {
 export function forecastDue(chapters, s, today, horizon = 28) {
   const map = {};
   for (const c of chapters) {
+    if (!axisApplies(c, 'recall')) continue;
     const I = Math.max(1, Math.round(optimalInterval(c.recall.stability, s.requestRetention)));
     const since = c.recall.lastReviewed ? daysBetween(c.recall.lastReviewed, today) : null;
     const elapsed = since != null ? since : I * initialUrgencyOf(c);
@@ -617,19 +670,23 @@ export function examReadiness(exam, chapters, s, today) {
   if (j < 0) return null;
   const covered = chapters.filter((c) => (exam.chapterIds || []).includes(c.id));
   if (!covered.length) return null;
-  const untestedRecall = covered.filter((c) => !c.recall.lastReviewed);
-  const tested = covered
+  // Le rappel estimé ne porte que sur les éléments concernés par le rappel.
+  const recallItems = covered.filter((c) => axisApplies(c, 'recall'));
+  const untestedRecall = recallItems.filter((c) => !c.recall.lastReviewed);
+  const tested = recallItems
     .filter((c) => c.recall.lastReviewed)
     .map((c) => ({ chapter: c, projR: retrievability(daysBetween(c.recall.lastReviewed, exam.date), c.recall.stability) }))
     .sort((a, b) => a.projR - b.projR);
   const avgR = tested.length ? tested.reduce((a, x) => a + x.projR, 0) / tested.length : null;
+  // Chaque couverture est rapportée aux seuls éléments auxquels l'axe s'applique.
   const cov = (axis) => {
-    const testedN = covered.filter((c) => c[axis]?.attempts > 0).length;
-    return { tested: testedN, total: covered.length, untested: covered.length - testedN };
+    const scope = covered.filter((c) => axisApplies(c, axis));
+    const testedN = scope.filter((c) => c[axis]?.attempts > 0).length;
+    return { tested: testedN, total: scope.length, untested: scope.length - testedN };
   };
   const covRecall = () => {
-    const testedN = covered.filter((c) => c.recall?.lastReviewed).length;
-    return { tested: testedN, total: covered.length, untested: covered.length - testedN };
+    const testedN = recallItems.filter((c) => c.recall?.lastReviewed).length;
+    return { tested: testedN, total: recallItems.length, untested: recallItems.length - testedN };
   };
   return {
     days: j, avgR, per: tested, untested: untestedRecall,
@@ -640,15 +697,20 @@ export function examReadiness(exam, chapters, s, today) {
 }
 
 // Synthèse par axe sur un ensemble de chapitres (indicateurs honnêtes).
+// Le total d'un axe ne compte que les éléments AUXQUELS il s'applique : une
+// liste de vocabulaire ne doit pas gonfler les « annales non testées ».
 export function axisSummary(chapters, s, today) {
-  const out = { recall: { tested: 0, total: chapters.length, sum: 0 },
-    exercise: { tested: 0, total: chapters.length, sum: 0 },
-    problem: { tested: 0, total: chapters.length, sum: 0 } };
+  const out = { recall: { tested: 0, total: 0, sum: 0 },
+    exercise: { tested: 0, total: 0, sum: 0 },
+    problem: { tested: 0, total: 0, sum: 0 } };
   for (const c of chapters) {
-    const rec = recallInfo(c, s, today);
-    if (rec.tested) { out.recall.tested++; out.recall.sum += rec.R; }
-    if (c.exercise?.attempts > 0) { out.exercise.tested++; out.exercise.sum += c.exercise.score; }
-    if (c.problem?.attempts > 0) { out.problem.tested++; out.problem.sum += c.problem.score; }
+    for (const axis of applicableAxes(c)) out[axis].total++;
+    if (axisApplies(c, 'recall')) {
+      const rec = recallInfo(c, s, today);
+      if (rec.tested) { out.recall.tested++; out.recall.sum += rec.R; }
+    }
+    if (axisApplies(c, 'exercise') && c.exercise?.attempts > 0) { out.exercise.tested++; out.exercise.sum += c.exercise.score; }
+    if (axisApplies(c, 'problem') && c.problem?.attempts > 0) { out.problem.tested++; out.problem.sum += c.problem.score; }
   }
   for (const k of AXIS_KEYS) {
     out[k].avg = out[k].tested ? out[k].sum / out[k].tested : null;
@@ -769,6 +831,16 @@ export function validateImport(obj) {
       if (typeof c.subjectId !== 'string' || !subjectIds.has(c.subjectId)) push(`Chapitre « ${label} » : matière introuvable.`);
       if (c.initialLevel != null && !LEVELS.some((l) => l.key === c.initialLevel)) {
         push(`Chapitre « ${label} » : niveau initial inconnu.`);
+      }
+      // v6 : type, axes applicables et point de reprise.
+      if (c.kind != null && !KIND_KEYS.includes(c.kind)) push(`« ${label} » : type inconnu.`);
+      if (c.axes != null) {
+        if (!Array.isArray(c.axes)) push(`« ${label} » : « axes » doit être une liste.`);
+        else if (!c.axes.length) push(`« ${label} » : au moins un axe est nécessaire.`);
+        else for (const a of c.axes) if (!AXIS_KEYS.includes(a)) push(`« ${label} » : axe inconnu (${a}).`);
+      }
+      if (c.position != null && (typeof c.position !== 'string' || c.position.length > POSITION_MAX)) {
+        push(`« ${label} » : point de reprise invalide ou trop long.`);
       }
 
       // Le schéma v4 exige les trois axes indépendants. Les schémas v1-v3
@@ -1029,7 +1101,7 @@ export function migrateV3(v3) {
 // S'assure qu'un état déjà v4 a tous les champs (idempotent, sans rejeu).
 // `today` sert uniquement à l'hygiène (purge des vieux reports) — passer une
 // date fixe dans les tests garde la fonction déterministe.
-export function ensureV5(s, today = todayISO()) {
+export function ensureV6(s, today = todayISO()) {
   const settings = { ...DEFAULT_SETTINGS, ...(s?.settings || {}) };
   const deleted = pruneTombstones(s.deleted, today);
   const exams = (Array.isArray(s.exams) ? s.exams : [])
@@ -1044,7 +1116,7 @@ export function ensureV5(s, today = todayISO()) {
   const skips = Object.fromEntries(Object.entries(s.skips && typeof s.skips === 'object' ? s.skips : {})
     .filter(([, d]) => typeof d === 'string' && d >= addDays(today, -1)));
   return {
-    version: 5,
+    version: 6,
     subjects: (Array.isArray(s.subjects) ? s.subjects : []).filter((x) => !deleted.subjects[x?.id]),
     chapters: (Array.isArray(s.chapters) ? s.chapters : []).filter((x) => !deleted.chapters[x?.id]).map((c) => {
       const initialLevel = c.initialLevel ?? closestLevel(c.recall?.difficulty ?? c.difficulty ?? 5).key;
@@ -1052,6 +1124,9 @@ export function ensureV5(s, today = todayISO()) {
       const rec = c.recall || {};
       return {
         id: c.id, subjectId: c.subjectId, name: c.name, initialLevel,
+        kind: KIND_KEYS.includes(c.kind) ? c.kind : 'course',
+        axes: normAxes(c.axes, KIND_KEYS.includes(c.kind) ? c.kind : 'course'),
+        position: normPosition(c.position),
         recall: {
           stability: Math.max(S_MIN, rec.stability ?? targetInterval(level.m, settings)),
           difficulty: clamp(rec.difficulty ?? level.D, 1, 10),
@@ -1100,32 +1175,67 @@ function normPractice(p) {
 
 // v4 -> v5 : ajout des champs de synchronisation. Aucune donnée n'est touchée
 // (un état v4 est un état v5 sans historique de suppression ni horodatage) —
-// c'est ensureV5 qui pose les valeurs par défaut.
+// c'est ensureV6 qui pose les valeurs par défaut.
 export function migrateV4(v4) {
   return { ...v4, version: 5, deleted: v4?.deleted ?? emptyDeleted(), syncMeta: v4?.syncMeta ?? null };
 }
 
-// Accepte v1 à v5 -> renvoie toujours un état v5 sain.
-// Tout passe par ensureV5 (bornes + hygiène), y compris après migration.
-export function normalize(s, today = todayISO()) {
-  if (!s || typeof s !== 'object') return seedState();
-  if (s.version === 5) return ensureV5(s, today);
-  if (s.version === 4) return ensureV5(migrateV4(s), today);
-  if (s.version === 3) return ensureV5(migrateV4(migrateV3(s)), today);
-  if (s.version === 2) return ensureV5(migrateV4(migrateV3(migrateV2(s))), today);
-  return ensureV5(migrateV4(migrateV3(migrateV2(migrateV1(s)))), today);
+// v5 -> v6 : tout élément existant devient un « chapitre de cours » avec les
+// trois axes — exactement son comportement actuel. Rien n'est perdu ni changé.
+export function migrateV5(v5) {
+  return {
+    ...v5, version: 6,
+    chapters: (v5?.chapters || []).map((c) => ({
+      ...c, kind: c.kind ?? 'course', axes: normAxes(c.axes, c.kind ?? 'course'),
+      position: normPosition(c.position),
+    })),
+  };
 }
 
-export function newChapter(subjectId, name, level, s) {
+// Accepte v1 à v6 -> renvoie toujours un état v6 sain.
+// Tout passe par ensureV6 (bornes + hygiène), y compris après migration.
+export function normalize(s, today = todayISO()) {
+  if (!s || typeof s !== 'object') return seedState();
+  if (s.version === 6) return ensureV6(s, today);
+  if (s.version === 5) return ensureV6(migrateV5(s), today);
+  if (s.version === 4) return ensureV6(migrateV5(migrateV4(s)), today);
+  if (s.version === 3) return ensureV6(migrateV5(migrateV4(migrateV3(s))), today);
+  if (s.version === 2) return ensureV6(migrateV5(migrateV4(migrateV3(migrateV2(s)))), today);
+  return ensureV6(migrateV5(migrateV4(migrateV3(migrateV2(migrateV1(s))))), today);
+}
+
+// `opts` : { kind, axes, position } — par défaut, un chapitre de cours complet.
+export function newChapter(subjectId, name, level, s, opts = {}) {
   const lv = level || LEVELS[0];
   const seed = levelSeed(lv, s);
+  const kind = KIND_KEYS.includes(opts.kind) ? opts.kind : 'course';
   return {
     id: uid(), subjectId, name, initialLevel: lv.key,
+    kind, axes: normAxes(opts.axes, kind), position: normPosition(opts.position),
     recall: { stability: seed.stability, difficulty: seed.difficulty, lastReviewed: null, source: 'seed' },
     exercise: emptyPractice(),
     problem: emptyPractice(),
     minutes: { ...AXIS_MINUTES },
   };
+}
+
+// Ressource : même moteur qu'un chapitre, mais seuls les axes déclarés
+// s'appliquent, et elle sert surtout à être reprise là où on s'est arrêté.
+export function newResource(subjectId, name, axes, s, level) {
+  return newChapter(subjectId, name, level || LEVELS[0], s, { kind: 'resource', axes });
+}
+
+export function normAxes(axes, kind) {
+  const declared = Array.isArray(axes) ? axes.filter((a) => AXIS_KEYS.includes(a)) : [];
+  const kept = AXIS_KEYS.filter((a) => declared.includes(a));
+  return kept.length ? kept : [...(KINDS[kind]?.axes ?? AXIS_KEYS)];
+}
+
+// Point de reprise : texte court, nettoyé et borné. `null` quand vide — c'est
+// un repère (« p. 47 », « unité 5 »), pas un carnet de notes.
+export function normPosition(value) {
+  if (typeof value !== 'string') return null;
+  return value.replace(/\s+/g, ' ').trim().slice(0, POSITION_MAX) || null;
 }
 
 export function seedState() {
@@ -1142,7 +1252,7 @@ export function seedState() {
     { id: uid(), name: 'Anki', color: '#fca5a5', type: 'parallel', weeklyFloor: 6 },
   ];
   return {
-    version: 5, subjects: [...core, ...parallel], chapters: [], exams: [],
+    version: 6, subjects: [...core, ...parallel], chapters: [], exams: [],
     settings: { ...DEFAULT_SETTINGS }, parallelLog: {}, reviewLog: [],
     archivedReviews: [], skips: {}, capacityOverrides: {}, examDebriefs: {},
     deleted: emptyDeleted(), syncMeta: null,
