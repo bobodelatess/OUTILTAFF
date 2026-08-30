@@ -87,6 +87,27 @@ describe('ressources — ajouter ce qui n’est pas un cours', () => {
   });
 });
 
+describe('matière non planifiée — on explique pourquoi rien ne s’ouvre', () => {
+  it('affiche la raison et propose la bascule, qui débloque l’ajout', async () => {
+    const base = stateWith([]);
+    base.subjects = [{ id: 's1', name: 'Anglais / TOEIC', color: '#5eead4', type: 'parallel', weeklyFloor: 4 }];
+    st.setItem(STORAGE_KEY, JSON.stringify(base));
+    render(<Cadence />);
+    fireEvent.click(tab(/Matières/));
+
+    // Pas de flèche pour déplier : sans explication, l'utilisateur est bloqué.
+    expect(screen.queryByLabelText(/^Déplier /)).toBeNull();
+    expect(screen.getByText(/minimum hebdomadaire/i)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Passer en planifiée/ }));
+    await waitFor(() => expect(read(st).subjects[0].type).toBe('core'));
+
+    // Elle se déplie et accepte désormais chapitres et ressources.
+    fireEvent.click(screen.getByLabelText(/^Déplier /));
+    expect(screen.getByRole('button', { name: /ressource/i })).toBeTruthy();
+  });
+});
+
 describe('ressources — dans le plan du jour', () => {
   it('une ressource « à mémoriser » ne propose QUE le rappel', () => {
     st.setItem(STORAGE_KEY, JSON.stringify(stateWith([

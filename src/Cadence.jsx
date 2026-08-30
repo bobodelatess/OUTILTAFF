@@ -2615,6 +2615,26 @@ function SubjectsView({
               </div>
             </div>
 
+            {/* Une matière « minimum hebdo » ne se déplie pas : sans explication,
+                rien n'indique pourquoi on ne peut y ajouter ni chapitre ni
+                ressource. On le dit, et on propose la bascule sur place. */}
+            {!isCore && (
+              <div style={{
+                borderTop: `1px solid ${C.line}`, padding: '10px 12px',
+                display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+              }}>
+                <span style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, flex: '1 1 320px', lineHeight: 1.5 }}>
+                  Matière suivie par un <b>minimum hebdomadaire</b> : elle ne reçoit ni chapitre
+                  ni ressource, et n’entre pas dans le plan du jour. Passe-la en
+                  « planifiée » pour y ajouter du contenu à réviser.
+                </span>
+                <Btn onClick={() => onUpdateSubject(s.id, { type: 'core', weeklyFloor: undefined })}
+                  title={`Planifier ${s.name} : elle pourra contenir des chapitres et des ressources`}>
+                  <Layers size={13} /> Passer en planifiée
+                </Btn>
+              </div>
+            )}
+
             {isCore && expanded && (
               <div id={`subject-panel-${s.id}`} role="region" aria-labelledby={`subject-toggle-${s.id}`}
                 style={{ borderTop: `1px solid ${C.line}`, padding: 12, display: 'flex', flexDirection: 'column', gap: 16 }}>
