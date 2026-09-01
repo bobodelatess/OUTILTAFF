@@ -10,8 +10,9 @@ L'accueil répond à trois besoins seulement :
    courant, le dernier point de reprise et ses liens Drive ;
 2. **Consolidations dues** — revoir rapidement les portions antérieures selon
    leur propre courbe d'oubli ;
-3. **Tests de cours dus** — saisir une note réelle sans support et laisser le
-   modèle fixer la prochaine date.
+3. **Rappels de tests de cours** — indiquer seulement quand refaire un test sur
+   le même périmètre ; l'utilisateur crée et corrige lui-même les questions,
+   puis saisit sa note sur 20.
 
 CADENCE est une PWA locale : aucun compte ni serveur CADENCE. Les données
 restent dans le navigateur, avec export/import JSON. La
@@ -80,8 +81,8 @@ est réellement due.
 
 Une épreuve peut couvrir des chapitres entiers ou seulement des sections
 quotidiennes datées. La pression n'agit que sur ce périmètre : elle rapproche
-les consolidations concernées, resserre les tests de cours du même périmètre et
-module temporairement la répartition du temps entre matières.
+les consolidations et les rappels de tests concernés, puis module
+temporairement la répartition du temps entre matières.
 
 Chaque matière suivie porte une durée normale (120 min par défaut) et un
 minimum protégé (60 min par défaut). Le total normal quotidien reste fixe ; la
@@ -90,17 +91,19 @@ l'épreuve, toutes les durées reviennent automatiquement à leur valeur normale
 
 ## Tests de cours, annales et épreuves
 
-Un test de cours est un élément stable et récurrent, ciblé sur des chapitres ou
-sections. Lorsqu'il est dû, l'accueil demande une note et un barème, avec
-confirmation que le test a été fait sans cours ni corrigé. La note brute est
-conservée et fixe la prochaine date : moins de 50 % → 1 jour, moins de 70 % →
-3 jours, moins de 85 % → 10 jours, sinon 24 jours, avec resserrement si une
-épreuve du même périmètre approche. Le résultat ne modifie jamais
-l'auto-évaluation des portions.
+Un test de cours est un simple rappel stable et récurrent, ciblé sur des
+chapitres ou sections. CADENCE ne génère ni énoncé, ni question, ni correction :
+l'utilisateur compose et corrige lui-même son test sans support, puis saisit
+uniquement une note sur 20. La note conserve le même périmètre et fixe la
+prochaine date : moins de 10/20 → 1 jour, moins de 14/20 → 2 jours, moins de
+17/20 → 3 jours, sinon 4 jours, avec resserrement si une épreuve du même
+périmètre approche. Le résultat ne modifie jamais l'auto-évaluation des
+portions.
 
-À partir de cinq nouvelles sections non couvertes par un test (ou plusieurs
-sections restées une semaine sans test), CADENCE propose d'en planifier un sans
-enregistrer de faux résultat.
+À partir de trois nouvelles sections non couvertes (ou d'au moins deux
+sections dont la plus ancienne date de trois jours), CADENCE suggère de suivre
+un test sur ce périmètre. Cette suggestion ne crée aucun contenu et
+n'enregistre aucun faux résultat.
 
 Les annales restent séparées de l'auto-évaluation des portions. Elles utilisent
 quatre résultats objectifs : **Bloqué**, **Partiel**, **Résolu** et **Résolu
@@ -134,8 +137,8 @@ empêchent leur résurrection lors d'une fusion avec un appareil en retard.
 CADENCE comporte quatre vues :
 
 1. **Aujourd'hui** — continuité par matière, éventuel rééquilibrage temporaire,
-   consolidations dues, auto-évaluation à cinq niveaux, tests notés et bilans ;
-2. **Calendrier** — consolidations, tests de cours et épreuves à venir ;
+   consolidations dues, auto-évaluation à cinq niveaux, rappels de tests et bilans ;
+2. **Calendrier** — consolidations, rappels de tests et épreuves à venir ;
 3. **Matières** — chapitres stables, ressources, points de reprise, documents
    et épreuves ;
 4. **Réglages** — seuil de rappel, paramètres avancés repliés,
@@ -149,8 +152,9 @@ progrès global ne sont plus dans le parcours actif. CADENCE ne décide jamais
 du nouveau contenu. Le seul repère de durée est un rééquilibrage temporaire et
 à total fixe, déclenché par des épreuves réellement renseignées.
 
-Une portion compte environ cinq minutes dans le calendrier et la charge
-indicative : c'est un rappel bref, pas une nouvelle séance de cours.
+Une portion compte environ dix-sept minutes dans le calendrier et la charge
+indicative : c'est une consolidation réelle de la veille, pas une nouvelle
+séance de cours.
 
 ## Synchronisation entre appareils
 

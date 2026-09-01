@@ -110,7 +110,7 @@ describe('accueil simplifié — continuité et consolidations', () => {
     expect(screen.queryByRole('group', { name: /— consolidation/ })).toBeNull();
   });
 
-  it('enregistre directement une note de test sans modifier la maîtrise des portions', async () => {
+  it('enregistre une note sur 20 et reprogramme le même périmètre sans modifier les portions', async () => {
     const yesterday = addDays(todayISO(), -1);
     const st = stateWith({ introducedAt: yesterday });
     st.version = 9;
@@ -124,7 +124,6 @@ describe('accueil simplifié — continuité et consolidations', () => {
 
     const card = screen.getByRole('group', { name: 'Test hebdo — test de cours' });
     fireEvent.change(within(card).getByLabelText('note obtenue pour Test hebdo'), { target: { value: '14' } });
-    fireEvent.click(within(card).getByRole('checkbox', { name: /sans cours ni corrigé/ }));
     fireEvent.click(within(card).getByRole('button', { name: 'Enregistrer la note' }));
 
     await waitFor(() => expect(screen.queryByRole('group', { name: 'Test hebdo — test de cours' })).toBeNull());
@@ -133,7 +132,7 @@ describe('accueil simplifié — continuité et consolidations', () => {
     expect(saved.courseTestLog[0]).toMatchObject({
       testId: 't1', score: 14, maxScore: 20, ratio: 0.7, closedBook: true,
     });
-    expect(saved.courseTests[0].scheduledFor).toBe(addDays(todayISO(), 10));
+    expect(saved.courseTests[0].scheduledFor).toBe(addDays(todayISO(), 3));
     expect(saved.reviewLog).toHaveLength(0);
   });
 });

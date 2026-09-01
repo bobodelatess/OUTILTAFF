@@ -1686,9 +1686,9 @@ export default function Cadence() {
     courseTestLog: (p.courseTestLog || []).filter((entry) => entry.testId !== id),
     deleted: markDeleted(p.deleted, 'courseTests', [id], today),
   }));
-  const recordCourseTest = (testId, score, maxScore, closedBook) => {
-    if (!closedBook || !Number.isFinite(score) || !Number.isFinite(maxScore)
-      || maxScore <= 0 || score < 0 || score > maxScore) return;
+  const recordCourseTest = (testId, score) => {
+    const maxScore = 20;
+    if (!Number.isFinite(score) || score < 0 || score > maxScore) return;
     const currentTest = courseTests.find((item) => item.id === testId);
     if (!currentTest) return;
     const ratio = score / maxScore;
@@ -2065,12 +2065,8 @@ function ContinuityCard({ subject, chapter, allocation, today, onSetPosition, on
 
 function CourseTestCard({ test, subject, latestResult, today, onRecord }) {
   const [scoreText, setScoreText] = useState('');
-  const [maxText, setMaxText] = useState('20');
-  const [closedBook, setClosedBook] = useState(false);
   const score = Number(scoreText);
-  const maxScore = Number(maxText);
-  const valid = scoreText !== '' && maxText !== '' && Number.isFinite(score)
-    && Number.isFinite(maxScore) && maxScore > 0 && score >= 0 && score <= maxScore && closedBook;
+  const valid = scoreText !== '' && Number.isFinite(score) && score >= 0 && score <= 20;
   const overdue = Math.max(0, daysBetween(test.scheduledFor, today));
   return (
     <div className="cad-card" role="group" aria-label={`${test.name} — test de cours`} style={{
@@ -2094,7 +2090,8 @@ function CourseTestCard({ test, subject, latestResult, today, onRecord }) {
         )}
       </div>
       <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint }}>
-        Fais le test sans cours ni correction, puis saisis seulement le résultat réel.
+        CADENCE ne génère aucune question. Compose et corrige toi-même le test sur ce périmètre,
+        sans support, puis saisis uniquement ta note sur 20.
       </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <input type="number" min="0" step="0.25" value={scoreText} onChange={(event) => setScoreText(event.target.value)}
@@ -2102,17 +2099,8 @@ function CourseTestCard({ test, subject, latestResult, today, onRecord }) {
             width: 76, fontFamily: MONO, fontSize: 13, color: C.text, background: C.inset,
             border: `1px solid ${C.line2}`, borderRadius: 7, padding: '7px 8px',
           }} />
-        <span style={{ color: C.faint }}>/</span>
-        <input type="number" min="0.25" step="0.25" value={maxText} onChange={(event) => setMaxText(event.target.value)}
-          aria-label={`barème pour ${test.name}`} style={{
-            width: 76, fontFamily: MONO, fontSize: 13, color: C.text, background: C.inset,
-            border: `1px solid ${C.line2}`, borderRadius: 7, padding: '7px 8px',
-          }} />
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontFamily: SANS, fontSize: 12, color: C.dim }}>
-          <input type="checkbox" checked={closedBook} onChange={(event) => setClosedBook(event.target.checked)} />
-          sans cours ni corrigé
-        </label>
-        <Btn variant="primary" disabled={!valid} onClick={() => onRecord(test.id, score, maxScore, closedBook)}>
+        <Mono style={{ color: C.dim, fontSize: 13 }}>/ 20</Mono>
+        <Btn variant="primary" disabled={!valid} onClick={() => onRecord(test.id, score)}>
           <Check size={14} /> Enregistrer la note
         </Btn>
       </div>
@@ -2136,6 +2124,7 @@ function ReviewUnitCard({ item, subject, parent, today, onGrade, onUseDoc }) {
         <span style={{ fontFamily: SANS, fontSize: 13.5, fontWeight: 700 }}>{subject?.name}</span>
         <span style={{ fontFamily: SANS, fontSize: 12, color: C.dim }}>{parent?.name}</span>
         {info.pressureFactor > 1 && <Chip color={C.warn}>pression {info.exam?.name} ×{f2(info.pressureFactor)}</Chip>}
+        <Chip color={C.dim}>≈ {fmtMinutes(unit.minutes?.recall ?? 17)}</Chip>
         <Chip color={info.overdueDays ? C.warn : C.accent} style={{ marginLeft: 'auto' }}>{timing}</Chip>
       </div>
       <div style={{ fontFamily: MONO, fontSize: 12, color: C.text }}>{unit.name}</div>
@@ -2225,14 +2214,14 @@ function TodayView({
       </section>
 
       <section>
-        <SectionTitle icon={FlaskConical}>Tests de cours</SectionTitle>
+        <SectionTitle icon={FlaskConical}>Rappels de tests de cours</SectionTitle>
         {(courseTestsDue || []).length === 0 && (testSuggestions || []).length === 0 ? (
           <div style={{
             display: 'flex', alignItems: 'center', gap: 10, padding: '14px 15px',
             border: `1px solid rgba(52,211,153,.3)`, borderRadius: 9, background: 'rgba(52,211,153,.05)',
           }}>
             <Check size={17} color={C.good} />
-            <span style={{ fontFamily: SANS, fontSize: 13, color: C.dim }}>Aucun test de cours dû aujourd’hui.</span>
+            <span style={{ fontFamily: SANS, fontSize: 13, color: C.dim }}>Aucun test de cours à faire aujourd’hui.</span>
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -2248,11 +2237,11 @@ function TodayView({
               }}>
                 <Pastille color={suggestion.subject.color} />
                 <span style={{ fontFamily: SANS, fontSize: 12.5 }}>
-                  <b>{suggestion.subject.name}</b> · {suggestion.count} nouvelles sections sans test noté
+                  <b>{suggestion.subject.name}</b> · {suggestion.count} nouvelles sections à regrouper dans un test
                 </span>
                 <Btn variant="bare" onClick={() => onGoSubjects({ subjectId: suggestion.subject.id, target: 'test-add' })}
                   style={{ marginLeft: 'auto', color: C.accent, fontSize: 12 }}>
-                  Planifier un test
+                  Suivre ce périmètre
                 </Btn>
               </div>
             ))}
@@ -2998,9 +2987,9 @@ function CalendarView({ today, exams, courseTests, subjectById, settings, upcomi
         </div>
 
         <div>
-          <SectionTitle icon={FlaskConical}>Tests de cours planifiés</SectionTitle>
+          <SectionTitle icon={FlaskConical}>Rappels de tests de cours</SectionTitle>
           {upcomingTests.length === 0 ? (
-            <Empty>Aucun test planifié. Ils se créent dans Matières et sont replanifiés après chaque note réelle.</Empty>
+            <Empty>Aucun rappel planifié. CADENCE indique seulement quand refaire le même périmètre ; il ne génère pas le test.</Empty>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
               {upcomingTests.map((test) => (
@@ -3415,11 +3404,12 @@ function SubjectsView({
                   )}
                 </div>
 
-                {/* Tests de cours : un élément stable, replanifié après chaque note. */}
+                {/* Rappels uniquement : le contenu du test reste géré par l'utilisateur. */}
                 <div>
-                  <SectionTitle icon={RefreshCw}>Tests de cours notés</SectionTitle>
+                  <SectionTitle icon={RefreshCw}>Rappels de tests de cours</SectionTitle>
                   <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, margin: '-3px 0 9px' }}>
-                    Le même test est réutilisé : une note réelle sans support fixe sa prochaine date. Elle ne remplace pas l’auto-évaluation des portions.
+                    CADENCE ne génère aucune question. Tu gères le test, tu saisis ta note sur 20,
+                    puis le même périmètre revient 1 à 4 jours plus tard selon le résultat.
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
                     {subTests.map((test) => {
@@ -3629,7 +3619,7 @@ function AddCourseTest({ subjectId, today, chapters, units, onAdd }) {
   };
   if (!open) return (
     <Btn variant="bare" onClick={() => setOpen(true)} style={{ color: C.accent, paddingLeft: 0 }}>
-      <Plus size={14} /> Planifier un test de cours
+      <Plus size={14} /> Ajouter un rappel de test
     </Btn>
   );
   return (
@@ -3651,7 +3641,7 @@ function AddCourseTest({ subjectId, today, chapters, units, onAdd }) {
         onNone={() => { setChapterIds([]); setPortionIds([]); }} />
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         <Btn variant="primary" onClick={add} disabled={!name.trim() || chapterIds.length + portionIds.length === 0}>
-          <Plus size={14} /> Créer le test
+          <Plus size={14} /> Suivre ce périmètre
         </Btn>
         <Btn variant="bare" onClick={() => setOpen(false)} style={{ color: C.faint }}>annuler</Btn>
       </div>
