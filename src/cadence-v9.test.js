@@ -36,7 +36,7 @@ const chapter = (id = 'c1', subjectId = 's1') => ({
   exercise: emptyPractice(), problem: emptyPractice(), minutes: { ...AXIS_MINUTES },
 });
 const state = (over = {}) => ({
-  version: 11, subjects: [SUBJECT], chapters: [chapter()], exams: [],
+  version: 12, subjects: [SUBJECT], chapters: [chapter()], exams: [],
   courseTests: [], courseTestLog: [], settings: S, parallelLog: {}, reviewLog: [],
   archivedReviews: [], skips: {}, capacityOverrides: {}, examDebriefs: {},
   deleted: emptyDeleted(), syncMeta: null, lastExportAt: null, ...over,
@@ -232,7 +232,7 @@ describe('v8 → v11', () => {
     delete old.subjects[0].dailyMinutes;
     delete old.subjects[0].minimumMinutes;
     const migrated = normalize(old, TODAY);
-    expect(migrated.version).toBe(11);
+    expect(migrated.version).toBe(12);
     expect(migrated.subjects[0]).toMatchObject({ dailyMinutes: 120, minimumMinutes: 60 });
     expect(migrated.chapters[0].status).toBe('current');
     expect(migrated.courseTests).toEqual([]);

@@ -110,13 +110,23 @@ CADENCE distingue les compteurs de production des preuves de maîtrise. Une case
 
 - Pour chaque matière, les objectifs par défaut sont cinq exercices réellement terminés par jour et deux annales complètes réellement traitées par semaine. Ces objectifs restent modifiables dans CADENCE.
 - Ne modifie un compteur que si les conversations montrent explicitement combien d’exercices ou d’annales j’ai réellement terminés. N’infère rien à partir du temps travaillé, d’un énoncé simplement lu ou d’une correction consultée.
-- L’objectif de trois tests de connaissances par semaine est calculé uniquement à partir des tests de cours réellement réalisés et enregistrés avec une note sur 20. Ne coche jamais ce compteur manuellement et ne crée jamais un résultat pour remplir le quota.
+- L’objectif de trois tests de connaissances par semaine est indicatif et calculé uniquement à partir des tests de cours réellement réalisés et enregistrés avec une note sur 20. Il ne doit déclencher aucun test lorsqu’aucun périmètre n’est dû selon CADENCE.
+- Ne coche jamais ce compteur manuellement et ne crée jamais un résultat pour remplir l’objectif.
 - Le contenu des tests reste exclusivement composé et corrigé par moi, y compris lorsqu’un objectif hebdomadaire n’est pas atteint.
 - Utilise l’« entretien régulier » pour les sources et compétences qui doivent revenir périodiquement : exercices du poly de Fermat, exercices de concours, exercices originaux créés avec ChatGPT, exercices des livres clés, démonstrations à comprendre et savoir refaire, exercices de tête et de réflexion, quiz de rappel, ou autre routine pertinente.
 - Un quiz de rappel coché dans l’entretien ne compte pas comme test de connaissances noté, sauf si j’indique explicitement l’avoir composé, réalisé sans support, corrigé et noté sur 20 selon les règles précédentes.
 - Active une routine seulement dans les matières où elle est réellement adaptée. Pour les livres clés, crée une routine distincte par livre explicitement identifié ; n’invente aucun titre.
 - Marque une routine « faite aujourd’hui » uniquement si sa réalisation est explicitement attestée. Sinon, laisse-la due.
 - Une routine n’est jamais cochée définitivement : CADENCE calcule sa prochaine échéance à partir de la fréquence choisie et de la dernière réalisation réelle.
+
+### Habitudes transversales
+
+Ces habitudes sont globales : elles ne sont rattachées à aucune matière et ne constituent aucune preuve de maîtrise.
+
+- Le traqueur contient un oral d’exercices préparés par semaine, de l’anglais chaque jour, quinze minutes de lecture économique chaque matin au réveil et deux séances de musculation par semaine.
+- Pour l’anglais, une vidéo, une lecture matinale ou une autre exposition active réellement effectuée peut valider la journée.
+- Ne valide une habitude que si sa réalisation apparaît explicitement dans les conversations. Ne l’infère jamais à partir d’une intention, d’un emploi du temps ou d’un simple objectif.
+- Ne transforme pas la lecture du soir en case obligatoire. Elle reste dans les « Repères souples », sans quota, série, retard ni validation quotidienne.
 
 ### Vérification
 
@@ -146,6 +156,7 @@ La trace détaillée de la séance doit rester dans le PDF. CADENCE sert uniquem
 - les résultats réellement enregistrés ;
 - les compteurs d’exercices et d’annales réellement modifiés ;
 - les routines d’entretien créées, modifiées ou marquées comme faites ;
+- les habitudes transversales réellement enregistrées, sans déduire celles qui ne sont pas explicites ;
 - la confirmation que les liens PDF fonctionnent et que CADENCE est synchronisé ;
 - les éventuels blocages techniques ou améliorations proposées.
 

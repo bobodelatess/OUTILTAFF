@@ -34,7 +34,7 @@
 import {
   DELETABLE, LEVELS, DEFAULT_SETTINGS, levelSeed, applyRecall, applyPractice,
   applySelfAssessment, emptyPractice, emptyDeleted, evidenceAxis, uid, normDocs,
-  REVIEW_INTEGRATION_SUCCESS_STREAK,
+  REVIEW_INTEGRATION_SUCCESS_STREAK, HABIT_KEYS,
 } from './engine.js';
 
 // Documents : UNION par identifiant, comme le journal. Ajouter un document sur
@@ -286,6 +286,8 @@ export function mergeStates(a, b) {
   const routineLog = sortEntries(unionEntries(a.routineLog, b.routineLog)
     .filter((entry) => subjectIds.has(entry.subjectId))
     .filter((entry) => entry.kind !== 'maintenance' || routineItemIds.has(entry.itemId)));
+  const habitLog = sortEntries(unionEntries(a.habitLog, b.habitLog)
+    .filter((entry) => HABIT_KEYS.includes(entry.habitKey)));
 
   const eventsByChapter = new Map();
   for (const r of reviewLog) {
@@ -319,6 +321,7 @@ export function mergeStates(a, b) {
     courseTestLog,
     routineItems,
     routineLog,
+    habitLog,
     chapters: chapters.map((c) => rebuildAxes(c, eventsByChapter.get(c.id) || [], settings)),
     settings,
     reviewLog,
@@ -375,6 +378,7 @@ export function isPristine(state) {
     && (state.courseTestLog?.length ?? 0) === 0
     && (state.routineItems?.length ?? 0) === 0
     && (state.routineLog?.length ?? 0) === 0
+    && (state.habitLog?.length ?? 0) === 0
     && (state.reviewLog?.length ?? 0) === 0
     && (state.archivedReviews?.length ?? 0) === 0;
 }

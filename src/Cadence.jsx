@@ -45,6 +45,7 @@ import {
   ROUTINE_ITEM_PRESETS, ROUTINE_INTERVAL_CHOICES, ROUTINE_TARGET_MAX,
   ROUTINE_ITEM_LABEL_MAX, normRoutineTargets, newRoutineItem, newRoutineEvent,
   subjectRoutineProgress, routineItemInfo,
+  HABIT_KEYS, newHabitEvent, habitEventCount, habitTrackerProgress, habitDailyHistory,
 } from './engine.js';
 import { stampState, contentSignature, newDeviceId } from './sync.js';
 import { getDeviceId } from './remote.js';
@@ -1360,7 +1361,7 @@ export default function Cadence() {
   }, []);
   const {
     subjects, chapters, exams, courseTests = [], courseTestLog = [],
-    routineItems = [], routineLog = [],
+    routineItems = [], routineLog = [], habitLog = [],
     settings, reviewLog, examDebriefs, lastExportAt,
   } = state;
   const studyChapters = useMemo(() => chapters.filter((c) => !isReviewUnit(c)), [chapters]);
@@ -1858,6 +1859,30 @@ export default function Cadence() {
     deleted: markDeleted(p.deleted, 'routineItems', [id], today),
   }));
 
+  const adjustHabitCounter = (habitKey, delta) => {
+    if (!HABIT_KEYS.includes(habitKey) || !delta) return;
+    patch((p) => {
+      const start = habitKey === 'preparedOral' || habitKey === 'strengthTraining'
+        ? mondayOf(today) : today;
+      const done = habitEventCount(p.habitLog || [], habitKey, start, today);
+      if (delta < 0 && done <= 0) return p;
+      return {
+        ...p,
+        habitLog: [...(p.habitLog || []), newHabitEvent(habitKey, today, delta)],
+      };
+    });
+  };
+  const toggleDailyHabit = (habitKey) => {
+    if (!HABIT_KEYS.includes(habitKey)) return;
+    patch((p) => {
+      const done = habitEventCount(p.habitLog || [], habitKey, today, today);
+      const events = done > 0
+        ? Array.from({ length: done }, () => newHabitEvent(habitKey, today, -1))
+        : [newHabitEvent(habitKey, today, 1)];
+      return { ...p, habitLog: [...(p.habitLog || []), ...events] };
+    });
+  };
+
   const updateSetting = (key, value) => patch((p) => ({ ...p, settings: { ...p.settings, [key]: value } }));
 
   // Import : validation stricte (liste d'erreurs) + confirmation avant
@@ -2091,9 +2116,10 @@ export default function Cadence() {
           {tab === 'routines' && (
             <RoutinesView today={today} subjects={coreSubjects}
               courseTests={courseTests} courseTestLog={courseTestLog}
-              routineItems={routineItems} routineLog={routineLog}
+              routineItems={routineItems} routineLog={routineLog} habitLog={habitLog}
               onUpdateTarget={updateRoutineTarget}
               onAdjustCounter={adjustRoutineCounter}
+              onAdjustHabit={adjustHabitCounter} onToggleDailyHabit={toggleDailyHabit}
               onAddItem={addRoutineItem} onUpdateItem={updateRoutineItem}
               onToggleItem={toggleRoutineItemToday} onDeleteItem={deleteRoutineItem}
               onGoSubjects={goToSubjects} />
@@ -3346,9 +3372,77 @@ function AddRoutineItem({ subjectId, activeLabels, onAdd }) {
   );
 }
 
+function HabitTracker({ today, habitLog, onAdjust, onToggleDaily }) {
+  const habits = habitTrackerProgress(habitLog, today);
+  return (
+    <section className="cad-card" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 11, padding: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 5 }}>
+        <Activity size={15} color={C.accent} />
+        <h2 style={{ fontFamily: SANS, fontSize: 16, margin: 0 }}>Habitudes transversales</h2>
+        <Chip color={C.dim}>global</Chip>
+      </div>
+      <p style={{ fontFamily: SANS, fontSize: 11.5, color: C.dim, lineHeight: 1.55, margin: '0 0 11px' }}>
+        Elles sont indépendantes des matières et de la maîtrise. Valide uniquement ce qui a réellement été fait.
+      </p>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(210px,1fr))', gap: 9 }}>
+        {habits.map((habit) => {
+          const complete = habit.done >= habit.target;
+          const progress = clamp((habit.done / habit.target) * 100, 0, 100);
+          const history = habit.period === 'day'
+            ? habitDailyHistory(habitLog, habit.key, today) : [];
+          return (
+            <div key={habit.key} role="group" aria-label={`${habit.label} — habitude`}
+              style={{ padding: 11, borderRadius: 9, background: C.panel2, border: `1px solid ${C.line}` }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontFamily: SANS, fontSize: 12.5, fontWeight: 700 }}>{habit.label}</div>
+                  <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, marginTop: 3, lineHeight: 1.35 }}>{habit.detail}</div>
+                </div>
+                <Mono style={{ color: complete ? C.good : C.text, fontSize: 14 }}>{habit.done}/{habit.target}</Mono>
+              </div>
+              <div style={{ height: 5, background: C.inset, borderRadius: 3, margin: '9px 0', overflow: 'hidden', border: `1px solid ${C.line}` }}>
+                <div className="cad-bar" style={{ width: `${progress}%`, height: '100%', background: complete ? C.good : C.accent, opacity: .8 }} />
+              </div>
+              {habit.period === 'day' ? (
+                <>
+                  <div aria-label={`Sept derniers jours — ${habit.label}`} style={{ display: 'flex', gap: 5, marginBottom: 9 }}>
+                    {history.map((day) => (
+                      <span key={day.date} title={`${day.date.split('-').reverse().join('/')} — ${day.done ? 'fait' : 'non fait'}`}
+                        style={{ flex: 1, minWidth: 12, height: 7, borderRadius: 4, background: day.done ? C.good : C.inset, border: `1px solid ${day.done ? C.good : C.line2}` }} />
+                    ))}
+                  </div>
+                  <Btn variant={habit.done ? 'bare' : 'primary'} onClick={() => onToggleDaily(habit.key)} style={{ width: '100%', justifyContent: 'center', fontSize: 11.5 }}>
+                    {habit.done ? <><Undo2 size={12} /> annuler aujourd’hui</> : <><Check size={12} /> fait aujourd’hui</>}
+                  </Btn>
+                </>
+              ) : (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                  <IconBtn icon={Minus} title={habit.done > 0 ? `Retirer une réalisation — ${habit.label}` : `Aucune réalisation à retirer — ${habit.label}`}
+                    onClick={() => { if (habit.done > 0) onAdjust(habit.key, -1); }} />
+                  <IconBtn icon={Plus} title={`Ajouter une réalisation — ${habit.label}`} onClick={() => onAdjust(habit.key, 1)} />
+                  <span style={{ marginLeft: 'auto', fontFamily: SANS, fontSize: 10.5, color: C.faint }}>cette semaine</span>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ marginTop: 12, padding: '10px 11px', borderRadius: 9, background: C.inset, border: `1px dashed ${C.line2}` }}>
+        <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint, textTransform: 'uppercase', letterSpacing: '.08em' }}>
+          Repères souples — sans case ni série
+        </div>
+        <ul style={{ margin: '7px 0 0', paddingLeft: 18, fontFamily: SANS, fontSize: 12, color: C.dim }}>
+          <li><span style={{ color: C.text, fontWeight: 650 }}>Lire le soir</span> — contenu et durée libres ; simple invitation à ralentir avant de dormir.</li>
+        </ul>
+      </div>
+    </section>
+  );
+}
+
 function RoutinesView({
-  today, subjects, courseTests, courseTestLog, routineItems, routineLog,
+  today, subjects, courseTests, courseTestLog, routineItems, routineLog, habitLog,
   onUpdateTarget, onAdjustCounter, onAddItem, onUpdateItem, onToggleItem, onDeleteItem,
+  onAdjustHabit, onToggleDailyHabit,
   onGoSubjects,
 }) {
   const weekStart = mondayOf(today);
@@ -3365,6 +3459,9 @@ function RoutinesView({
           semaine du {weekStart.split('-').reverse().join('/')} au {weekEnd.split('-').reverse().join('/')}
         </Mono>
       </div>
+
+      <HabitTracker today={today} habitLog={habitLog}
+        onAdjust={onAdjustHabit} onToggleDaily={onToggleDailyHabit} />
 
       {subjects.length === 0 ? <Empty>Aucune matière de cours à suivre.</Empty> : subjects.map((subject) => {
         const progress = subjectRoutineProgress(subject, routineLog, courseTests, courseTestLog, today);
