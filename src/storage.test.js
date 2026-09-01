@@ -37,7 +37,7 @@ describe('persistance sûre', () => {
 
     expect(loaded.writeBlocked).toBe(false);
     expect(loaded.notice.code).toBe('recovered');
-    expect(loaded.state.version).toBe(8);
+    expect(loaded.state.version).toBe(9);
     expect(store.getItem(STORAGE_KEY)).toBe(futureRaw);
     expect(JSON.parse(store.getItem(QUARANTINE_KEY)).raw).toBe(futureRaw);
   });

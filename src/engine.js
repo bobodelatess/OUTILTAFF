@@ -1,7 +1,7 @@
 /*
  * Moteur CADENCE — fonctions pures, sans React.
  *
- * v8 : le chapitre reste le repère stable ; chaque ajout quotidien daté crée
+ * v9 : le chapitre reste le repère stable ; chaque ajout quotidien daté crée
  * une unité de reprise interne avec son propre état de rappel.
  *
  * Le moteur conserve aussi les trois axes de preuve INDÉPENDANTS historiques,
@@ -17,20 +17,23 @@
  *     score/risque HEURISTIQUE fondé sur : résultats observés, nombre de
  *     tentatives, récence, répétition des erreurs. À présenter comme tel.
  *
- * Schéma v8 (champs principaux)
- *   Subject  = { id, name, color, type: 'core'|'parallel', weeklyFloor? }
+ * Schéma v9 (champs principaux)
+ *   Subject  = { id, name, color, type: 'core'|'parallel', weeklyFloor?,
+ *                dailyMinutes?, minimumMinutes? }
  *   Chapter  = { id, subjectId, name, position, positionUpdatedAt, docs[],
  *                recall:   { stability, difficulty, lastReviewed, source? },
  *                exercise: { score: 0..1|null, attempts, lastTested, recentFails },
  *                problem:  { score: 0..1|null, attempts, lastTested, recentFails },
  *                minutes:  { recall, exercise, problem } }
- *   Exam     = { id, subjectId, name, date, chapterIds[], importance }
+ *   Exam     = { id, subjectId, name, date, chapterIds[], portionIds[], importance }
  *   Review   = { id, chapterId, date, grade: 1..4, evidenceType,
- *                before, after }               // before/after = snapshot de l'axe
+ *                masteryLevel?: 0..4, before, after }
  *   ReviewUnit = Chapter & { reviewUnit:true, parentChapterId, introducedAt,
  *                            kind:'resource', axes:['recall'] }
- *   State    = { version: 8, subjects, chapters, exams, settings, parallelLog,
- *                reviewLog, archivedReviews, skips, capacityOverrides, lastExportAt }
+ *   CourseTest = { id, subjectId, name, scheduledFor, chapterIds[], portionIds[] }
+ *   CourseTestResult = { id, testId, date, score, maxScore, ratio, closedBook:true }
+ *   State    = { version: 9, subjects, chapters, exams, courseTests,
+ *                courseTestLog, settings, reviewLog, ... }
  */
 
 /* ================================================================== *
@@ -40,19 +43,19 @@
 export const STORAGE_KEY = 'cadence.v2'; // clé stable ; la version vit DANS l'état
 export const LEGACY_KEY = 'cadence.v1';
 export const BACKUP_KEY = 'cadence.backups';
-export const SCHEMA_VERSION = 8;
-export const KNOWN_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8];
+export const SCHEMA_VERSION = 9;
+export const KNOWN_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 // v5 — synchronisation multi-appareils :
 //   syncMeta = { deviceId, updatedAt (ms), rev }   qui a modifié en dernier
 //   deleted  = { subjects:{id:date}, chapters:{…}, exams:{…} }
 // Les pierres tombales sont indispensables : sans elles, fusionner deux
 // appareils ressusciterait ce que l'un des deux vient de supprimer.
-export const DELETABLE = ['subjects', 'chapters', 'exams'];
+export const DELETABLE = ['subjects', 'chapters', 'exams', 'courseTests'];
 export const TOMBSTONE_DAYS = 180;
 
 export function emptyDeleted() {
-  return { subjects: {}, chapters: {}, exams: {} };
+  return { subjects: {}, chapters: {}, exams: {}, courseTests: {} };
 }
 
 export function markDeleted(deleted, kind, ids, today) {
@@ -97,6 +100,18 @@ export const GRADES = {
   3: { key: 3, label: 'Réussi', color: '#34d399' },
   4: { key: 4, label: 'Facile', color: '#38bdf8' },
 };
+
+// Auto-évaluation d'une portion réellement reprise. Il y a cinq niveaux
+// visibles, mais ils restent distincts des quatre issues FSRS historiques.
+// `grade` sert au moteur ; `targetDays` rend l'effet des cinq choix réellement
+// différent et compréhensible dans l'interface.
+export const MASTERY_LEVELS = [
+  { level: 0, label: 'Oublié', grade: 1, targetDays: 1 },
+  { level: 1, label: 'Très fragile', grade: 2, targetDays: 2 },
+  { level: 2, label: 'Fragile', grade: 2, targetDays: 3 },
+  { level: 3, label: 'Maîtrisé', grade: 3, targetDays: 10 },
+  { level: 4, label: 'Très solide', grade: 4, targetDays: 25 },
+];
 
 // Les trois AXES de preuve (+ metadata). L'ordre = ordre pédagogique
 // (apprendre le cours -> savoir l'appliquer -> savoir transférer).
@@ -300,11 +315,30 @@ export const WORTH_EXAM_FACTOR = 1.15;
 // ce qui a été constaté (axe problème/annale) — l'épreuve EST un test réel.
 export const DEBRIEF_WINDOW = 3;
 
+// Répartition quotidienne : 2 h par matière au régime normal, avec 1 h
+// protégée lors d'un rééquilibrage temporaire avant examen. Ces valeurs sont
+// modifiables matière par matière et la somme normale reste constante.
+export const SUBJECT_DAILY_MINUTES = 120;
+export const SUBJECT_PROTECTED_MINUTES = 60;
+
+// Un test de cours est un élément stable et récurrent. Sa prochaine date
+// dépend uniquement du score réellement saisi sans support.
+export const COURSE_TEST_INTERVALS = [
+  { below: 0.5, days: 1 },
+  { below: 0.7, days: 3 },
+  { below: 0.85, days: 10 },
+  { below: Infinity, days: 24 },
+];
+export const COURSE_TEST_PORTION_THRESHOLD = 5;
+export const COURSE_TEST_MAX_NEW_DAYS = 7;
+
 // Bornes acceptées à l'import (garde-fous, pas des réglages).
 export const IMPORT_BOUNDS = {
   axisMinutes: [5, 480],   // durée d'un axe par chapitre
   dayMinutes: [0, 1440],   // capacité d'une journée
   weeklyFloor: [0, 50],    // minimum hebdo d'une matière parallèle
+  subjectMinutes: [0, 720],
+  testScore: [0, 10000],
 };
 
 /* ================================================================== *
@@ -421,6 +455,35 @@ export function applyRecall(recall, initialLevel, grade, date) {
   return { stability, difficulty: nextDifficulty(D, grade), lastReviewed: date };
 }
 
+function stabilityForInterval(days, retention) {
+  const perUnit = optimalInterval(1, retention);
+  return clamp(days / Math.max(0.0001, perUnit), S_MIN, S_MAX);
+}
+
+// Cinq niveaux d'auto-évaluation, uniquement après une restitution réelle.
+// Les niveaux 0–2 resserrent explicitement la prochaine reprise ; les niveaux
+// 3–4 posent un minimum puis laissent FSRS allonger l'intervalle avec l'historique.
+export function applySelfAssessment(chapter, masteryLevel, date, settings = DEFAULT_SETTINGS) {
+  const choice = MASTERY_LEVELS.find((item) => item.level === masteryLevel);
+  if (!choice) throw new Error('Niveau de maîtrise inconnu.');
+  const before = { ...chapter.recall };
+  const base = applyRecall(chapter.recall, chapter.initialLevel, choice.grade, date);
+  const baseDays = Math.max(1, optimalInterval(base.stability, settings.requestRetention));
+  let nextDays;
+  if (choice.level === 0) nextDays = 1;
+  else if (choice.level <= 2) nextDays = clamp(baseDays, choice.level, choice.targetDays);
+  else nextDays = Math.max(baseDays, choice.targetDays);
+  const after = {
+    ...base,
+    stability: stabilityForInterval(nextDays, settings.requestRetention),
+    source: 'self-assessed',
+  };
+  return {
+    chapter: { ...chapter, recall: after },
+    axis: 'recall', before, after, grade: choice.grade, masteryLevel: choice.level,
+  };
+}
+
 /* ================================================================== *
  *  Axes PRATIQUES — score heuristique transparent (exercice / problème)
  * ================================================================== */
@@ -499,16 +562,81 @@ export function examMultiplier(j, s, importance = 'normal') {
   return Math.max(1, 1 + (base - 1) * w);
 }
 
+export function examHasScope(exam) {
+  return (exam?.chapterIds?.length || 0) > 0 || (exam?.portionIds?.length || 0) > 0;
+}
+
+// Un chapitre entier couvre implicitement toutes ses portions. Une portion
+// peut aussi être ciblée seule sans faire pression sur tout le chapitre.
+export function examCoversItem(exam, item) {
+  if (!exam || !item) return false;
+  if ((exam.chapterIds || []).includes(item.id)) return true;
+  if (isReviewUnit(item)) {
+    return (exam.chapterIds || []).includes(item.parentChapterId)
+      || (exam.portionIds || []).includes(item.id);
+  }
+  return false;
+}
+
 export function chapterExamFactor(chapter, exams, s, today) {
   let factor = 1, exam = null, examDays = null;
   for (const ex of exams) {
-    if (!ex.chapterIds || !ex.chapterIds.includes(chapter.id)) continue;
+    if (!examCoversItem(ex, chapter)) continue;
     const j = daysBetween(today, ex.date);
     if (j < 0) continue;
     const mult = examMultiplier(j, s, ex.importance || 'normal');
     if (mult > factor) { factor = mult; exam = ex; examDays = j; }
   }
   return { factor, exam, examDays };
+}
+
+export function subjectExamPressure(subjectId, exams, s, today) {
+  let factor = 1, exam = null, days = null;
+  for (const ex of exams || []) {
+    if (ex.subjectId !== subjectId || !examHasScope(ex)) continue;
+    const j = daysBetween(today, ex.date);
+    if (j < 0) continue;
+    const mult = examMultiplier(j, s, ex.importance || 'normal');
+    if (mult > factor) { factor = mult; exam = ex; days = j; }
+  }
+  return { factor, exam, days };
+}
+
+// Répartit un total fixe (= somme des durées normales) entre les matières.
+// Les minimums restent protégés ; seule la part flexible suit la pression.
+// Sans examen actif, chaque matière retrouve exactement sa durée normale.
+export function allocateSubjectMinutes(subjects, exams, settings, today) {
+  const core = (subjects || []).filter((subject) => subject.type === 'core');
+  if (!core.length) return [];
+  const rows = core.map((subject) => {
+    const base = Math.round(clamp(
+      Number.isFinite(subject.dailyMinutes) ? subject.dailyMinutes : SUBJECT_DAILY_MINUTES,
+      IMPORT_BOUNDS.subjectMinutes[0], IMPORT_BOUNDS.subjectMinutes[1],
+    ));
+    const minimum = Math.round(clamp(
+      Number.isFinite(subject.minimumMinutes) ? subject.minimumMinutes : SUBJECT_PROTECTED_MINUTES,
+      0, base,
+    ));
+    return { subject, base, minimum, ...subjectExamPressure(subject.id, exams, settings, today) };
+  });
+  const total = rows.reduce((sum, row) => sum + row.base, 0);
+  const protectedTotal = rows.reduce((sum, row) => sum + row.minimum, 0);
+  const flexible = Math.max(0, total - protectedTotal);
+  const weightedTotal = rows.reduce(
+    (sum, row) => sum + Math.max(0, row.base - row.minimum) * row.factor, 0,
+  );
+  const raw = rows.map((row) => ({
+    ...row,
+    rawMinutes: row.minimum + (weightedTotal > 0
+      ? flexible * Math.max(0, row.base - row.minimum) * row.factor / weightedTotal
+      : 0),
+  }));
+  const floors = raw.map((row) => Math.floor(row.rawMinutes));
+  let remainder = total - floors.reduce((sum, value) => sum + value, 0);
+  const order = raw.map((row, index) => ({ index, fraction: row.rawMinutes - floors[index] }))
+    .sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+  for (let i = 0; i < remainder; i++) floors[order[i % order.length].index] += 1;
+  return raw.map((row, index) => ({ ...row, minutes: floors[index], changed: floors[index] !== row.base }));
 }
 
 // Détail de l'axe rappel (urgence mémoire + rappel estimé).
@@ -534,7 +662,7 @@ export function isReviewUnit(chapter) {
 // Contrairement à un chapitre historique, une portion nouvelle n'est jamais
 // présentée comme « maîtrisée » ou « non maîtrisée ». Son premier rappel est
 // simplement exigible le lendemain ; la courbe ne démarre qu'après ce rappel.
-export function reviewUnitInfo(unit, s, today) {
+export function reviewUnitInfo(unit, s, today, exams = []) {
   const introducedAt = isValidISODate(unit?.introducedAt) ? unit.introducedAt : today;
   const rec = unit?.recall || {};
   if (!rec.lastReviewed) {
@@ -548,7 +676,9 @@ export function reviewUnitInfo(unit, s, today) {
       R: null,
     };
   }
-  const interval = Math.max(1, Math.round(optimalInterval(rec.stability, s.requestRetention)));
+  const baseInterval = Math.max(1, Math.round(optimalInterval(rec.stability, s.requestRetention)));
+  const pressure = chapterExamFactor(unit, exams, s, today);
+  const interval = Math.max(1, Math.round(baseInterval / Math.sqrt(pressure.factor)));
   const dueAt = addDays(rec.lastReviewed, interval);
   const since = Math.max(0, daysBetween(rec.lastReviewed, today));
   return {
@@ -556,7 +686,7 @@ export function reviewUnitInfo(unit, s, today) {
     dueAt,
     due: dueAt <= today,
     overdueDays: Math.max(0, daysBetween(dueAt, today)),
-    interval,
+    interval, baseInterval, pressureFactor: pressure.factor, exam: pressure.exam,
     since,
     R: retrievability(since, rec.stability),
   };
@@ -564,11 +694,11 @@ export function reviewUnitInfo(unit, s, today) {
 
 // Prévision dédiée aux portions. Les échéances déjà dépassées sont regroupées
 // aujourd'hui : le calendrier ne prétend pas qu'on peut réviser dans le passé.
-export function forecastReviewUnits(units, s, today, horizon = 28) {
+export function forecastReviewUnits(units, s, today, horizon = 28, exams = []) {
   const map = {};
   for (const unit of units || []) {
     if (!isReviewUnit(unit)) continue;
-    const info = reviewUnitInfo(unit, s, today);
+    const info = reviewUnitInfo(unit, s, today, exams);
     const date = info.dueAt < today ? today : info.dueAt;
     const offset = daysBetween(today, date);
     if (offset < 0 || offset > horizon) continue;
@@ -630,9 +760,14 @@ export function pendingDebriefs(exams, chapters, reviewLog, debriefs, today, win
     const daysAgo = daysBetween(ex.date, today);
     if (daysAgo < 1 || daysAgo > window) continue;
     if (debriefs && debriefs[ex.id]) continue;
-    const items = (ex.chapterIds || [])
+    const parentIds = new Set(ex.chapterIds || []);
+    for (const portionId of ex.portionIds || []) {
+      const portion = byId.get(portionId);
+      if (isReviewUnit(portion) && portion.parentChapterId) parentIds.add(portion.parentChapterId);
+    }
+    const items = [...parentIds]
       .map((id) => byId.get(id))
-      .filter(Boolean)
+      .filter((chapter) => chapter && !isReviewUnit(chapter))
       .map((chapter) => ({
         chapter,
         done: (reviewLog || []).some((r) => r.chapterId === chapter.id
@@ -659,6 +794,101 @@ export function nextFutureExam(subjectId, exams, today) {
 export function annalesModeFor(subjectId, exams, s, today) {
   const n = nextFutureExam(subjectId, exams, today);
   return n && n.days <= s.examModeThreshold ? n : null;
+}
+
+/* ================================================================== *
+ *  Tests de cours notés (stables, récurrents, sans support)
+ * ================================================================== */
+
+export function newCourseTest(subjectId, name, scheduledFor, chapterIds = [], portionIds = [], today = todayISO()) {
+  return {
+    id: uid(), subjectId, name,
+    scheduledFor: isValidISODate(scheduledFor) ? scheduledFor : today,
+    chapterIds: [...new Set(chapterIds)],
+    portionIds: [...new Set(portionIds)],
+    createdAt: today,
+  };
+}
+
+export function courseTestScopeItems(test, chapters) {
+  return (chapters || []).filter((item) => examCoversItem(test, item));
+}
+
+export function latestCourseTestResult(testId, courseTestLog) {
+  return (courseTestLog || []).filter((entry) => entry.testId === testId)
+    .slice().sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id))[0] || null;
+}
+
+export function courseTestBaseInterval(ratio) {
+  const safe = clamp(Number(ratio) || 0, 0, 1);
+  return COURSE_TEST_INTERVALS.find((band) => safe < band.below)?.days ?? 24;
+}
+
+export function scopesOverlap(a, b, chapters = []) {
+  const aChapters = new Set(a?.chapterIds || []);
+  const bChapters = new Set(b?.chapterIds || []);
+  if ([...aChapters].some((id) => bChapters.has(id))) return true;
+  const aPortions = new Set(a?.portionIds || []);
+  const bPortions = new Set(b?.portionIds || []);
+  if ([...aPortions].some((id) => bPortions.has(id))) return true;
+  const byId = new Map((chapters || []).map((item) => [item.id, item]));
+  for (const id of aPortions) {
+    const parent = byId.get(id)?.parentChapterId;
+    if (parent && bChapters.has(parent)) return true;
+  }
+  for (const id of bPortions) {
+    const parent = byId.get(id)?.parentChapterId;
+    if (parent && aChapters.has(parent)) return true;
+  }
+  return false;
+}
+
+// Le score fixe l'intervalle de base ; la pression d'une épreuve qui couvre
+// réellement le même périmètre le resserre. Après l'épreuve, ce facteur vaut 1.
+export function nextCourseTestDate(test, ratio, exams, settings, today, chapters = []) {
+  const baseDays = courseTestBaseInterval(ratio);
+  let factor = 1;
+  let relevantExam = null;
+  let examDays = null;
+  for (const exam of exams || []) {
+    if (exam.subjectId !== test.subjectId || !scopesOverlap(test, exam, chapters)) continue;
+    const days = daysBetween(today, exam.date);
+    if (days < 0) continue;
+    const candidate = examMultiplier(days, settings, exam.importance || 'normal');
+    if (candidate > factor) { factor = candidate; relevantExam = exam; examDays = days; }
+  }
+  let interval = Math.max(1, Math.round(baseDays / Math.sqrt(factor)));
+  if (examDays != null && examDays > 0) interval = Math.min(interval, Math.max(1, examDays - 2));
+  return { date: addDays(today, interval), interval, baseDays, factor, exam: relevantExam };
+}
+
+export function dueCourseTests(courseTests, today) {
+  return (courseTests || []).filter((test) => isValidISODate(test.scheduledFor)
+    && test.scheduledFor <= today && examHasScope(test))
+    .slice().sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor) || a.name.localeCompare(b.name));
+}
+
+// CADENCE propose un nouveau test quand plusieurs portions ne sont encore
+// couvertes par aucun test stable. La proposition est dérivée, jamais comptée
+// comme un test ni une révision tant que l'utilisateur ne la crée pas.
+export function courseTestSuggestions(subjects, chapters, courseTests, today) {
+  const units = (chapters || []).filter((item) => isReviewUnit(item) && item.introducedAt <= today);
+  const out = [];
+  for (const subject of (subjects || []).filter((item) => item.type === 'core')) {
+    const tests = (courseTests || []).filter((test) => test.subjectId === subject.id);
+    const uncovered = units.filter((unit) => unit.subjectId === subject.id
+      && !tests.some((test) => examCoversItem(test, unit)))
+      .sort((a, b) => a.introducedAt.localeCompare(b.introducedAt));
+    if (!uncovered.length) continue;
+    const age = daysBetween(uncovered[0].introducedAt, today);
+    if (uncovered.length < COURSE_TEST_PORTION_THRESHOLD
+      && !(uncovered.length >= 2 && age >= COURSE_TEST_MAX_NEW_DAYS)) continue;
+    out.push({
+      subject, portionIds: uncovered.map((unit) => unit.id), count: uncovered.length,
+      oldestAge: age,
+    });
+  }
+  return out;
 }
 
 // Étiquette d'axe + explication courte, selon l'axe dominant et le contexte.
@@ -804,7 +1034,7 @@ export function forecastDue(chapters, s, today, horizon = 28) {
 export function examReadiness(exam, chapters, s, today) {
   const j = daysBetween(today, exam.date);
   if (j < 0) return null;
-  const covered = chapters.filter((c) => (exam.chapterIds || []).includes(c.id));
+  const covered = chapters.filter((c) => examCoversItem(exam, c));
   if (!covered.length) return null;
   // Le rappel estimé ne porte que sur les éléments concernés par le rappel.
   const recallItems = covered.filter((c) => axisApplies(c, 'recall'));
@@ -909,10 +1139,14 @@ export function validateImport(obj) {
     const subjects = Array.isArray(obj.subjects) ? obj.subjects : [];
     const chapters = Array.isArray(obj.chapters) ? obj.chapters : [];
     const exams = Array.isArray(obj.exams) ? obj.exams : [];
+    const courseTests = Array.isArray(obj.courseTests) ? obj.courseTests : [];
+    const courseTestLog = Array.isArray(obj.courseTestLog) ? obj.courseTestLog : [];
     const reviews = Array.isArray(obj.reviewLog) ? obj.reviewLog : [];
     if (!Array.isArray(obj.subjects)) push('« subjects » manquant ou n’est pas une liste.');
     if (hasOwn(obj, 'chapters') && !Array.isArray(obj.chapters)) push('« chapters » doit être une liste.');
     if (hasOwn(obj, 'exams') && !Array.isArray(obj.exams)) push('« exams » doit être une liste.');
+    if (hasOwn(obj, 'courseTests') && !Array.isArray(obj.courseTests)) push('« courseTests » doit être une liste.');
+    if (hasOwn(obj, 'courseTestLog') && !Array.isArray(obj.courseTestLog)) push('« courseTestLog » doit être une liste.');
     if (hasOwn(obj, 'reviewLog') && !Array.isArray(obj.reviewLog)) push('« reviewLog » doit être une liste.');
 
     const subjectIds = new Set();
@@ -926,6 +1160,15 @@ export function validateImport(obj) {
       if (su.weeklyFloor != null && !(Number.isFinite(su.weeklyFloor)
         && su.weeklyFloor >= IMPORT_BOUNDS.weeklyFloor[0] && su.weeklyFloor <= IMPORT_BOUNDS.weeklyFloor[1])) {
         push(`Matière « ${safeName(su)} » : minimum hebdo hors bornes.`);
+      }
+      if (su.dailyMinutes != null && !(Number.isFinite(su.dailyMinutes)
+        && su.dailyMinutes >= IMPORT_BOUNDS.subjectMinutes[0] && su.dailyMinutes <= IMPORT_BOUNDS.subjectMinutes[1])) {
+        push(`Matière « ${safeName(su)} » : durée quotidienne normale hors bornes.`);
+      }
+      if (su.minimumMinutes != null && !(Number.isFinite(su.minimumMinutes)
+        && su.minimumMinutes >= 0
+        && su.minimumMinutes <= (su.dailyMinutes ?? SUBJECT_DAILY_MINUTES))) {
+        push(`Matière « ${safeName(su)} » : minimum quotidien invalide.`);
       }
     }
 
@@ -1045,6 +1288,7 @@ export function validateImport(obj) {
         push(`« ${unit.label} » : chapitre parent introuvable.`);
       }
     }
+    const reviewUnitIds = new Set(reviewUnitRefs.map((unit) => unit.id));
 
     const examIds = new Set();
     for (const e of exams) {
@@ -1064,8 +1308,63 @@ export function validateImport(obj) {
         const covered = new Set();
         for (const cid of e.chapterIds) {
           if (typeof cid !== 'string' || !chapterIds.has(cid)) push(`Épreuve « ${label} » : chapitre couvert introuvable.`);
+          else if (reviewUnitIds.has(cid)) push(`Épreuve « ${label} » : une portion doit être placée dans « portionIds ».`);
           else if (covered.has(cid)) push(`Épreuve « ${label} » : chapitre couvert dupliqué (${cid}).`);
           else covered.add(cid);
+        }
+      }
+      if (hasOwn(e, 'portionIds') && !Array.isArray(e.portionIds)) {
+        push(`Épreuve « ${label} » : « portionIds » doit être une liste.`);
+      } else if (Array.isArray(e.portionIds)) {
+        const covered = new Set();
+        for (const cid of e.portionIds) {
+          if (typeof cid !== 'string' || !reviewUnitIds.has(cid)) push(`Épreuve « ${label} » : portion couverte introuvable.`);
+          else if (covered.has(cid)) push(`Épreuve « ${label} » : portion couverte dupliquée (${cid}).`);
+          else covered.add(cid);
+        }
+      }
+    }
+
+    const courseTestIds = new Set();
+    for (const test of courseTests) {
+      if (!isRecord(test)) { push('Un test de cours n’est pas un objet.'); continue; }
+      const label = safeName(test);
+      if (typeof test.id !== 'string' || !test.id) push(`Test de cours sans identifiant valide (« ${label} »).`);
+      else if (courseTestIds.has(test.id)) push(`Identifiant de test de cours dupliqué : ${test.id}.`);
+      else courseTestIds.add(test.id);
+      if (typeof test.name !== 'string' || !test.name.trim()) push('Un test de cours n’a pas de nom.');
+      if (typeof test.subjectId !== 'string' || !subjectIds.has(test.subjectId)) push(`Test « ${label} » : matière introuvable.`);
+      if (!isValidISODate(test.scheduledFor)) push(`Test « ${label} » : date planifiée invalide.`);
+      if (test.createdAt != null && !isValidISODate(test.createdAt)) push(`Test « ${label} » : date de création invalide.`);
+      for (const [key, allowed, kind] of [
+        ['chapterIds', chapterIds, 'chapitre'], ['portionIds', reviewUnitIds, 'portion'],
+      ]) {
+        if (!Array.isArray(test[key])) { push(`Test « ${label} » : « ${key} » doit être une liste.`); continue; }
+        const seen = new Set();
+        for (const id of test[key]) {
+          if (typeof id !== 'string' || !allowed.has(id)) push(`Test « ${label} » : ${kind} couvert introuvable.`);
+          else if (key === 'chapterIds' && reviewUnitIds.has(id)) push(`Test « ${label} » : une portion doit être placée dans « portionIds ».`);
+          else if (seen.has(id)) push(`Test « ${label} » : ${kind} couvert dupliqué (${id}).`);
+          else seen.add(id);
+        }
+      }
+    }
+
+    const courseResultIds = new Set();
+    for (const result of courseTestLog) {
+      if (!isRecord(result)) { push('Un résultat de test de cours n’est pas un objet.'); continue; }
+      if (typeof result.id !== 'string' || !result.id) push('Résultat de test : identifiant invalide.');
+      else if (courseResultIds.has(result.id)) push(`Résultat de test dupliqué : ${result.id}.`);
+      else courseResultIds.add(result.id);
+      if (typeof result.testId !== 'string' || !courseTestIds.has(result.testId)) push('Résultat de test : test introuvable.');
+      if (!isValidISODate(result.date)) push('Résultat de test : date invalide.');
+      if (!(Number.isFinite(result.maxScore) && result.maxScore > 0 && result.maxScore <= IMPORT_BOUNDS.testScore[1])) push('Résultat de test : barème invalide.');
+      if (!(Number.isFinite(result.score) && result.score >= 0 && result.score <= result.maxScore)) push('Résultat de test : note invalide.');
+      if (!(Number.isFinite(result.ratio) && result.ratio >= 0 && result.ratio <= 1)) push('Résultat de test : ratio invalide.');
+      if (result.closedBook !== true) push('Résultat de test : « sans support » doit être confirmé.');
+      for (const [key, allowed] of [['chapterIds', chapterIds], ['portionIds', reviewUnitIds]]) {
+        if (result[key] != null && (!Array.isArray(result[key]) || result[key].some((id) => !allowed.has(id)))) {
+          push(`Résultat de test : périmètre ${key} invalide.`);
         }
       }
     }
@@ -1078,6 +1377,9 @@ export function validateImport(obj) {
       else reviewIds.add(r.id);
       if (typeof r.chapterId !== 'string' || !chapterIds.has(r.chapterId)) push('Historique : chapitre introuvable.');
       if (!(Number.isInteger(r.grade) && r.grade >= 1 && r.grade <= 4)) push('Note d’historique : entier attendu dans [1,4].');
+      if (r.masteryLevel != null && !(Number.isInteger(r.masteryLevel) && r.masteryLevel >= 0 && r.masteryLevel <= 4)) {
+        push('Auto-évaluation : niveau entier attendu dans [0,4].');
+      }
       if (!isValidISODate(r.date)) push('Historique : date invalide.');
       if (r.evidenceType != null && !EVIDENCE[r.evidenceType]) push('Historique : type de preuve inconnu.');
       if (r.axis != null && !AXIS_KEYS.includes(r.axis)) push('Historique : axe inconnu.');
@@ -1274,13 +1576,17 @@ export function migrateV3(v3) {
 // S'assure qu'un état déjà v4 a tous les champs (idempotent, sans rejeu).
 // `today` sert uniquement à l'hygiène (purge des vieux reports) — passer une
 // date fixe dans les tests garde la fonction déterministe.
-export function ensureV8(s, today = todayISO()) {
+export function ensureV9(s, today = todayISO()) {
   const settings = { ...DEFAULT_SETTINGS, ...(s?.settings || {}) };
   const deleted = pruneTombstones(s.deleted, today);
-  const exams = (Array.isArray(s.exams) ? s.exams : [])
+  const rawExams = (Array.isArray(s.exams) ? s.exams : [])
     .filter((e) => !deleted.exams[e?.id])
-    .map((e) => ({ ...e, importance: e.importance ?? 'normal' }));
-  const examIds = new Set(exams.map((e) => e.id));
+    .map((e) => ({
+      ...e,
+      chapterIds: [...new Set(Array.isArray(e.chapterIds) ? e.chapterIds : [])],
+      portionIds: [...new Set(Array.isArray(e.portionIds) ? e.portionIds : [])],
+      importance: e.importance ?? 'normal',
+    }));
   const clampMinutes = (v, fallback) => (Number.isFinite(v)
     ? Math.round(clamp(v, IMPORT_BOUNDS.axisMinutes[0], IMPORT_BOUNDS.axisMinutes[1]))
     : fallback);
@@ -1329,12 +1635,60 @@ export function ensureV8(s, today = todayISO()) {
       };
     });
   const parentIds = new Set(normalizedChapters.filter((c) => !isReviewUnit(c)).map((c) => c.id));
+  const keptChapters = normalizedChapters.filter((c) => !isReviewUnit(c)
+    || (c.parentChapterId && c.introducedAt && parentIds.has(c.parentChapterId)));
+  const chapterById = new Map(keptChapters.map((c) => [c.id, c]));
+  const reviewUnitIds = new Set(keptChapters.filter(isReviewUnit).map((c) => c.id));
+  const studyChapterIds = new Set(keptChapters.filter((c) => !isReviewUnit(c)).map((c) => c.id));
+  const cleanScope = (item) => ({
+    ...item,
+    chapterIds: [...new Set((item.chapterIds || []).filter((id) => studyChapterIds.has(id)
+      && chapterById.get(id)?.subjectId === item.subjectId))],
+    portionIds: [...new Set((item.portionIds || []).filter((id) => reviewUnitIds.has(id)
+      && chapterById.get(id)?.subjectId === item.subjectId))],
+  });
+  const exams = rawExams.map(cleanScope);
+  const examIds = new Set(exams.map((e) => e.id));
+  const subjects = (Array.isArray(s.subjects) ? s.subjects : [])
+    .filter((x) => !deleted.subjects[x?.id])
+    .map((subject) => {
+      if (subject.type !== 'core') return subject;
+      const dailyMinutes = Math.round(clamp(
+        Number.isFinite(subject.dailyMinutes) ? subject.dailyMinutes : SUBJECT_DAILY_MINUTES,
+        IMPORT_BOUNDS.subjectMinutes[0], IMPORT_BOUNDS.subjectMinutes[1],
+      ));
+      return {
+        ...subject,
+        dailyMinutes,
+        minimumMinutes: Math.round(clamp(
+          Number.isFinite(subject.minimumMinutes) ? subject.minimumMinutes : SUBJECT_PROTECTED_MINUTES,
+          0, dailyMinutes,
+        )),
+      };
+    });
+  const subjectIds = new Set(subjects.map((subject) => subject.id));
+  const courseTests = (Array.isArray(s.courseTests) ? s.courseTests : [])
+    .filter((test) => test && !deleted.courseTests[test.id] && subjectIds.has(test.subjectId))
+    .map((test) => cleanScope({
+      ...test,
+      scheduledFor: isValidISODate(test.scheduledFor) ? test.scheduledFor : today,
+      createdAt: isValidISODate(test.createdAt) ? test.createdAt : today,
+    }));
+  const courseTestIds = new Set(courseTests.map((test) => test.id));
+  const courseTestLog = (Array.isArray(s.courseTestLog) ? s.courseTestLog : [])
+    .filter((entry) => entry && courseTestIds.has(entry.testId))
+    .map((entry) => ({
+      ...entry,
+      chapterIds: [...new Set((entry.chapterIds || []).filter((id) => studyChapterIds.has(id)))],
+      portionIds: [...new Set((entry.portionIds || []).filter((id) => reviewUnitIds.has(id)))],
+    }));
   return {
-    version: 8,
-    subjects: (Array.isArray(s.subjects) ? s.subjects : []).filter((x) => !deleted.subjects[x?.id]),
-    chapters: normalizedChapters.filter((c) => !isReviewUnit(c)
-      || (c.parentChapterId && c.introducedAt && parentIds.has(c.parentChapterId))),
+    version: 9,
+    subjects,
+    chapters: keptChapters,
     exams,
+    courseTests,
+    courseTestLog,
     settings,
     parallelLog: s.parallelLog && typeof s.parallelLog === 'object' ? s.parallelLog : {},
     reviewLog: Array.isArray(s.reviewLog) ? s.reviewLog : [],
@@ -1356,9 +1710,9 @@ export function ensureV8(s, today = todayISO()) {
   };
 }
 
-// Alias temporaire pour les imports internes historiques ; tout état produit
-// est néanmoins bien un état v8.
-export const ensureV7 = ensureV8;
+// Alias pour les imports/tests internes historiques ; tout état produit est v9.
+export const ensureV8 = ensureV9;
+export const ensureV7 = ensureV9;
 function normPractice(p) {
   if (!p || typeof p !== 'object') return emptyPractice();
   return {
@@ -1421,18 +1775,37 @@ export function migrateV7(v7, today = todayISO()) {
   return { ...v7, version: 8, chapters };
 }
 
-// Accepte v1 à v8 -> renvoie toujours un état v8 sain.
-// Tout passe par ensureV8 (bornes + hygiène), y compris après migration.
+// v8 -> v9 : les anciennes données restent intactes. Les nouveaux périmètres,
+// tests de cours et durées normales reçoivent seulement leurs valeurs neutres.
+export function migrateV8(v8) {
+  return {
+    ...v8,
+    version: 9,
+    subjects: (v8?.subjects || []).map((subject) => (subject.type === 'core' ? {
+      ...subject,
+      dailyMinutes: subject.dailyMinutes ?? SUBJECT_DAILY_MINUTES,
+      minimumMinutes: subject.minimumMinutes ?? SUBJECT_PROTECTED_MINUTES,
+    } : subject)),
+    exams: (v8?.exams || []).map((exam) => ({ ...exam, portionIds: exam.portionIds || [] })),
+    courseTests: v8?.courseTests || [],
+    courseTestLog: v8?.courseTestLog || [],
+    deleted: { ...emptyDeleted(), ...(v8?.deleted || {}) },
+  };
+}
+
+// Accepte v1 à v9 -> renvoie toujours un état v9 sain.
+// Tout passe par ensureV9 (bornes + hygiène), y compris après migration.
 export function normalize(s, today = todayISO()) {
   if (!s || typeof s !== 'object') return seedState();
-  if (s.version === 8) return ensureV8(s, today);
-  if (s.version === 7) return ensureV8(migrateV7(s, today), today);
-  if (s.version === 6) return ensureV8(migrateV7(migrateV6(s), today), today);
-  if (s.version === 5) return ensureV8(migrateV7(migrateV6(migrateV5(s)), today), today);
-  if (s.version === 4) return ensureV8(migrateV7(migrateV6(migrateV5(migrateV4(s))), today), today);
-  if (s.version === 3) return ensureV8(migrateV7(migrateV6(migrateV5(migrateV4(migrateV3(s)))), today), today);
-  if (s.version === 2) return ensureV8(migrateV7(migrateV6(migrateV5(migrateV4(migrateV3(migrateV2(s))))), today), today);
-  return ensureV8(migrateV7(migrateV6(migrateV5(migrateV4(migrateV3(migrateV2(migrateV1(s)))))), today), today);
+  if (s.version === 9) return ensureV9(s, today);
+  if (s.version === 8) return ensureV9(migrateV8(s), today);
+  if (s.version === 7) return ensureV9(migrateV8(migrateV7(s, today)), today);
+  if (s.version === 6) return ensureV9(migrateV8(migrateV7(migrateV6(s), today)), today);
+  if (s.version === 5) return ensureV9(migrateV8(migrateV7(migrateV6(migrateV5(s)), today)), today);
+  if (s.version === 4) return ensureV9(migrateV8(migrateV7(migrateV6(migrateV5(migrateV4(s))), today)), today);
+  if (s.version === 3) return ensureV9(migrateV8(migrateV7(migrateV6(migrateV5(migrateV4(migrateV3(s)))), today)), today);
+  if (s.version === 2) return ensureV9(migrateV8(migrateV7(migrateV6(migrateV5(migrateV4(migrateV3(migrateV2(s))))), today)), today);
+  return ensureV9(migrateV8(migrateV7(migrateV6(migrateV5(migrateV4(migrateV3(migrateV2(migrateV1(s)))))), today)), today);
 }
 
 // `opts` : { kind, axes, position } — par défaut, un chapitre de cours complet.
@@ -1534,13 +1907,18 @@ export function seedState() {
     ['Mécanique du solide', '#fbbf24'],
     ['Électromagnétisme 1', '#f472b6'],
     ['Atomistique 2', '#34d399'],
-  ].map(([name, color]) => ({ id: uid(), name, color, type: 'core' }));
+  ].map(([name, color]) => ({
+    id: uid(), name, color, type: 'core',
+    dailyMinutes: SUBJECT_DAILY_MINUTES,
+    minimumMinutes: SUBJECT_PROTECTED_MINUTES,
+  }));
   const parallel = [
     { id: uid(), name: 'Anglais / TOEIC', color: '#5eead4', type: 'parallel', weeklyFloor: 4 },
     { id: uid(), name: 'Anki', color: '#fca5a5', type: 'parallel', weeklyFloor: 6 },
   ];
   return {
-    version: 8, subjects: [...core, ...parallel], chapters: [], exams: [],
+    version: 9, subjects: [...core, ...parallel], chapters: [], exams: [],
+    courseTests: [], courseTestLog: [],
     settings: { ...DEFAULT_SETTINGS }, parallelLog: {}, reviewLog: [],
     archivedReviews: [], skips: {}, capacityOverrides: {}, examDebriefs: {},
     deleted: emptyDeleted(), syncMeta: null,
@@ -1550,7 +1928,11 @@ export function seedState() {
 
 export function stripChapterIds(exams, ids) {
   const set = new Set(ids);
-  return exams.map((e) => ({ ...e, chapterIds: (e.chapterIds || []).filter((cid) => !set.has(cid)) }));
+  return exams.map((e) => ({
+    ...e,
+    chapterIds: (e.chapterIds || []).filter((cid) => !set.has(cid)),
+    portionIds: (e.portionIds || []).filter((cid) => !set.has(cid)),
+  }));
 }
 
 // Recalibrer : le chapitre repart du niveau choisi (tous axes réinitialisés),
