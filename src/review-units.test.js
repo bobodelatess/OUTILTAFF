@@ -3,6 +3,7 @@ import {
   AXIS_MINUTES,
   DEFAULT_SETTINGS,
   REVIEW_UNIT_MINUTES,
+  SPACED_REVIEW_MINUTES,
   addDays,
   applyEvidence,
   emptyDeleted,
@@ -71,7 +72,7 @@ describe('portions quotidiennes et courbe d’oubli', () => {
     expect(info.R).toBe(1);
     expect(info.dueAt.localeCompare(TODAY)).toBeGreaterThan(0);
     expect(forecastReviewUnits([reviewed], S, TODAY, 60)[info.dueAt])
-      .toEqual({ count: 1, minutes: REVIEW_UNIT_MINUTES });
+      .toEqual({ count: 1, minutes: SPACED_REVIEW_MINUTES });
   });
 
   it('la migration v7 reconstruit uniquement la dernière portion réellement connue', () => {
@@ -87,7 +88,7 @@ describe('portions quotidiennes et courbe d’oubli', () => {
       lastExportAt: null,
     };
     const out = normalize(v7, TODAY);
-    expect(out.version).toBe(9);
+    expect(out.version).toBe(11);
     expect(out.chapters.filter(isReviewUnit)).toHaveLength(1);
     expect(out.chapters.find(isReviewUnit)).toMatchObject({
       parentChapterId: 'c1', introducedAt: YESTERDAY,

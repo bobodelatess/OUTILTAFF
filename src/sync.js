@@ -34,6 +34,7 @@
 import {
   DELETABLE, LEVELS, DEFAULT_SETTINGS, levelSeed, applyRecall, applyPractice,
   applySelfAssessment, emptyPractice, emptyDeleted, evidenceAxis, uid, normDocs,
+  REVIEW_INTEGRATION_SUCCESS_STREAK,
 } from './engine.js';
 
 // Documents : UNION par identifiant, comme le journal. Ajouter un document sur
@@ -168,7 +169,29 @@ export function rebuildAxes(chapter, events, settings = DEFAULT_SETTINGS) {
     for (const e of evs) st = applyPractice(st, e.grade, e.date);
     practice[axis] = st;
   }
-  return { ...chapter, recall, exercise: practice.exercise, problem: practice.problem };
+  let lifecycle = {};
+  if (chapter.reviewUnit) {
+    const lifecycleEvents = recallEvents.filter((event) => event.lifecycleBefore
+      && Number.isInteger(event.masteryLevel));
+    if (lifecycleEvents.length) {
+      let reviewSuccessStreak = 0;
+      let integratedAt = null;
+      let lastMasteryLevel = null;
+      for (const event of lifecycleEvents) {
+        lastMasteryLevel = event.masteryLevel;
+        reviewSuccessStreak = event.masteryLevel >= 3
+          ? Math.min(REVIEW_INTEGRATION_SUCCESS_STREAK, reviewSuccessStreak + 1)
+          : 0;
+        integratedAt = reviewSuccessStreak >= REVIEW_INTEGRATION_SUCCESS_STREAK
+          ? event.date : null;
+      }
+      lifecycle = { reviewSuccessStreak, integratedAt, lastMasteryLevel };
+    }
+  }
+  return {
+    ...chapter, recall, exercise: practice.exercise, problem: practice.problem,
+    ...lifecycle,
+  };
 }
 
 /* ------------------------------------------------------------------ *
@@ -192,6 +215,31 @@ function mergeDateMap(a, b, pick) {
   return out;
 }
 
+// Deux appareils hors ligne peuvent chacun créer un nouveau chapitre courant
+// dans la même matière. La sélection de l'état global le plus récent gagne ;
+// les autres chapitres restent présents mais repassent en consolidation.
+function uniqueCurrentChapters(chapters, preferredCurrentIds) {
+  const winnerBySubject = new Map();
+  for (const chapter of chapters) {
+    if (chapter.reviewUnit || (chapter.kind || 'course') !== 'course' || chapter.status !== 'current') continue;
+    const previous = winnerBySubject.get(chapter.subjectId);
+    const preferred = preferredCurrentIds.has(chapter.id);
+    const previousPreferred = previous ? preferredCurrentIds.has(previous.id) : false;
+    const date = chapter.positionUpdatedAt || '';
+    const previousDate = previous?.positionUpdatedAt || '';
+    if (!previous || (preferred && !previousPreferred)
+      || (preferred === previousPreferred && (date > previousDate
+        || (date === previousDate && chapter.id > previous.id)))) {
+      winnerBySubject.set(chapter.subjectId, chapter);
+    }
+  }
+  return chapters.map((chapter) => (
+    chapter.status === 'current' && winnerBySubject.get(chapter.subjectId)?.id !== chapter.id
+      ? { ...chapter, status: 'consolidating' }
+      : chapter
+  ));
+}
+
 // Fusionne deux états CADENCE (déjà normalisés) en un état convergent.
 export function mergeStates(a, b) {
   if (!a) return b;
@@ -200,14 +248,19 @@ export function mergeStates(a, b) {
 
   const deleted = mergeDeleted(a.deleted, b.deleted);
   const settings = { ...DEFAULT_SETTINGS, ...(hi.settings || {}) };
+  const subjects = mergeById(hi.subjects, lo.subjects, deleted.subjects);
+  const subjectIds = new Set(subjects.map((subject) => subject.id));
 
   const archived = unionEntries(a.archivedReviews, b.archivedReviews);
   const archivedKeys = new Set(archived.map(entryKey));
   // Les champs simples d'un chapitre suivent l'appareil modifié en dernier…
   const otherById = new Map((lo.chapters || []).map((c) => [c.id, c]));
-  const chapters = mergeById(hi.chapters, lo.chapters, deleted.chapters)
+  const preferredCurrentIds = new Set((hi.chapters || [])
+    .filter((chapter) => !chapter.reviewUnit && chapter.status === 'current')
+    .map((chapter) => chapter.id));
+  const chapters = uniqueCurrentChapters(mergeById(hi.chapters, lo.chapters, deleted.chapters)
     // …mais ses documents sont réunis des deux côtés.
-    .map((c) => ({ ...c, docs: mergeDocs(c.docs, otherById.get(c.id)?.docs) }));
+    .map((c) => ({ ...c, docs: mergeDocs(c.docs, otherById.get(c.id)?.docs) })), preferredCurrentIds);
   const chapterIds = new Set(chapters.map((c) => c.id));
   const studyChapterIds = new Set(chapters.filter((c) => !c.reviewUnit).map((c) => c.id));
   const portionIds = new Set(chapters.filter((c) => c.reviewUnit).map((c) => c.id));
@@ -227,6 +280,12 @@ export function mergeStates(a, b) {
   const courseTestIds = new Set(courseTests.map((test) => test.id));
   const courseTestLog = sortEntries(unionEntries(a.courseTestLog, b.courseTestLog)
     .filter((entry) => courseTestIds.has(entry.testId)));
+  const routineItems = mergeById(hi.routineItems, lo.routineItems, deleted.routineItems)
+    .filter((item) => subjectIds.has(item.subjectId));
+  const routineItemIds = new Set(routineItems.map((item) => item.id));
+  const routineLog = sortEntries(unionEntries(a.routineLog, b.routineLog)
+    .filter((entry) => subjectIds.has(entry.subjectId))
+    .filter((entry) => entry.kind !== 'maintenance' || routineItemIds.has(entry.itemId)));
 
   const eventsByChapter = new Map();
   for (const r of reviewLog) {
@@ -249,7 +308,7 @@ export function mergeStates(a, b) {
   return {
     ...hi,
     version: Math.max(a.version || 0, b.version || 0),
-    subjects: mergeById(hi.subjects, lo.subjects, deleted.subjects),
+    subjects,
     exams: mergeById(hi.exams, lo.exams, deleted.exams)
       .map((e) => ({
         ...e,
@@ -258,6 +317,8 @@ export function mergeStates(a, b) {
       })),
     courseTests,
     courseTestLog,
+    routineItems,
+    routineLog,
     chapters: chapters.map((c) => rebuildAxes(c, eventsByChapter.get(c.id) || [], settings)),
     settings,
     reviewLog,
@@ -312,6 +373,8 @@ export function isPristine(state) {
     && (state.exams?.length ?? 0) === 0
     && (state.courseTests?.length ?? 0) === 0
     && (state.courseTestLog?.length ?? 0) === 0
+    && (state.routineItems?.length ?? 0) === 0
+    && (state.routineLog?.length ?? 0) === 0
     && (state.reviewLog?.length ?? 0) === 0
     && (state.archivedReviews?.length ?? 0) === 0;
 }

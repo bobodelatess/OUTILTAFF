@@ -638,18 +638,18 @@ describe('migration v3 -> v4', () => {
   });
 
   it('normalize : v1, v2, v3 et v4 -> toujours un état courant sain', () => {
-    expect(normalize(v3state()).version).toBe(9);
+    expect(normalize(v3state()).version).toBe(11);
     const fromV1 = normalize({ subjects: [], chapters: [{ id: 'c', subjectId: 's', name: 'x', mastery: 50 }] });
-    expect(fromV1.version).toBe(9);
+    expect(fromV1.version).toBe(11);
     expect(fromV1.chapters[0].minutes).toEqual({ recall: 30, exercise: 30, problem: 60 });
     expect(fromV1.chapters[0].exercise).toEqual(emptyPractice());
     const v2 = { version: 2, subjects: [{ id: 's', name: 'EM' }], chapters: [{ id: 'c1', subjectId: 's', name: 'A', difficulty: 6.8, stability: 12, lastReviewed: FIVE_AGO }] };
     const m = normalize(v2);
-    expect(m.version).toBe(9);
+    expect(m.version).toBe(11);
     expect(m.chapters[0].recall.stability).toBe(12);
     expect(m.chapters[0].initialLevel).toBe('fragile'); // D=6.8 -> niveau le plus proche
     const already = normalize(migrateV3(v3state()));
-    expect(already.version).toBe(9);
+    expect(already.version).toBe(11);
     expect(already.chapters.find((c) => c.id === 'c1').recall.lastReviewed).toBe('2026-01-12');
   });
 });
@@ -748,7 +748,7 @@ describe('validateImport — refus strict, sans toucher aux données', () => {
     expect(validateImport(valid()).ok).toBe(true);
   });
   it('version inconnue -> refus', () => {
-    const v = valid(); v.version = 10;
+    const v = valid(); v.version = 12;
     const r = validateImport(v);
     expect(r.ok).toBe(false);
     expect(r.errors.join(' ')).toContain('Version');
@@ -835,7 +835,7 @@ describe('validateImport — refus strict, sans toucher aux données', () => {
     const st = valid();
     const round = normalize(JSON.parse(JSON.stringify(st)));
     expect(validateImport(st).ok).toBe(true);
-    expect(round.version).toBe(9);
+    expect(round.version).toBe(11);
     expect(round.chapters[0].recall.stability).toBe(10);
     expect(round.chapters[0].exercise.score).toBe(0.8);
     expect(round.reviewLog.length).toBe(1);
@@ -1051,6 +1051,6 @@ describe('pruneBackups / annales / défauts', () => {
     expect(AXIS_MINUTES).toEqual({ recall: 15, exercise: 30, problem: 60 });
     expect(targetInterval(0, S)).toBeCloseTo(2, 5);
     expect(targetInterval(100, S)).toBeCloseTo(30, 5);
-    expect(seedState().version).toBe(9);
+    expect(seedState().version).toBe(11);
   });
 });
