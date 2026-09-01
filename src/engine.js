@@ -138,6 +138,10 @@ export const RESOURCE_PRESETS = [
 // volontairement : c'est un repère, pas un carnet de notes.
 export const POSITION_MAX = 120;
 
+// Une portion quotidienne est un rappel bref, pas une nouvelle séance de
+// cours. Cette durée alimente uniquement le calendrier et la charge indicative.
+export const REVIEW_UNIT_MINUTES = 5;
+
 /* ---- Documents attachés (v7) --------------------------------------
  * Un document est une RÉFÉRENCE, jamais un fichier : un lien (Drive,
  * iCloud, une URL) ou, à défaut, un simple nom de fichier servant de
@@ -1316,7 +1320,9 @@ export function ensureV8(s, today = todayISO()) {
         exercise: reviewUnit ? emptyPractice() : normPractice(c.exercise),
         problem: reviewUnit ? emptyPractice() : normPractice(c.problem),
         minutes: {
-          recall: clampMinutes(c.minutes?.recall, AXIS_MINUTES.recall),
+          recall: reviewUnit
+            ? REVIEW_UNIT_MINUTES
+            : clampMinutes(c.minutes?.recall, AXIS_MINUTES.recall),
           exercise: clampMinutes(c.minutes?.exercise, AXIS_MINUTES.exercise),
           problem: clampMinutes(c.minutes?.problem, AXIS_MINUTES.problem),
         },
@@ -1495,6 +1501,7 @@ export function newReviewUnit(parent, label, introducedAt, settings) {
     position: null,
     positionUpdatedAt: date,
     docs: [],
+    minutes: { ...unit.minutes, recall: REVIEW_UNIT_MINUTES },
   };
 }
 

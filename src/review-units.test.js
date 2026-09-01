@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AXIS_MINUTES,
   DEFAULT_SETTINGS,
+  REVIEW_UNIT_MINUTES,
   addDays,
   applyEvidence,
   emptyDeleted,
@@ -37,6 +38,7 @@ describe('portions quotidiennes et courbe d’oubli', () => {
       id: reviewUnitId('c1', TODAY), parentChapterId: 'c1', introducedAt: TODAY,
       name: label, axes: ['recall'], kind: 'resource', docs: [],
     });
+    expect(unit.minutes.recall).toBe(REVIEW_UNIT_MINUTES);
     expect(reviewUnitInfo(unit, S, TODAY)).toMatchObject({ tested: false, due: false, R: null });
     expect(reviewUnitInfo(unit, S, addDays(TODAY, 1))).toMatchObject({ tested: false, due: true, R: null });
   });
@@ -68,7 +70,8 @@ describe('portions quotidiennes et courbe d’oubli', () => {
     expect(info.due).toBe(false);
     expect(info.R).toBe(1);
     expect(info.dueAt.localeCompare(TODAY)).toBeGreaterThan(0);
-    expect(forecastReviewUnits([reviewed], S, TODAY, 60)[info.dueAt].count).toBe(1);
+    expect(forecastReviewUnits([reviewed], S, TODAY, 60)[info.dueAt])
+      .toEqual({ count: 1, minutes: REVIEW_UNIT_MINUTES });
   });
 
   it('la migration v7 reconstruit uniquement la dernière portion réellement connue', () => {
@@ -89,6 +92,7 @@ describe('portions quotidiennes et courbe d’oubli', () => {
     expect(out.chapters.find(isReviewUnit)).toMatchObject({
       parentChapterId: 'c1', introducedAt: YESTERDAY,
       name: 'Ajout du 31/08/2026 — matrice de Vandermonde',
+      minutes: { recall: REVIEW_UNIT_MINUTES },
     });
     expect(normalize(out, TODAY).chapters).toEqual(out.chapters);
   });
