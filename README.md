@@ -19,7 +19,7 @@ restent dans le navigateur, avec export/import JSON. La
 [synchronisation optionnelle](#synchronisation-entre-appareils) utilise un
 coffre privé appartenant au compte GitHub de l'utilisateur.
 
-## Modèle de suivi (schéma v11)
+## Modèle de suivi (schéma v12)
 
 Le **chapitre** est un repère stable : il organise le cours et porte les liens
 vers les documents cumulatifs. Une **portion quotidienne** est une unité de
@@ -67,6 +67,8 @@ réellement mis à jour, sans intégrer rétroactivement les anciennes portions 
 sans inventer de résultat.
 La migration v10 → v11 ajoute les objectifs de checklist et des journaux vides :
 aucun exercice, aucune annale et aucun test n'est déclaré accompli.
+La migration v11 → v12 ajoute le journal global d'habitudes vide : aucune
+habitude antérieure n'est inventée ou déclarée accomplie.
 
 ## Auto-évaluation et courbe d'oubli
 
@@ -181,6 +183,13 @@ Les compteurs et routines ne modifient ni FSRS, ni les niveaux de maîtrise, ni
 les axes exercice/annale. Ils attestent seulement une quantité explicitement
 saisie par l'utilisateur.
 
+La même vue contient un traqueur global séparé des matières : un oral
+d'exercices préparés par semaine, de l'anglais chaque jour, quinze minutes de
+lecture économique au réveil et deux séances de musculation par semaine. Les
+habitudes quotidiennes montrent les sept derniers jours ; les habitudes
+hebdomadaires comptent les réalisations de la semaine en cours. La lecture du
+soir reste volontairement un repère souple, sans case, série ni quota.
+
 ## Chapitres, ressources et documents
 
 Une **ressource** est un support durable qui n'est pas forcément un chapitre :
@@ -204,8 +213,8 @@ CADENCE comporte cinq vues :
    enveloppe restante, consolidations dues, auto-évaluation à cinq niveaux,
    rappels de tests et bilans ;
 2. **Calendrier** — consolidations, rappels de tests et épreuves à venir ;
-3. **Checklist** — production quantitative réelle et rotation d'entretien par
-   matière ;
+3. **Checklist** — habitudes transversales, production quantitative réelle et
+   rotation d'entretien par matière ;
 4. **Matières** — chapitres stables, ressources, points de reprise, documents
    et épreuves ;
 5. **Réglages** — seuil de rappel, paramètres avancés repliés,
@@ -248,8 +257,8 @@ hors-ligne plus longtemps pourrait ressusciter un ancien élément.
 
 ## Données et fiabilité
 
-- Clé locale stable `cadence.v2`, schéma interne versionné v11.
-- Migration automatique des schémas v1 à v11 ; toute version future inconnue
+- Clé locale stable `cadence.v2`, schéma interne versionné v12.
+- Migration automatique des schémas v1 à v12 ; toute version future inconnue
   est refusée.
 - Validation stricte des imports : identifiants, relations, dates ISO, enums,
   notes, bornes numériques, documents et références des portions.

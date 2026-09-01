@@ -5,7 +5,10 @@ import {
   addDays,
   emptyDeleted,
   emptyPractice,
+  habitDailyHistory,
+  habitTrackerProgress,
   newCourseTest,
+  newHabitEvent,
   newRoutineEvent,
   newRoutineItem,
   normalize,
@@ -31,8 +34,9 @@ const chapter = {
   minutes: { recall: 10, exercise: 25, problem: 40 },
 };
 const baseState = (over = {}) => ({
-  version: 11, subjects: [SUBJECT], chapters: [chapter], exams: [],
+  version: 12, subjects: [SUBJECT], chapters: [chapter], exams: [],
   courseTests: [], courseTestLog: [], routineItems: [], routineLog: [],
+  habitLog: [],
   settings: { ...DEFAULT_SETTINGS }, parallelLog: {}, reviewLog: [], archivedReviews: [],
   skips: {}, capacityOverrides: {}, examDebriefs: {}, deleted: emptyDeleted(),
   syncMeta: null, lastExportAt: null, ...over,
@@ -85,7 +89,7 @@ describe('v11 — entretien récurrent', () => {
   });
 });
 
-describe('v10 → v11', () => {
+describe('v10 → v12', () => {
   it('ajoute les objectifs sans inventer une réalisation', () => {
     const old = baseState();
     old.version = 10;
@@ -93,10 +97,48 @@ describe('v10 → v11', () => {
     delete old.routineItems;
     delete old.routineLog;
     const migrated = normalize(old, TODAY);
-    expect(migrated.version).toBe(11);
+    expect(migrated.version).toBe(12);
     expect(migrated.subjects[0].routineTargets).toEqual(DEFAULT_ROUTINE_TARGETS);
     expect(migrated.routineItems).toEqual([]);
     expect(migrated.routineLog).toEqual([]);
+    expect(migrated.habitLog).toEqual([]);
     expect(validateImport(migrated).ok).toBe(true);
+  });
+});
+
+describe('v12 — habitudes transversales', () => {
+  it('suit les habitudes quotidiennes et hebdomadaires sans les rattacher à une matière', () => {
+    const log = [
+      newHabitEvent('dailyEnglish', TODAY),
+      newHabitEvent('morningEconomics', TODAY),
+      newHabitEvent('preparedOral', addDays(TODAY, -1)),
+      newHabitEvent('strengthTraining', addDays(TODAY, -1)),
+      newHabitEvent('strengthTraining', TODAY),
+    ];
+    const progress = Object.fromEntries(habitTrackerProgress(log, TODAY)
+      .map((habit) => [habit.key, habit]));
+    expect(progress.dailyEnglish).toMatchObject({ done: 1, target: 1, recentDays: 1 });
+    expect(progress.morningEconomics).toMatchObject({ done: 1, target: 1, recentDays: 1 });
+    expect(progress.preparedOral).toMatchObject({ done: 1, target: 1, period: 'week' });
+    expect(progress.strengthTraining).toMatchObject({ done: 2, target: 2, period: 'week' });
+    expect(habitDailyHistory(log, 'dailyEnglish', TODAY).at(-1)).toEqual({ date: TODAY, done: true });
+  });
+
+  it('fusionne les validations faites hors ligne sur deux appareils', () => {
+    const english = { ...newHabitEvent('dailyEnglish', TODAY), id: 'h1' };
+    const strength = { ...newHabitEvent('strengthTraining', TODAY), id: 'h2' };
+    const a = stampState(baseState({ habitLog: [english] }), 'a', 1000);
+    const b = stampState(baseState({ habitLog: [strength] }), 'b', 2000);
+    const merged = mergeStates(a, b);
+    expect(merged.habitLog.map((event) => event.id).sort()).toEqual(['h1', 'h2']);
+  });
+
+  it('migre v11 sans inventer une habitude réalisée', () => {
+    const old = baseState();
+    old.version = 11;
+    delete old.habitLog;
+    const migrated = normalize(old, TODAY);
+    expect(migrated.version).toBe(12);
+    expect(migrated.habitLog).toEqual([]);
   });
 });

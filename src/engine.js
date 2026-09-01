@@ -1,9 +1,9 @@
 /*
  * Moteur CADENCE — fonctions pures, sans React.
  *
- * v11 : le chapitre reste le repère stable ; chaque ajout quotidien daté crée
+ * v12 : le chapitre reste le repère stable ; chaque ajout quotidien daté crée
  * une unité de reprise interne qui mûrit ensuite vers le chapitre. Les
- * routines comptent seulement des actions réellement effectuées.
+ * routines et habitudes comptent seulement des actions réellement effectuées.
  *
  * Le moteur conserve aussi les trois axes de preuve INDÉPENDANTS historiques,
  * notamment pour les annales et les bilans d'épreuve.
@@ -18,7 +18,7 @@
  *     score/risque HEURISTIQUE fondé sur : résultats observés, nombre de
  *     tentatives, récence, répétition des erreurs. À présenter comme tel.
  *
- * Schéma v11 (champs principaux)
+ * Schéma v12 (champs principaux)
  *   Subject  = { id, name, color, type: 'core'|'parallel', weeklyFloor?,
  *                dailyMinutes?, minimumMinutes? }
  *   Chapter  = { id, subjectId, name, status?, position, positionUpdatedAt, docs[],
@@ -37,8 +37,9 @@
  *   CourseTestResult = { id, testId, date, score, maxScore, ratio, closedBook:true }
  *   RoutineItem = { id, subjectId, label, intervalDays, createdAt }
  *   RoutineEvent = { id, subjectId, kind, date, amount, itemId? }
- *   State    = { version: 11, subjects, chapters, exams, courseTests,
- *                courseTestLog, routineItems, routineLog, settings,
+ *   HabitEvent = { id, habitKey, date, amount }
+ *   State    = { version: 12, subjects, chapters, exams, courseTests,
+ *                courseTestLog, routineItems, routineLog, habitLog, settings,
  *                reviewLog, ... }
  */
 
@@ -49,8 +50,8 @@
 export const STORAGE_KEY = 'cadence.v2'; // clé stable ; la version vit DANS l'état
 export const LEGACY_KEY = 'cadence.v1';
 export const BACKUP_KEY = 'cadence.backups';
-export const SCHEMA_VERSION = 11;
-export const KNOWN_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+export const SCHEMA_VERSION = 12;
+export const KNOWN_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
 // v5 — synchronisation multi-appareils :
 //   syncMeta = { deviceId, updatedAt (ms), rev }   qui a modifié en dernier
@@ -372,6 +373,34 @@ export const ROUTINE_ITEM_PRESETS = [
   'Exercices de tête et réflexion',
   'Quiz de rappel',
 ];
+
+// Habitudes transversales : contrairement aux routines par matière, elles
+// couvrent l'ensemble de la semaine ou de la journée. La lecture du soir est
+// volontairement un repère souple sans case, donc absente de ce journal.
+export const HABIT_DEFINITIONS = [
+  {
+    key: 'preparedOral', period: 'week', target: 1,
+    label: 'Oral d’exercices préparés',
+    detail: 'présenter et défendre une solution préparée',
+  },
+  {
+    key: 'dailyEnglish', period: 'day', target: 1,
+    label: 'Anglais quotidien',
+    detail: 'vidéo, lecture du matin ou autre exposition active',
+  },
+  {
+    key: 'morningEconomics', period: 'day', target: 1,
+    label: 'Économie au réveil — 15 min',
+    detail: 'lecture économique pendant les quinze premières minutes',
+  },
+  {
+    key: 'strengthTraining', period: 'week', target: 2,
+    label: 'Séances de musculation',
+    detail: 'deux séances réellement effectuées dans la semaine',
+  },
+];
+export const HABIT_KEYS = HABIT_DEFINITIONS.map((habit) => habit.key);
+export const HABIT_HISTORY_DAYS = 70;
 
 // CADENCE ne génère aucun test : il rappelle seulement quand reprendre le
 // même périmètre. La note est toujours saisie sur 20 et maintient une cadence
@@ -1135,6 +1164,48 @@ export function routineItemInfo(item, routineLog, today) {
   };
 }
 
+export function newHabitEvent(habitKey, date, amount = 1) {
+  return {
+    id: uid(), habitKey,
+    date: isValidISODate(date) ? date : todayISO(),
+    amount: amount < 0 ? -1 : 1,
+  };
+}
+
+export function habitEventCount(habitLog, habitKey, start, end) {
+  const total = (habitLog || [])
+    .filter((event) => event.habitKey === habitKey
+      && event.date >= start && event.date <= end)
+    .reduce((sum, event) => sum + (event.amount === -1 ? -1 : 1), 0);
+  return Math.max(0, total);
+}
+
+export function habitTrackerProgress(habitLog, today) {
+  const weekStart = mondayOf(today);
+  return HABIT_DEFINITIONS.map((habit) => {
+    const start = habit.period === 'day' ? today : weekStart;
+    const rawDone = habitEventCount(habitLog, habit.key, start, today);
+    const recentDays = habit.period === 'day'
+      ? Array.from({ length: 7 }, (_, offset) => addDays(today, offset - 6))
+        .filter((date) => habitEventCount(habitLog, habit.key, date, date) > 0).length
+      : null;
+    return {
+      ...habit,
+      start,
+      done: habit.period === 'day' ? Math.min(1, rawDone) : rawDone,
+      rawDone,
+      recentDays,
+    };
+  });
+}
+
+export function habitDailyHistory(habitLog, habitKey, today, days = 7) {
+  return Array.from({ length: days }, (_, offset) => {
+    const date = addDays(today, offset - days + 1);
+    return { date, done: habitEventCount(habitLog, habitKey, date, date) > 0 };
+  });
+}
+
 // Étiquette d'axe + explication courte, selon l'axe dominant et le contexte.
 export function reasonPhrase(m, chapter) {
   const axis = m.dominant;
@@ -1387,6 +1458,7 @@ export function validateImport(obj) {
     const courseTestLog = Array.isArray(obj.courseTestLog) ? obj.courseTestLog : [];
     const routineItems = Array.isArray(obj.routineItems) ? obj.routineItems : [];
     const routineLog = Array.isArray(obj.routineLog) ? obj.routineLog : [];
+    const habitLog = Array.isArray(obj.habitLog) ? obj.habitLog : [];
     const reviews = Array.isArray(obj.reviewLog) ? obj.reviewLog : [];
     if (!Array.isArray(obj.subjects)) push('« subjects » manquant ou n’est pas une liste.');
     if (hasOwn(obj, 'chapters') && !Array.isArray(obj.chapters)) push('« chapters » doit être une liste.');
@@ -1395,6 +1467,7 @@ export function validateImport(obj) {
     if (hasOwn(obj, 'courseTestLog') && !Array.isArray(obj.courseTestLog)) push('« courseTestLog » doit être une liste.');
     if (hasOwn(obj, 'routineItems') && !Array.isArray(obj.routineItems)) push('« routineItems » doit être une liste.');
     if (hasOwn(obj, 'routineLog') && !Array.isArray(obj.routineLog)) push('« routineLog » doit être une liste.');
+    if (hasOwn(obj, 'habitLog') && !Array.isArray(obj.habitLog)) push('« habitLog » doit être une liste.');
     if (hasOwn(obj, 'reviewLog') && !Array.isArray(obj.reviewLog)) push('« reviewLog » doit être une liste.');
 
     const subjectIds = new Set();
@@ -1692,6 +1765,17 @@ export function validateImport(obj) {
       } else if (event.itemId != null) push('Checklist : une action quantitative ne doit pas référencer une routine.');
     }
 
+    const habitEventIds = new Set();
+    for (const event of habitLog) {
+      if (!isRecord(event)) { push('Une entrée d’habitude n’est pas un objet.'); continue; }
+      if (typeof event.id !== 'string' || !event.id) push('Habitude : identifiant invalide.');
+      else if (habitEventIds.has(event.id)) push(`Entrée d’habitude dupliquée : ${event.id}.`);
+      else habitEventIds.add(event.id);
+      if (!HABIT_KEYS.includes(event.habitKey)) push('Habitude : type inconnu.');
+      if (!isValidISODate(event.date)) push('Habitude : date invalide.');
+      if (event.amount !== 1 && event.amount !== -1) push('Habitude : variation attendue égale à +1 ou −1.');
+    }
+
     const reviewIds = new Set();
     for (const r of reviews) {
       if (!isRecord(r)) { push('Une entrée d’historique n’est pas un objet.'); continue; }
@@ -1899,7 +1983,7 @@ export function migrateV3(v3) {
 // S'assure qu'un état déjà v4 a tous les champs (idempotent, sans rejeu).
 // `today` sert uniquement à l'hygiène (purge des vieux reports) — passer une
 // date fixe dans les tests garde la fonction déterministe.
-export function ensureV11(s, today = todayISO()) {
+export function ensureV12(s, today = todayISO()) {
   const settings = { ...DEFAULT_SETTINGS, ...(s?.settings || {}) };
   const deleted = pruneTombstones(s.deleted, today);
   const rawExams = (Array.isArray(s.exams) ? s.exams : [])
@@ -2076,8 +2160,19 @@ export function ensureV11(s, today = todayISO()) {
     event.kind !== 'maintenance' || event.date >= maintenanceCutoff
       || event.date === latestOldMaintenanceByItem.get(event.itemId)
   ));
+  const habitCutoff = addDays(today, -HABIT_HISTORY_DAYS);
+  const habitLogById = new Map();
+  for (const event of Array.isArray(s.habitLog) ? s.habitLog : []) {
+    if (!event || !event.id || !HABIT_KEYS.includes(event.habitKey)
+      || !isValidISODate(event.date) || event.date < habitCutoff || event.date > today
+      || (event.amount !== 1 && event.amount !== -1)) continue;
+    habitLogById.set(event.id, {
+      id: event.id, habitKey: event.habitKey, date: event.date, amount: event.amount,
+    });
+  }
+  const habitLog = [...habitLogById.values()];
   return {
-    version: 11,
+    version: 12,
     subjects,
     chapters: keptChapters,
     exams,
@@ -2085,6 +2180,7 @@ export function ensureV11(s, today = todayISO()) {
     courseTestLog,
     routineItems,
     routineLog,
+    habitLog,
     settings,
     parallelLog: s.parallelLog && typeof s.parallelLog === 'object' ? s.parallelLog : {},
     reviewLog: Array.isArray(s.reviewLog) ? s.reviewLog : [],
@@ -2106,11 +2202,12 @@ export function ensureV11(s, today = todayISO()) {
   };
 }
 
-// Alias pour les imports/tests internes historiques ; tout état produit est v11.
-export const ensureV10 = ensureV11;
-export const ensureV9 = ensureV11;
-export const ensureV8 = ensureV11;
-export const ensureV7 = ensureV11;
+// Alias pour les imports/tests internes historiques ; tout état produit est v12.
+export const ensureV11 = ensureV12;
+export const ensureV10 = ensureV12;
+export const ensureV9 = ensureV12;
+export const ensureV8 = ensureV12;
+export const ensureV7 = ensureV12;
 function normPractice(p) {
   if (!p || typeof p !== 'object') return emptyPractice();
   return {
@@ -2246,21 +2343,33 @@ export function migrateV10(v10) {
   };
 }
 
-// Accepte v1 à v11 -> renvoie toujours un état v11 sain.
-// Tout passe par ensureV11 (bornes + hygiène), y compris après migration.
+// v11 -> v12 : ajoute le journal global d'habitudes vide. Aucune habitude
+// n'est déclarée accomplie pendant la migration.
+export function migrateV11(v11) {
+  return {
+    ...v11,
+    version: 12,
+    habitLog: v11?.habitLog || [],
+  };
+}
+
+// Accepte v1 à v12 -> renvoie toujours un état v12 sain.
+// Tout passe par ensureV12 (bornes + hygiène), y compris après migration.
 export function normalize(s, today = todayISO()) {
   if (!s || typeof s !== 'object') return seedState();
-  if (s.version === 11) return ensureV11(s, today);
-  if (s.version === 10) return ensureV11(migrateV10(s), today);
-  if (s.version === 9) return ensureV11(migrateV10(migrateV9(s)), today);
-  if (s.version === 8) return ensureV11(migrateV10(migrateV9(migrateV8(s))), today);
-  if (s.version === 7) return ensureV11(migrateV10(migrateV9(migrateV8(migrateV7(s, today)))), today);
-  if (s.version === 6) return ensureV11(migrateV10(migrateV9(migrateV8(migrateV7(migrateV6(s), today)))), today);
-  if (s.version === 5) return ensureV11(migrateV10(migrateV9(migrateV8(migrateV7(migrateV6(migrateV5(s)), today)))), today);
-  if (s.version === 4) return ensureV11(migrateV10(migrateV9(migrateV8(migrateV7(migrateV6(migrateV5(migrateV4(s))), today)))), today);
-  if (s.version === 3) return ensureV11(migrateV10(migrateV9(migrateV8(migrateV7(migrateV6(migrateV5(migrateV4(migrateV3(s))))), today))), today);
-  if (s.version === 2) return ensureV11(migrateV10(migrateV9(migrateV8(migrateV7(migrateV6(migrateV5(migrateV4(migrateV3(migrateV2(s)))))), today))), today);
-  return ensureV11(migrateV10(migrateV9(migrateV8(migrateV7(migrateV6(migrateV5(migrateV4(migrateV3(migrateV2(migrateV1(s))))))), today))), today);
+  const finish = (v11) => ensureV12(migrateV11(v11), today);
+  if (s.version === 12) return ensureV12(s, today);
+  if (s.version === 11) return finish(s);
+  if (s.version === 10) return finish(migrateV10(s));
+  if (s.version === 9) return finish(migrateV10(migrateV9(s)));
+  if (s.version === 8) return finish(migrateV10(migrateV9(migrateV8(s))));
+  if (s.version === 7) return finish(migrateV10(migrateV9(migrateV8(migrateV7(s, today)))));
+  if (s.version === 6) return finish(migrateV10(migrateV9(migrateV8(migrateV7(migrateV6(s), today)))));
+  if (s.version === 5) return finish(migrateV10(migrateV9(migrateV8(migrateV7(migrateV6(migrateV5(s)), today)))));
+  if (s.version === 4) return finish(migrateV10(migrateV9(migrateV8(migrateV7(migrateV6(migrateV5(migrateV4(s))), today)))));
+  if (s.version === 3) return finish(migrateV10(migrateV9(migrateV8(migrateV7(migrateV6(migrateV5(migrateV4(migrateV3(s))))), today))));
+  if (s.version === 2) return finish(migrateV10(migrateV9(migrateV8(migrateV7(migrateV6(migrateV5(migrateV4(migrateV3(migrateV2(s)))))), today))));
+  return finish(migrateV10(migrateV9(migrateV8(migrateV7(migrateV6(migrateV5(migrateV4(migrateV3(migrateV2(migrateV1(s))))))), today))));
 }
 
 // `opts` : { kind, axes, position } — par défaut, un chapitre de cours complet.
@@ -2379,11 +2488,12 @@ export function seedState() {
     { id: uid(), name: 'Anki', color: '#fca5a5', type: 'parallel', weeklyFloor: 6 },
   ];
   return {
-    version: 11,
+    version: 12,
     subjects: core.map((subject) => ({ ...subject, routineTargets: { ...DEFAULT_ROUTINE_TARGETS } })).concat(parallel),
     chapters: [], exams: [],
     courseTests: [], courseTestLog: [],
     routineItems: [], routineLog: [],
+    habitLog: [],
     settings: { ...DEFAULT_SETTINGS }, parallelLog: {}, reviewLog: [],
     archivedReviews: [], skips: {}, capacityOverrides: {}, examDebriefs: {},
     deleted: emptyDeleted(), syncMeta: null,

@@ -144,6 +144,19 @@ describe('accueil simplifié — continuité et consolidations', () => {
     render(<Cadence />);
 
     fireEvent.click(screen.getByRole('button', { name: /Checklist/ }));
+    const english = screen.getByRole('group', { name: 'Anglais quotidien — habitude' });
+    const economics = screen.getByRole('group', { name: 'Économie au réveil — 15 min — habitude' });
+    const oral = screen.getByRole('group', { name: 'Oral d’exercices préparés — habitude' });
+    const strength = screen.getByRole('group', { name: 'Séances de musculation — habitude' });
+    fireEvent.click(within(english).getByRole('button', { name: /fait aujourd’hui/ }));
+    fireEvent.click(within(economics).getByRole('button', { name: /fait aujourd’hui/ }));
+    fireEvent.click(within(oral).getByTitle('Ajouter une réalisation — Oral d’exercices préparés'));
+    fireEvent.click(within(strength).getByTitle('Ajouter une réalisation — Séances de musculation'));
+    fireEvent.click(within(strength).getByTitle('Ajouter une réalisation — Séances de musculation'));
+    expect(within(english).getByText('1/1')).toBeTruthy();
+    expect(within(strength).getByText('2/2')).toBeTruthy();
+    expect(screen.getByText('Lire le soir')).toBeTruthy();
+
     const addExercise = screen.getByTitle('Ajouter une réalisation — Exercices aujourd’hui');
     for (let index = 0; index < 5; index++) fireEvent.click(addExercise);
     expect(screen.getByText('5/5')).toBeTruthy();
@@ -159,6 +172,7 @@ describe('accueil simplifié — continuité et consolidations', () => {
     const saved = readState();
     expect(saved.routineLog.filter((event) => event.kind === 'exercise')).toHaveLength(5);
     expect(saved.routineLog.filter((event) => event.kind === 'maintenance')).toHaveLength(1);
+    expect(saved.habitLog).toHaveLength(5);
     expect(saved.reviewLog).toHaveLength(0);
   });
 });
