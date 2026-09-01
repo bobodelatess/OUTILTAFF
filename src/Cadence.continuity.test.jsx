@@ -68,6 +68,8 @@ describe('accueil simplifié — continuité et consolidations', () => {
     const review = screen.getByRole('group', { name: /théorème spectral — consolidation/ });
     expect(within(review).getByText('consolidation du lendemain')).toBeTruthy();
     expect(within(review).getByRole('link', { name: /Suivi cumulatif/ })).toBeTruthy();
+    expect(within(review).getByRole('group', { name: 'Maîtrise après reprise' })
+      .querySelectorAll('button')).toHaveLength(5);
     fireEvent.click(within(review).getByRole('button', { name: 'Maîtrisé' }));
 
     await waitFor(() => expect(screen.queryByRole('group', { name: /— consolidation/ })).toBeNull());
@@ -78,7 +80,8 @@ describe('accueil simplifié — continuité et consolidations', () => {
     expect(main.recall.lastReviewed).toBeNull();
     expect(saved.reviewLog).toHaveLength(1);
     expect(saved.reviewLog[0]).toMatchObject({
-      chapterId: unit.id, grade: 3, evidenceType: 'recall', axis: 'recall', source: 'self-review',
+      chapterId: unit.id, grade: 3, masteryLevel: 3,
+      evidenceType: 'recall', axis: 'recall', source: 'self-review',
     });
     expect(screen.getByRole('status').textContent).toContain('Consolidation : « Maîtrisé »');
   });
@@ -105,5 +108,32 @@ describe('accueil simplifié — continuité et consolidations', () => {
     await waitFor(() => expect(readState().chapters.filter((c) => c.reviewUnit)).toHaveLength(1));
     expect(readState().chapters.find((c) => c.reviewUnit).name).toBe(dated);
     expect(screen.queryByRole('group', { name: /— consolidation/ })).toBeNull();
+  });
+
+  it('enregistre directement une note de test sans modifier la maîtrise des portions', async () => {
+    const yesterday = addDays(todayISO(), -1);
+    const st = stateWith({ introducedAt: yesterday });
+    st.version = 9;
+    st.courseTests = [{
+      id: 't1', subjectId: 's1', name: 'Test hebdo', scheduledFor: todayISO(),
+      createdAt: yesterday, chapterIds: ['c1'], portionIds: [],
+    }];
+    st.courseTestLog = [];
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(st));
+    render(<Cadence />);
+
+    const card = screen.getByRole('group', { name: 'Test hebdo — test de cours' });
+    fireEvent.change(within(card).getByLabelText('note obtenue pour Test hebdo'), { target: { value: '14' } });
+    fireEvent.click(within(card).getByRole('checkbox', { name: /sans cours ni corrigé/ }));
+    fireEvent.click(within(card).getByRole('button', { name: 'Enregistrer la note' }));
+
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'Test hebdo — test de cours' })).toBeNull());
+    const saved = readState();
+    expect(saved.courseTestLog).toHaveLength(1);
+    expect(saved.courseTestLog[0]).toMatchObject({
+      testId: 't1', score: 14, maxScore: 20, ratio: 0.7, closedBook: true,
+    });
+    expect(saved.courseTests[0].scheduledFor).toBe(addDays(todayISO(), 10));
+    expect(saved.reviewLog).toHaveLength(0);
   });
 });

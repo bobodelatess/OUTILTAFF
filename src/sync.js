@@ -33,7 +33,7 @@
 
 import {
   DELETABLE, LEVELS, DEFAULT_SETTINGS, levelSeed, applyRecall, applyPractice,
-  emptyPractice, emptyDeleted, evidenceAxis, uid, normDocs,
+  applySelfAssessment, emptyPractice, emptyDeleted, evidenceAxis, uid, normDocs,
 } from './engine.js';
 
 // Documents : UNION par identifiant, comme le journal. Ajouter un document sur
@@ -152,7 +152,11 @@ export function rebuildAxes(chapter, events, settings = DEFAULT_SETTINGS) {
   if (recallEvents.length) {
     const seed = levelSeed(level, settings);
     let rec = { stability: seed.stability, difficulty: seed.difficulty, lastReviewed: null };
-    for (const e of recallEvents) rec = applyRecall(rec, chapter.initialLevel, e.grade, e.date);
+    for (const e of recallEvents) {
+      rec = Number.isInteger(e.masteryLevel)
+        ? applySelfAssessment({ ...chapter, recall: rec }, e.masteryLevel, e.date, settings).after
+        : applyRecall(rec, chapter.initialLevel, e.grade, e.date);
+    }
     recall = { ...rec, source: 'replayed' };
   }
 
@@ -205,12 +209,24 @@ export function mergeStates(a, b) {
     // …mais ses documents sont réunis des deux côtés.
     .map((c) => ({ ...c, docs: mergeDocs(c.docs, otherById.get(c.id)?.docs) }));
   const chapterIds = new Set(chapters.map((c) => c.id));
+  const studyChapterIds = new Set(chapters.filter((c) => !c.reviewUnit).map((c) => c.id));
+  const portionIds = new Set(chapters.filter((c) => c.reviewUnit).map((c) => c.id));
 
   // Journal actif : union, moins ce qui a été archivé (recalibrage sur un
   // appareil) et moins les chapitres supprimés.
   const reviewLog = sortEntries(unionEntries(a.reviewLog, b.reviewLog)
     .filter((r) => !archivedKeys.has(entryKey(r)))
     .filter((r) => r.chapterId == null || chapterIds.has(r.chapterId)));
+
+  const courseTests = mergeById(hi.courseTests, lo.courseTests, deleted.courseTests)
+    .map((test) => ({
+      ...test,
+      chapterIds: (test.chapterIds || []).filter((id) => studyChapterIds.has(id)),
+      portionIds: (test.portionIds || []).filter((id) => portionIds.has(id)),
+    }));
+  const courseTestIds = new Set(courseTests.map((test) => test.id));
+  const courseTestLog = sortEntries(unionEntries(a.courseTestLog, b.courseTestLog)
+    .filter((entry) => courseTestIds.has(entry.testId)));
 
   const eventsByChapter = new Map();
   for (const r of reviewLog) {
@@ -235,7 +251,13 @@ export function mergeStates(a, b) {
     version: Math.max(a.version || 0, b.version || 0),
     subjects: mergeById(hi.subjects, lo.subjects, deleted.subjects),
     exams: mergeById(hi.exams, lo.exams, deleted.exams)
-      .map((e) => ({ ...e, chapterIds: (e.chapterIds || []).filter((id) => chapterIds.has(id)) })),
+      .map((e) => ({
+        ...e,
+        chapterIds: (e.chapterIds || []).filter((id) => studyChapterIds.has(id)),
+        portionIds: (e.portionIds || []).filter((id) => portionIds.has(id)),
+      })),
+    courseTests,
+    courseTestLog,
     chapters: chapters.map((c) => rebuildAxes(c, eventsByChapter.get(c.id) || [], settings)),
     settings,
     reviewLog,
@@ -288,6 +310,8 @@ export function isPristine(state) {
   if (state.syncMeta) return false; // déjà modifié sur cet appareil
   return (state.chapters?.length ?? 0) === 0
     && (state.exams?.length ?? 0) === 0
+    && (state.courseTests?.length ?? 0) === 0
+    && (state.courseTestLog?.length ?? 0) === 0
     && (state.reviewLog?.length ?? 0) === 0
     && (state.archivedReviews?.length ?? 0) === 0;
 }

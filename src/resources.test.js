@@ -211,7 +211,7 @@ describe('migration v5 -> v6', () => {
 
   it('normalize accepte v5 et v6, et reste idempotent', () => {
     const once = normalize(v5(), TODAY);
-    expect(once.version).toBe(8);
+    expect(once.version).toBe(9);
     const twice = normalize(once, TODAY);
     expect(JSON.stringify(twice.chapters)).toBe(JSON.stringify(once.chapters));
   });

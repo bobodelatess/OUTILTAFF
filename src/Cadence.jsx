@@ -21,9 +21,10 @@ import {
 import {
   STORAGE_KEY, LEGACY_KEY, BACKUP_KEY,
   DEFAULT_SETTINGS, GRADES, EVIDENCE, gradeLabel, LEVELS, IMPORTANCE,
+  MASTERY_LEVELS,
   AXES, AXIS_KEYS, AXIS_MINUTES, MINUTE_CHOICES, evidenceAxis, closestLevel,
   clamp, uid, parseISO, isoOf, daysBetween, addDays, mondayOf,
-  retrievability, optimalInterval, applyEvidence, targetInterval, levelSeed,
+  retrievability, optimalInterval, applyEvidence, applySelfAssessment, targetInterval, levelSeed,
   examMultiplier, chapterMetrics, recallInfo, practiceRisk, nextFutureExam,
   annalesModeFor, reasonPhrase, isWorthReviewing, axisMinutes, axisSummary,
   pendingDebriefs,
@@ -35,6 +36,9 @@ import {
   newDoc, sortedDocs, isSafeDocUrl, normDocs, DOCS_PER_CHAPTER_MAX,
   isReviewUnit, reviewUnitInfo, forecastReviewUnits, additionDateFromPosition,
   upsertReviewUnit,
+  allocateSubjectMinutes, dueCourseTests, courseTestSuggestions,
+  newCourseTest, nextCourseTestDate, latestCourseTestResult,
+  SUBJECT_DAILY_MINUTES, SUBJECT_PROTECTED_MINUTES,
 } from './engine.js';
 import { stampState, contentSignature, newDeviceId } from './sync.js';
 import { getDeviceId } from './remote.js';
@@ -1347,7 +1351,10 @@ export default function Cadence() {
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
   }, []);
-  const { subjects, chapters, exams, settings, reviewLog, examDebriefs, lastExportAt } = state;
+  const {
+    subjects, chapters, exams, courseTests = [], courseTestLog = [],
+    settings, reviewLog, examDebriefs, lastExportAt,
+  } = state;
   const studyChapters = useMemo(() => chapters.filter((c) => !isReviewUnit(c)), [chapters]);
   const reviewUnits = useMemo(() => chapters.filter(isReviewUnit), [chapters]);
 
@@ -1404,7 +1411,10 @@ export default function Cadence() {
   });
 
   const addSubject = (name) => patch((p) => ({
-    ...p, subjects: [...p.subjects, { id: uid(), name, color: '#7c9cf5', type: 'core' }],
+    ...p, subjects: [...p.subjects, {
+      id: uid(), name, color: '#7c9cf5', type: 'core',
+      dailyMinutes: SUBJECT_DAILY_MINUTES, minimumMinutes: SUBJECT_PROTECTED_MINUTES,
+    }],
   }));
   const updateSubject = (id, up) => patch((p) => ({
     ...p, subjects: p.subjects.map((s) => (s.id === id ? { ...s, ...up } : s)),
@@ -1413,11 +1423,14 @@ export default function Cadence() {
     const chapIds = p.chapters.filter((c) => c.subjectId === id).map((c) => c.id);
     const idSet = new Set(chapIds);
     const examIds = new Set(p.exams.filter((e) => e.subjectId === id).map((e) => e.id));
+    const courseTestIds = new Set((p.courseTests || []).filter((test) => test.subjectId === id).map((test) => test.id));
     return {
       ...p,
       subjects: p.subjects.filter((s) => s.id !== id),
       chapters: p.chapters.filter((c) => c.subjectId !== id),
       exams: stripChapterIds(p.exams.filter((e) => e.subjectId !== id), chapIds),
+      courseTests: (p.courseTests || []).filter((test) => !courseTestIds.has(test.id)),
+      courseTestLog: (p.courseTestLog || []).filter((entry) => !courseTestIds.has(entry.testId)),
       reviewLog: p.reviewLog.filter((r) => !idSet.has(r.chapterId)),
       archivedReviews: (p.archivedReviews || []).filter((r) => !idSet.has(r.chapterId)),
       skips: Object.fromEntries(Object.entries(p.skips || {}).filter(([chapterId]) => !idSet.has(chapterId))),
@@ -1427,10 +1440,9 @@ export default function Cadence() {
       examDebriefs: Object.fromEntries(Object.entries(p.examDebriefs || {}).filter(([examId]) => !examIds.has(examId))),
       // Traces de suppression : sans elles, un autre appareil ressusciterait
       // la matière (et son contenu) à la prochaine synchronisation.
-      deleted: markDeleted(
+      deleted: markDeleted(markDeleted(
         markDeleted(markDeleted(p.deleted, 'subjects', [id], today), 'chapters', chapIds, today),
-        'exams', [...examIds], today,
-      ),
+        'exams', [...examIds], today), 'courseTests', [...courseTestIds], today),
     };
   });
 
@@ -1501,6 +1513,12 @@ export default function Cadence() {
       ...p,
       chapters: p.chapters.filter((c) => !set.has(c.id)),
       exams: stripChapterIds(p.exams, ids),
+      courseTests: stripChapterIds(p.courseTests || [], ids),
+      courseTestLog: (p.courseTestLog || []).map((entry) => ({
+        ...entry,
+        chapterIds: (entry.chapterIds || []).filter((chapterId) => !set.has(chapterId)),
+        portionIds: (entry.portionIds || []).filter((chapterId) => !set.has(chapterId)),
+      })),
       reviewLog: p.reviewLog.filter((r) => !set.has(r.chapterId)),
       archivedReviews: (p.archivedReviews || []).filter((r) => !set.has(r.chapterId)),
       skips: Object.fromEntries(Object.entries(p.skips || {}).filter(([chapterId]) => !set.has(chapterId))),
@@ -1543,10 +1561,15 @@ export default function Cadence() {
       // Un remplacement repart de l'état AVANT la preuve remplacée : il ne
       // cumule pas deux transitions dont une disparaîtrait du journal.
       const base = prior ? { ...ch, [axis]: { ...prior.before } } : ch;
-      const { chapter, before, after } = applyEvidence(base, evidenceType, grade, evidenceDate);
+      const result = options.source === 'self-review' && Number.isInteger(options.masteryLevel)
+        ? applySelfAssessment(base, options.masteryLevel, evidenceDate, p.settings)
+        : applyEvidence(base, evidenceType, grade, evidenceDate);
+      const { chapter, before, after } = result;
+      const storedGrade = result.grade ?? grade;
       const log = p.reviewLog.filter((r) => !sameSlot(r));
       const entry = {
-        id: entryId, chapterId: id, date: evidenceDate, grade, evidenceType, axis, before, after,
+        id: entryId, chapterId: id, date: evidenceDate, grade: storedGrade, evidenceType, axis, before, after,
+        ...(Number.isInteger(options.masteryLevel) ? { masteryLevel: options.masteryLevel } : {}),
         ...(options.source ? { source: options.source } : {}),
         ...(options.examId ? { examId: options.examId } : {}),
         ...(options.examId ? { recordedAt: today } : {}),
@@ -1559,7 +1582,7 @@ export default function Cadence() {
     });
     if (toastTimer.current) clearTimeout(toastTimer.current);
     const selfLabel = options.source === 'self-review'
-      ? (SELF_ASSESSMENTS.find((x) => x.grade === grade)?.label || gradeLabel(evidenceType, grade))
+      ? (SELF_ASSESSMENTS.find((x) => x.level === options.masteryLevel)?.label || gradeLabel(evidenceType, grade))
       : gradeLabel(evidenceType, grade);
     setToast({ text: `${options.source === 'self-review' ? 'Consolidation' : AXES[axis].label} : « ${selfLabel} »`, entryId });
     toastTimer.current = setTimeout(() => setToast(null), 6000);
@@ -1607,7 +1630,8 @@ export default function Cadence() {
   const addExam = (subjectId, exam) => patch((p) => ({
     ...p, exams: [...p.exams, {
       id: uid(), subjectId, name: exam.name, date: exam.date,
-      chapterIds: exam.chapterIds || [], importance: exam.importance || 'normal',
+      chapterIds: exam.chapterIds || [], portionIds: exam.portionIds || [],
+      importance: exam.importance || 'normal',
     }],
   }));
   const updateExam = (id, up) => patch((p) => ({
@@ -1624,9 +1648,70 @@ export default function Cadence() {
     exams: p.exams.map((e) => {
       if (e.id !== examId) return e;
       const has = (e.chapterIds || []).includes(chapterId);
-      return { ...e, chapterIds: has ? e.chapterIds.filter((x) => x !== chapterId) : [...(e.chapterIds || []), chapterId] };
+      return {
+        ...e,
+        chapterIds: has ? e.chapterIds.filter((x) => x !== chapterId) : [...(e.chapterIds || []), chapterId],
+        portionIds: has ? (e.portionIds || []) : (e.portionIds || []).filter((portionId) => {
+          const portion = p.chapters.find((chapter) => chapter.id === portionId);
+          return portion?.parentChapterId !== chapterId;
+        }),
+      };
     }),
   }));
+  const toggleExamPortion = (examId, portionId) => patch((p) => ({
+    ...p,
+    exams: p.exams.map((e) => {
+      if (e.id !== examId) return e;
+      const has = (e.portionIds || []).includes(portionId);
+      return { ...e, portionIds: has
+        ? (e.portionIds || []).filter((x) => x !== portionId)
+        : [...(e.portionIds || []), portionId] };
+    }),
+  }));
+
+  const addCourseTest = (subjectId, test) => patch((p) => ({
+    ...p,
+    courseTests: [...(p.courseTests || []), newCourseTest(
+      subjectId, test.name, test.scheduledFor,
+      test.chapterIds || [], test.portionIds || [], today,
+    )],
+  }));
+  const updateCourseTest = (id, up) => patch((p) => ({
+    ...p,
+    courseTests: (p.courseTests || []).map((test) => (test.id === id ? { ...test, ...up } : test)),
+  }));
+  const deleteCourseTest = (id) => patch((p) => ({
+    ...p,
+    courseTests: (p.courseTests || []).filter((test) => test.id !== id),
+    courseTestLog: (p.courseTestLog || []).filter((entry) => entry.testId !== id),
+    deleted: markDeleted(p.deleted, 'courseTests', [id], today),
+  }));
+  const recordCourseTest = (testId, score, maxScore, closedBook) => {
+    if (!closedBook || !Number.isFinite(score) || !Number.isFinite(maxScore)
+      || maxScore <= 0 || score < 0 || score > maxScore) return;
+    const currentTest = courseTests.find((item) => item.id === testId);
+    if (!currentTest) return;
+    const ratio = score / maxScore;
+    const next = nextCourseTestDate(currentTest, ratio, exams, settings, today, chapters);
+    patch((p) => {
+      const test = (p.courseTests || []).find((item) => item.id === testId);
+      if (!test) return p;
+      const entry = {
+        id: uid(), testId, date: today, score, maxScore, ratio, closedBook: true,
+        chapterIds: [...(test.chapterIds || [])], portionIds: [...(test.portionIds || [])],
+        nextScheduledFor: next.date,
+      };
+      return {
+        ...p,
+        courseTests: (p.courseTests || []).map((item) => (item.id === testId
+          ? { ...item, scheduledFor: next.date } : item)),
+        courseTestLog: [...(p.courseTestLog || []), entry],
+      };
+    });
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast({ text: `Test noté : ${score}/${maxScore} · prochain le ${next.date.split('-').reverse().join('/')}` });
+    toastTimer.current = setTimeout(() => setToast(null), 6000);
+  };
 
   const updateSetting = (key, value) => patch((p) => ({ ...p, settings: { ...p.settings, [key]: value } }));
 
@@ -1668,8 +1753,8 @@ export default function Cadence() {
 
   // Épreuves récemment passées à débriefer (constat = axe problème/annale).
   const debriefs = useMemo(
-    () => pendingDebriefs(exams, studyChapters, reviewLog, examDebriefs, today),
-    [exams, studyChapters, reviewLog, examDebriefs, today]);
+    () => pendingDebriefs(exams, chapters, reviewLog, examDebriefs, today),
+    [exams, chapters, reviewLog, examDebriefs, today]);
 
   const upcomingExams = useMemo(() => exams
     .map((e) => ({ ...e, days: daysBetween(today, e.date) }))
@@ -1678,7 +1763,8 @@ export default function Cadence() {
   const nextExam = upcomingExams[0] || null;
 
   const dueForecast = useMemo(
-    () => forecastReviewUnits(reviewUnits, settings, today, 35), [reviewUnits, settings, today]);
+    () => forecastReviewUnits(reviewUnits, settings, today, 35, exams),
+    [reviewUnits, settings, today, exams]);
 
   // Rappel d'export discret : jamais exporté (ou > 21 j) avec un historique réel.
   const exportStale = reviewLog.length >= 20 &&
@@ -1698,14 +1784,22 @@ export default function Cadence() {
   const parentById = useMemo(
     () => Object.fromEntries(studyChapters.map((c) => [c.id, c])), [studyChapters]);
   const dueReviewUnits = useMemo(() => reviewUnits
-    .map((unit) => ({ unit, info: reviewUnitInfo(unit, settings, today) }))
+    .map((unit) => ({ unit, info: reviewUnitInfo(unit, settings, today, exams) }))
     .filter(({ info }) => info.due)
     .sort((a, b) => a.info.dueAt.localeCompare(b.info.dueAt)
       || a.unit.introducedAt.localeCompare(b.unit.introducedAt)),
-  [reviewUnits, settings, today]);
+  [reviewUnits, settings, today, exams]);
   const selfReviewsToday = useMemo(
     () => reviewLog.filter((r) => r.date === today && r.source === 'self-review').length,
     [reviewLog, today]);
+  const timeAllocations = useMemo(
+    () => allocateSubjectMinutes(subjects, exams, settings, today),
+    [subjects, exams, settings, today]);
+  const courseTestsDue = useMemo(
+    () => dueCourseTests(courseTests, today), [courseTests, today]);
+  const testSuggestions = useMemo(
+    () => courseTestSuggestions(subjects, chapters, courseTests, today),
+    [subjects, chapters, courseTests, today]);
 
   return (
     <div className="cadence" style={{
@@ -1808,9 +1902,13 @@ export default function Cadence() {
               today={today} coreSubjects={coreSubjects} currentBySubject={currentBySubject}
               dueReviewUnits={dueReviewUnits} parentById={parentById}
               subjectById={subjectById} selfReviewsToday={selfReviewsToday}
+              timeAllocations={timeAllocations}
+              courseTestsDue={courseTestsDue} courseTestLog={courseTestLog}
+              testSuggestions={testSuggestions}
               nextExam={nextExam} annalesBanners={annalesBanners} debriefs={debriefs}
               exportStale={exportStale}
               onGrade={gradeEvidence} onDismissDebrief={dismissDebrief}
+              onRecordCourseTest={recordCourseTest}
               onSetPosition={setChapterPosition}
               onUseDoc={useChapterDoc}
               onGoSubjects={goToSubjects}
@@ -1818,11 +1916,14 @@ export default function Cadence() {
           )}
           {tab === 'calendar' && (
             <CalendarView today={today} exams={exams} subjectById={subjectById}
-              settings={settings} upcomingExams={upcomingExams} dueForecast={dueForecast} />
+              courseTests={courseTests} settings={settings}
+              upcomingExams={upcomingExams} dueForecast={dueForecast} />
           )}
           {tab === 'subjects' && (
             <SubjectsView
-              subjects={subjects} chapters={studyChapters} exams={exams} settings={settings} today={today}
+              subjects={subjects} chapters={studyChapters} reviewUnits={reviewUnits}
+              exams={exams} courseTests={courseTests} courseTestLog={courseTestLog}
+              settings={settings} today={today}
               onAddSubject={addSubject} onUpdateSubject={updateSubject} onDeleteSubject={deleteSubject}
               onAddChapter={addChapter} onAddChaptersBulk={addChaptersBulk}
               onAddResource={addResource} onSetPosition={setChapterPosition} onSetAxes={setChapterAxes}
@@ -1830,7 +1931,9 @@ export default function Cadence() {
               onUpdateChapter={updateChapter} onDeleteChapter={deleteChapter}
               onSetLevel={setChapterLevel} onSetAxisMinutes={setChapterAxisMinutes}
               onAddExam={addExam} onUpdateExam={updateExam} onDeleteExam={deleteExam}
-              onToggleExamChapter={toggleExamChapter}
+              onToggleExamChapter={toggleExamChapter} onToggleExamPortion={toggleExamPortion}
+              onAddCourseTest={addCourseTest} onUpdateCourseTest={updateCourseTest}
+              onDeleteCourseTest={deleteCourseTest}
               focusRequest={subjectFocus}
               onFocusHandled={setSubjectFocus}
             />
@@ -1848,9 +1951,11 @@ export default function Cadence() {
         <div className="cad-toast" role="status">
           <Check size={15} color={C.good} />
           <span style={{ fontFamily: SANS, fontSize: 13 }}>{toast.text}</span>
-          <Btn variant="bare" onClick={() => undoReview(toast.entryId)} style={{ color: C.accent, fontSize: 13 }}>
-            <Undo2 size={13} /> Annuler
-          </Btn>
+          {toast.entryId && (
+            <Btn variant="bare" onClick={() => undoReview(toast.entryId)} style={{ color: C.accent, fontSize: 13 }}>
+              <Undo2 size={13} /> Annuler
+            </Btn>
+          )}
         </div>
       )}
     </div>
@@ -1861,17 +1966,25 @@ export default function Cadence() {
  *  Vue 1 — Aujourd'hui
  * ================================================================== */
 
-const SELF_ASSESSMENTS = [
-  { grade: 1, label: 'À revoir', color: C.bad, hint: 'je n’ai pas retrouvé l’essentiel sans le document' },
-  { grade: 2, label: 'Fragile', color: C.warn, hint: 'j’ai retrouvé avec hésitation ou avec une aide' },
-  { grade: 3, label: 'Maîtrisé', color: C.good, hint: 'j’ai retrouvé correctement sans support' },
+const SELF_ASSESSMENT_HINTS = [
+  'je n’ai pas retrouvé l’essentiel sans le document',
+  'quelques bribes seulement ; le support reste indispensable',
+  'l’ensemble revient, mais avec hésitation ou une aide',
+  'restitution correcte et autonome, sans support',
+  'restitution fluide, précise et justifiée, sans support',
 ];
+const SELF_ASSESSMENT_COLORS = [C.bad, '#fb923c', C.warn, C.good, '#38bdf8'];
+const SELF_ASSESSMENTS = MASTERY_LEVELS.map((item) => ({
+  ...item,
+  color: SELF_ASSESSMENT_COLORS[item.level],
+  hint: SELF_ASSESSMENT_HINTS[item.level],
+}));
 
 function SelfAssessmentButtons({ onGrade }) {
   return (
     <div role="group" aria-label="Maîtrise après reprise" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
       {SELF_ASSESSMENTS.map((option) => (
-        <button key={option.grade} type="button" onClick={() => onGrade(option.grade)}
+        <button key={option.level} type="button" onClick={() => onGrade(option.grade, option.level)}
           title={option.hint} style={{
             fontFamily: SANS, fontSize: 12, fontWeight: 650, padding: '6px 11px', borderRadius: 8,
             cursor: 'pointer', border: `1px solid ${option.color}66`,
@@ -1907,7 +2020,7 @@ function ReadOnlyDocs({ chapter, onUseDoc }) {
   );
 }
 
-function ContinuityCard({ subject, chapter, today, onSetPosition, onUseDoc, onGoSubjects }) {
+function ContinuityCard({ subject, chapter, allocation, today, onSetPosition, onUseDoc, onGoSubjects }) {
   if (!chapter) {
     return (
       <div className="cad-card" style={{
@@ -1933,6 +2046,12 @@ function ContinuityCard({ subject, chapter, today, onSetPosition, onUseDoc, onGo
         <span style={{ fontFamily: SANS, fontSize: 14.5, fontWeight: 700 }}>{subject.name}</span>
         <span style={{ fontFamily: SANS, fontSize: 12.5, color: C.dim }}>{chapter.name}</span>
         {additionDate === today && <Chip color={C.accent}>ajout du jour</Chip>}
+        {allocation?.changed && (
+          <Chip color={allocation.minutes > allocation.base ? C.warn : C.dim}
+            title={`${allocation.exam?.name || 'Examen'} · pression ×${f2(allocation.factor)} · retour automatique à ${fmtMinutes(allocation.base)} après l’épreuve`}>
+            aujourd’hui {fmtMinutes(allocation.minutes)} · normal {fmtMinutes(allocation.base)}
+          </Chip>
+        )}
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <PositionField value={chapter.position} onSave={(value) => onSetPosition(chapter.id, value)} />
@@ -1940,6 +2059,63 @@ function ContinuityCard({ subject, chapter, today, onSetPosition, onUseDoc, onGo
           style={{ color: C.faint, fontSize: 11.5 }}>modifier</Btn>
       </div>
       <ReadOnlyDocs chapter={chapter} onUseDoc={onUseDoc} />
+    </div>
+  );
+}
+
+function CourseTestCard({ test, subject, latestResult, today, onRecord }) {
+  const [scoreText, setScoreText] = useState('');
+  const [maxText, setMaxText] = useState('20');
+  const [closedBook, setClosedBook] = useState(false);
+  const score = Number(scoreText);
+  const maxScore = Number(maxText);
+  const valid = scoreText !== '' && maxText !== '' && Number.isFinite(score)
+    && Number.isFinite(maxScore) && maxScore > 0 && score >= 0 && score <= maxScore && closedBook;
+  const overdue = Math.max(0, daysBetween(test.scheduledFor, today));
+  return (
+    <div className="cad-card" role="group" aria-label={`${test.name} — test de cours`} style={{
+      background: C.panel, border: '1px solid rgba(167,139,250,.34)',
+      borderLeft: '3px solid #a78bfa', borderRadius: 10, padding: 13,
+      display: 'flex', flexDirection: 'column', gap: 10,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <FlaskConical size={16} color="#a78bfa" />
+        {subject && <Pastille color={subject.color} />}
+        <span style={{ fontFamily: SANS, fontSize: 13.5, fontWeight: 700 }}>{test.name}</span>
+        <Chip color={overdue ? C.warn : '#c4b5fd'} style={{ marginLeft: 'auto' }}>
+          {overdue ? `en retard de ${overdue} j` : 'à faire aujourd’hui'}
+        </Chip>
+      </div>
+      <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', alignItems: 'center' }}>
+        <Chip color={C.dim}>{(test.chapterIds || []).length} chapitre{(test.chapterIds || []).length > 1 ? 's' : ''}</Chip>
+        <Chip color={C.dim}>{(test.portionIds || []).length} section{(test.portionIds || []).length > 1 ? 's' : ''}</Chip>
+        {latestResult && (
+          <Chip color={C.faint}>dernier : {latestResult.score}/{latestResult.maxScore} le {latestResult.date.split('-').reverse().join('/')}</Chip>
+        )}
+      </div>
+      <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint }}>
+        Fais le test sans cours ni correction, puis saisis seulement le résultat réel.
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input type="number" min="0" step="0.25" value={scoreText} onChange={(event) => setScoreText(event.target.value)}
+          aria-label={`note obtenue pour ${test.name}`} placeholder="note" style={{
+            width: 76, fontFamily: MONO, fontSize: 13, color: C.text, background: C.inset,
+            border: `1px solid ${C.line2}`, borderRadius: 7, padding: '7px 8px',
+          }} />
+        <span style={{ color: C.faint }}>/</span>
+        <input type="number" min="0.25" step="0.25" value={maxText} onChange={(event) => setMaxText(event.target.value)}
+          aria-label={`barème pour ${test.name}`} style={{
+            width: 76, fontFamily: MONO, fontSize: 13, color: C.text, background: C.inset,
+            border: `1px solid ${C.line2}`, borderRadius: 7, padding: '7px 8px',
+          }} />
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontFamily: SANS, fontSize: 12, color: C.dim }}>
+          <input type="checkbox" checked={closedBook} onChange={(event) => setClosedBook(event.target.checked)} />
+          sans cours ni corrigé
+        </label>
+        <Btn variant="primary" disabled={!valid} onClick={() => onRecord(test.id, score, maxScore, closedBook)}>
+          <Check size={14} /> Enregistrer la note
+        </Btn>
+      </div>
     </div>
   );
 }
@@ -1959,6 +2135,7 @@ function ReviewUnitCard({ item, subject, parent, today, onGrade, onUseDoc }) {
         {subject && <Pastille color={subject.color} />}
         <span style={{ fontFamily: SANS, fontSize: 13.5, fontWeight: 700 }}>{subject?.name}</span>
         <span style={{ fontFamily: SANS, fontSize: 12, color: C.dim }}>{parent?.name}</span>
+        {info.pressureFactor > 1 && <Chip color={C.warn}>pression {info.exam?.name} ×{f2(info.pressureFactor)}</Chip>}
         <Chip color={info.overdueDays ? C.warn : C.accent} style={{ marginLeft: 'auto' }}>{timing}</Chip>
       </div>
       <div style={{ fontFamily: MONO, fontSize: 12, color: C.text }}>{unit.name}</div>
@@ -1967,7 +2144,9 @@ function ReviewUnitCard({ item, subject, parent, today, onGrade, onUseDoc }) {
         <span style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint }}>
           Après l’avoir restitué sans support :
         </span>
-        <SelfAssessmentButtons onGrade={(grade) => onGrade(unit.id, 'recall', grade, { source: 'self-review' })} />
+        <SelfAssessmentButtons onGrade={(grade, masteryLevel) => onGrade(unit.id, 'recall', grade, {
+          source: 'self-review', masteryLevel,
+        })} />
       </div>
     </div>
   );
@@ -1975,10 +2154,13 @@ function ReviewUnitCard({ item, subject, parent, today, onGrade, onUseDoc }) {
 
 function TodayView({
   today, coreSubjects, currentBySubject, dueReviewUnits, parentById, subjectById,
-  selfReviewsToday, debriefs, annalesBanners, nextExam, exportStale,
-  onGrade, onDismissDebrief, onSetPosition, onUseDoc,
+  selfReviewsToday, timeAllocations, courseTestsDue, courseTestLog, testSuggestions,
+  debriefs, annalesBanners, nextExam, exportStale,
+  onGrade, onRecordCourseTest, onDismissDebrief, onSetPosition, onUseDoc,
   onGoSubjects,
 }) {
+  const allocationBySubject = Object.fromEntries((timeAllocations || []).map((row) => [row.subject.id, row]));
+  const adjusted = (timeAllocations || []).filter((row) => row.changed);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <div style={{ display: 'flex', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap' }}>
@@ -1996,9 +2178,20 @@ function TodayView({
         <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, margin: '-3px 0 10px' }}>
           CADENCE ouvre le chapitre et le document ; il ne choisit pas le nouveau contenu à ta place.
         </div>
+        {adjusted.length > 0 && (
+          <div style={{
+            marginBottom: 10, padding: '8px 11px', borderRadius: 8,
+            border: '1px solid rgba(251,191,36,.25)', background: 'rgba(251,191,36,.05)',
+            fontFamily: SANS, fontSize: 11.5, color: C.dim,
+          }}>
+            Rééquilibrage temporaire d’examen : le total quotidien reste fixe, les minimums sont protégés,
+            puis les durées normales reviennent automatiquement après l’épreuve.
+          </div>
+        )}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(300px,1fr))', gap: 10 }}>
           {coreSubjects.map((subject) => (
             <ContinuityCard key={subject.id} subject={subject} chapter={currentBySubject[subject.id]}
+              allocation={allocationBySubject[subject.id]}
               today={today} onSetPosition={onSetPosition} onUseDoc={onUseDoc}
               onGoSubjects={onGoSubjects} />
           ))}
@@ -2027,6 +2220,42 @@ function TodayView({
                   onGrade={onGrade} onUseDoc={onUseDoc} />
               );
             })}
+          </div>
+        )}
+      </section>
+
+      <section>
+        <SectionTitle icon={FlaskConical}>Tests de cours</SectionTitle>
+        {(courseTestsDue || []).length === 0 && (testSuggestions || []).length === 0 ? (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10, padding: '14px 15px',
+            border: `1px solid rgba(52,211,153,.3)`, borderRadius: 9, background: 'rgba(52,211,153,.05)',
+          }}>
+            <Check size={17} color={C.good} />
+            <span style={{ fontFamily: SANS, fontSize: 13, color: C.dim }}>Aucun test de cours dû aujourd’hui.</span>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {(courseTestsDue || []).map((test) => (
+              <CourseTestCard key={test.id} test={test} subject={subjectById[test.subjectId]}
+                latestResult={latestCourseTestResult(test.id, courseTestLog)} today={today}
+                onRecord={onRecordCourseTest} />
+            ))}
+            {(testSuggestions || []).map((suggestion) => (
+              <div key={suggestion.subject.id} style={{
+                display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap', padding: '10px 12px',
+                border: `1px dashed ${C.line2}`, borderRadius: 9, background: C.panel2,
+              }}>
+                <Pastille color={suggestion.subject.color} />
+                <span style={{ fontFamily: SANS, fontSize: 12.5 }}>
+                  <b>{suggestion.subject.name}</b> · {suggestion.count} nouvelles sections sans test noté
+                </span>
+                <Btn variant="bare" onClick={() => onGoSubjects({ subjectId: suggestion.subject.id, target: 'test-add' })}
+                  style={{ marginLeft: 'auto', color: C.accent, fontSize: 12 }}>
+                  Planifier un test
+                </Btn>
+              </div>
+            ))}
           </div>
         )}
       </section>
@@ -2531,7 +2760,7 @@ function monthMatrix(year, month) {
 
 const WEEKDAYS = ['lun', 'mar', 'mer', 'jeu', 'ven', 'sam', 'dim'];
 
-function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueForecast }) {
+function CalendarView({ today, exams, courseTests, subjectById, settings, upcomingExams, dueForecast }) {
   const t = parseISO(today);
   const [cursor, setCursor] = useState({ y: t.getFullYear(), m: t.getMonth() });
   const cells = monthMatrix(cursor.y, cursor.m);
@@ -2543,6 +2772,15 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
     for (const e of exams) (map[e.date] ||= []).push(e);
     return map;
   }, [exams]);
+  const testsByDay = useMemo(() => {
+    const map = {};
+    for (const test of courseTests || []) (map[test.scheduledFor] ||= []).push(test);
+    return map;
+  }, [courseTests]);
+  const upcomingTests = useMemo(() => (courseTests || [])
+    .map((test) => ({ ...test, days: daysBetween(today, test.scheduledFor) }))
+    .filter((test) => test.days >= 0)
+    .sort((a, b) => a.days - b.days || a.name.localeCompare(b.name)), [courseTests, today]);
 
   const maxDue = Math.max(1, ...Object.values(dueForecast).map((v) => v.minutes || 0));
 
@@ -2591,12 +2829,14 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
             const iso = isoOf(cell);
             const isToday = iso === today;
             const dayExams = examsByDay[iso] || [];
+            const dayTests = testsByDay[iso] || [];
             const shade = annalesShade(iso);
             const cell0 = dueForecast[iso] || { count: 0, minutes: 0 };
             const dueMin = cell0.minutes;
             const dueCount = cell0.count;
             const titleParts = [
               ...dayExams.map((e) => `${e.name} (${(e.chapterIds || []).length} chap.)`),
+              ...dayTests.map((test) => `${test.name} — test de cours noté`),
               dueMin ? `${dueCount} consolidation${dueCount > 1 ? 's' : ''} · ~${fmtMinutes(dueMin)}` : null,
             ].filter(Boolean);
             return (
@@ -2626,6 +2866,11 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
                     </div>
                   )}
                   <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                    {dayTests.map((test) => (
+                      <span key={test.id} style={{
+                        width: 6, height: 6, borderRadius: '50%', background: '#a78bfa',
+                      }} />
+                    ))}
                     {dayExams.map((e) => (
                       <span key={e.id} style={{
                         height: 6, minWidth: 6, flex: dayExams.length > 1 ? '1 1 auto' : '0 0 auto',
@@ -2644,6 +2889,9 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
           </span>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <span style={{ width: 18, height: 4, borderRadius: 2, background: thermal(2.5) }} /> consolidations prévues
+          </span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#a78bfa' }} /> test de cours
           </span>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <span style={{ width: 10, height: 10, borderRadius: 3, border: `1px solid ${C.accent}` }} /> aujourd’hui
@@ -2671,6 +2919,7 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 7, flexWrap: 'wrap' }}>
                       <Mono style={{ fontSize: 11, color: C.dim }}>{fmtShortDate(e.date)}</Mono>
                       <Chip color={C.dim}>{(e.chapterIds || []).length} chap.</Chip>
+                      {(e.portionIds || []).length > 0 && <Chip color="#c4b5fd">{e.portionIds.length} section{e.portionIds.length > 1 ? 's' : ''}</Chip>}
                       <Chip color={e.importance === 'major' ? C.bad : e.importance === 'minor' ? C.faint : C.dim}
                         title="Importance de l'épreuve (module la pression d'examen)">
                         {IMPORTANCE[e.importance || 'normal'].label.toLowerCase()}
@@ -2749,6 +2998,28 @@ function CalendarView({ today, exams, subjectById, settings, upcomingExams, dueF
         </div>
 
         <div>
+          <SectionTitle icon={FlaskConical}>Tests de cours planifiés</SectionTitle>
+          {upcomingTests.length === 0 ? (
+            <Empty>Aucun test planifié. Ils se créent dans Matières et sont replanifiés après chaque note réelle.</Empty>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+              {upcomingTests.map((test) => (
+                <div key={test.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '9px 10px',
+                  borderRadius: 8, border: `1px solid ${C.line}`, background: C.panel,
+                }}>
+                  <Pastille color={subjectById[test.subjectId]?.color || C.dim} />
+                  <span style={{ fontFamily: SANS, fontSize: 12.5 }}>{test.name}</span>
+                  <Mono style={{ marginLeft: 'auto', fontSize: 12, color: test.days <= 3 ? C.warn : '#c4b5fd' }}>
+                    {test.days === 0 ? 'auj.' : `J−${test.days}`}
+                  </Mono>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div>
           <SectionTitle icon={TrendingUp}>Consolidations à venir (14 j)</SectionTitle>
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 12, display: 'flex', flexDirection: 'column', gap: 5 }}>
             {nextDays.map((d, i) => (
@@ -2807,13 +3078,74 @@ function LevelPicker({ current, onPick, compact }) {
   );
 }
 
+function ScopeSelector({ chapters, units, chapterIds, portionIds, onToggleChapter, onTogglePortion, onAll, onNone }) {
+  const whole = new Set(chapterIds || []);
+  const portions = new Set(portionIds || []);
+  const shortPortion = (unit) => unit.name.replace(/^Ajout du\s+\d{1,2}\/\d{1,2}\/\d{4}\s*[—-]\s*/i, '');
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', fontFamily: SANS, fontSize: 11, color: C.faint }}>
+        <span>Périmètre : {whole.size} chapitre{whole.size > 1 ? 's' : ''} entier{whole.size > 1 ? 's' : ''} · {portions.size} section{portions.size > 1 ? 's' : ''}</span>
+        {whole.size + portions.size === 0 && <Chip color={C.warn}>aucune pression ni planification</Chip>}
+        <button type="button" onClick={onAll} style={{ fontFamily: SANS, fontSize: 10.5, color: C.accent, background: 'transparent', border: 'none', cursor: 'pointer' }}>tout</button>
+        <span style={{ color: C.line2 }}>·</span>
+        <button type="button" onClick={onNone} style={{ fontFamily: SANS, fontSize: 10.5, color: C.dim, background: 'transparent', border: 'none', cursor: 'pointer' }}>aucun</button>
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {(chapters || []).map((chapter) => {
+          const active = whole.has(chapter.id);
+          return (
+            <button key={chapter.id} type="button" aria-pressed={active} onClick={() => onToggleChapter(chapter.id)} style={{
+              display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer',
+              fontFamily: SANS, fontSize: 12, padding: '4px 9px', borderRadius: 999,
+              border: `1px solid ${active ? 'rgba(94,169,255,.5)' : C.line2}`,
+              background: active ? 'rgba(94,169,255,.14)' : 'transparent',
+              color: active ? '#dbeafe' : C.dim,
+            }}>
+              {active ? <Check size={12} /> : <Plus size={12} />} {chapter.name}
+            </button>
+          );
+        })}
+      </div>
+      {(units || []).length > 0 && (
+        <details>
+          <summary style={{ fontFamily: SANS, fontSize: 11.5, color: C.dim, cursor: 'pointer' }}>
+            Sections quotidiennes ({units.length})
+          </summary>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', paddingTop: 7 }}>
+            {units.map((unit) => {
+              const inherited = whole.has(unit.parentChapterId);
+              const active = inherited || portions.has(unit.id);
+              return (
+                <button key={unit.id} type="button" aria-pressed={active} disabled={inherited}
+                  title={inherited ? 'déjà couverte par le chapitre entier' : unit.name}
+                  onClick={() => onTogglePortion(unit.id)} style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 5,
+                    cursor: inherited ? 'not-allowed' : 'pointer', opacity: inherited ? .55 : 1,
+                    fontFamily: SANS, fontSize: 11, padding: '4px 8px', borderRadius: 999,
+                    border: `1px solid ${active ? 'rgba(167,139,250,.5)' : C.line2}`,
+                    background: active ? 'rgba(167,139,250,.12)' : 'transparent',
+                    color: active ? '#ddd6fe' : C.faint,
+                  }}>
+                  {active ? <Check size={11} /> : <Plus size={11} />} {shortPortion(unit)}
+                </button>
+              );
+            })}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
 function SubjectsView({
-  subjects, chapters, exams, settings, today,
+  subjects, chapters, reviewUnits, exams, courseTests, courseTestLog, settings, today,
   onAddSubject, onUpdateSubject, onDeleteSubject,
   onAddChapter, onAddChaptersBulk, onAddResource, onUpdateChapter, onDeleteChapter,
   onSetLevel, onSetAxisMinutes, onSetPosition, onSetAxes,
   onAddDoc, onUseDoc, onRemoveDoc,
-  onAddExam, onUpdateExam, onDeleteExam, onToggleExamChapter,
+  onAddExam, onUpdateExam, onDeleteExam, onToggleExamChapter, onToggleExamPortion,
+  onAddCourseTest, onUpdateCourseTest, onDeleteCourseTest,
   focusRequest, onFocusHandled,
 }) {
   const [open, setOpen] = useState({});
@@ -2839,6 +3171,7 @@ function SubjectsView({
         if (focusRequest.target === 'chapter' && focusRequest.chapterId) targetId = `chapter-${focusRequest.chapterId}`;
         else if (focusRequest.target === 'chapter-add') targetId = `chapter-adder-${focusRequest.subjectId}`;
         else if (focusRequest.target === 'exam-add') targetId = `exam-adder-${focusRequest.subjectId}`;
+        else if (focusRequest.target === 'test-add') targetId = `test-adder-${focusRequest.subjectId}`;
         else targetId = `subject-${focusRequest.subjectId}`;
       }
       const target = document.getElementById(targetId)
@@ -2874,7 +3207,9 @@ function SubjectsView({
       {subjects.map((s, sidx) => {
         const isCore = s.type === 'core';
         const subChapters = chapters.filter((c) => c.subjectId === s.id);
+        const subUnits = (reviewUnits || []).filter((unit) => unit.subjectId === s.id);
         const subExams = exams.filter((e) => e.subjectId === s.id);
+        const subTests = (courseTests || []).filter((test) => test.subjectId === s.id);
         const expanded = !!open[s.id];
         return (
           <div id={`subject-${s.id}`} key={s.id} className="cad-in" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, animationDelay: `${Math.min(sidx, 8) * 40}ms` }}>
@@ -2905,6 +3240,31 @@ function SubjectsView({
                 style={{ background: 'transparent', border: `1px solid ${C.line}`, color: C.faint, borderRadius: 7, fontSize: 11, padding: '4px 7px', cursor: 'pointer', fontFamily: SANS }}>
                 ↔ {isCore ? 'passer en habitude' : 'passer en matière'}
               </button>
+
+              {isCore && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+                  <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>normal</span>
+                  <input type="number" min={0} max={720} step={15} value={s.dailyMinutes ?? SUBJECT_DAILY_MINUTES}
+                    onChange={(event) => {
+                      const dailyMinutes = clamp(Number(event.target.value) || 0, 0, 720);
+                      onUpdateSubject(s.id, {
+                        dailyMinutes,
+                        minimumMinutes: Math.min(s.minimumMinutes ?? SUBJECT_PROTECTED_MINUTES, dailyMinutes),
+                      });
+                    }}
+                    aria-label={`Durée quotidienne normale pour ${s.name}`}
+                    style={{ width: 60, fontFamily: MONO, fontSize: 12, color: C.text, background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 6, padding: '4px 5px' }} />
+                  <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>min</span>
+                  <input type="number" min={0} max={s.dailyMinutes ?? SUBJECT_DAILY_MINUTES} step={15}
+                    value={s.minimumMinutes ?? SUBJECT_PROTECTED_MINUTES}
+                    onChange={(event) => onUpdateSubject(s.id, {
+                      minimumMinutes: clamp(Number(event.target.value) || 0, 0, s.dailyMinutes ?? SUBJECT_DAILY_MINUTES),
+                    })}
+                    aria-label={`Minimum quotidien protégé pour ${s.name}`}
+                    style={{ width: 60, fontFamily: MONO, fontSize: 12, color: C.text, background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 6, padding: '4px 5px' }} />
+                  <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>min/j</span>
+                </div>
+              )}
 
               {!isCore && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -3036,38 +3396,14 @@ function SubjectsView({
                                     onClick={() => { if (confirm(`Supprimer l’épreuve « ${e.name} » ?`)) onDeleteExam(e.id); }} />
                                 </div>
                               </div>
-                              <div>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: SANS, fontSize: 11, color: C.faint, marginBottom: 5 }}>
-                                  <span>Chapitres couverts ({(e.chapterIds || []).length})</span>
-                                  {(e.chapterIds || []).length === 0 && <Chip color={C.warn}>aucune pression appliquée</Chip>}
-                                  <button type="button" onClick={() => onUpdateExam(e.id, { chapterIds: subChapters.map((c) => c.id) })}
-                                    style={{ fontFamily: SANS, fontSize: 10.5, color: C.accent, background: 'transparent', border: 'none', cursor: 'pointer', padding: '1px 4px' }}>
-                                    tout
-                                  </button>
-                                  <span style={{ color: C.line2 }}>·</span>
-                                  <button type="button" onClick={() => onUpdateExam(e.id, { chapterIds: [] })}
-                                    style={{ fontFamily: SANS, fontSize: 10.5, color: C.dim, background: 'transparent', border: 'none', cursor: 'pointer', padding: '1px 4px' }}>
-                                    aucun
-                                  </button>
-                                </div>
-                                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                                  {subChapters.map((c) => {
-                                    const on = (e.chapterIds || []).includes(c.id);
-                                    return (
-                                      <button key={c.id} type="button" aria-pressed={on}
-                                        onClick={() => onToggleExamChapter(e.id, c.id)} style={{
-                                        display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer',
-                                        fontFamily: SANS, fontSize: 12, padding: '4px 9px', borderRadius: 999,
-                                        border: `1px solid ${on ? 'rgba(94,169,255,.5)' : C.line2}`,
-                                        background: on ? 'rgba(94,169,255,.14)' : 'transparent',
-                                        color: on ? '#dbeafe' : C.dim,
-                                      }}>
-                                        {on ? <Check size={12} /> : <Plus size={12} />} {c.name}
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                              </div>
+                              <ScopeSelector chapters={subChapters} units={subUnits}
+                                chapterIds={e.chapterIds || []} portionIds={e.portionIds || []}
+                                onToggleChapter={(id) => onToggleExamChapter(e.id, id)}
+                                onTogglePortion={(id) => onToggleExamPortion(e.id, id)}
+                                onAll={() => onUpdateExam(e.id, {
+                                  chapterIds: subChapters.map((chapter) => chapter.id), portionIds: [],
+                                })}
+                                onNone={() => onUpdateExam(e.id, { chapterIds: [], portionIds: [] })} />
                             </div>
                           );
                         })}
@@ -3077,6 +3413,60 @@ function SubjectsView({
                       </div>
                     </>
                   )}
+                </div>
+
+                {/* Tests de cours : un élément stable, replanifié après chaque note. */}
+                <div>
+                  <SectionTitle icon={RefreshCw}>Tests de cours notés</SectionTitle>
+                  <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, margin: '-3px 0 9px' }}>
+                    Le même test est réutilisé : une note réelle sans support fixe sa prochaine date. Elle ne remplace pas l’auto-évaluation des portions.
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
+                    {subTests.map((test) => {
+                      const latest = latestCourseTestResult(test.id, courseTestLog);
+                      return (
+                        <div key={test.id} style={{ padding: 10, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            <TextInput value={test.name} onChange={(name) => onUpdateCourseTest(test.id, { name })}
+                              ariaLabel={`Nom du test ${test.name}`} style={{ maxWidth: 240 }} />
+                            <TextInput type="date" value={test.scheduledFor}
+                              onChange={(scheduledFor) => { if (scheduledFor) onUpdateCourseTest(test.id, { scheduledFor }); }}
+                              ariaLabel={`Prochaine date du test ${test.name}`} style={{ maxWidth: 160 }} />
+                            {latest && <Chip color={C.good}>dernier {latest.score}/{latest.maxScore}</Chip>}
+                            <div style={{ marginLeft: 'auto' }}>
+                              <IconBtn icon={Trash2} danger title={`Supprimer le test ${test.name}`}
+                                onClick={() => { if (confirm(`Supprimer le test « ${test.name} » et son historique ?`)) onDeleteCourseTest(test.id); }} />
+                            </div>
+                          </div>
+                          <ScopeSelector chapters={subChapters} units={subUnits}
+                            chapterIds={test.chapterIds || []} portionIds={test.portionIds || []}
+                            onToggleChapter={(id) => {
+                              const active = (test.chapterIds || []).includes(id);
+                              onUpdateCourseTest(test.id, {
+                                chapterIds: active
+                                  ? (test.chapterIds || []).filter((value) => value !== id)
+                                  : [...(test.chapterIds || []), id],
+                                portionIds: active ? (test.portionIds || []) : (test.portionIds || [])
+                                  .filter((portionId) => subUnits.find((unit) => unit.id === portionId)?.parentChapterId !== id),
+                              });
+                            }}
+                            onTogglePortion={(id) => onUpdateCourseTest(test.id, {
+                              portionIds: (test.portionIds || []).includes(id)
+                                ? (test.portionIds || []).filter((value) => value !== id)
+                                : [...(test.portionIds || []), id],
+                            })}
+                            onAll={() => onUpdateCourseTest(test.id, {
+                              chapterIds: subChapters.map((chapter) => chapter.id), portionIds: [],
+                            })}
+                            onNone={() => onUpdateCourseTest(test.id, { chapterIds: [], portionIds: [] })} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div id={`test-adder-${s.id}`}>
+                    <AddCourseTest subjectId={s.id} today={today} chapters={subChapters} units={subUnits}
+                      onAdd={onAddCourseTest} />
+                  </div>
                 </div>
               </div>
             )}
@@ -3204,7 +3594,7 @@ function AddExam({ subjectId, today, onAdd }) {
   const add = () => {
     const n = name.trim();
     if (!n) return;
-    onAdd(subjectId, { name: n, date, chapterIds: [] });
+    onAdd(subjectId, { name: n, date, chapterIds: [], portionIds: [] });
     setName('');
     setDate(addDays(today, 14));
   };
@@ -3215,6 +3605,56 @@ function AddExam({ subjectId, today, onAdd }) {
       <TextInput type="date" value={date} onChange={setDate} style={{ maxWidth: 160 }} />
       <Btn variant="primary" onClick={add}><Plus size={14} /> Épreuve</Btn>
       <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>tu choisiras les chapitres couverts ensuite</span>
+    </div>
+  );
+}
+
+function AddCourseTest({ subjectId, today, chapters, units, onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('Test de cours');
+  const [scheduledFor, setScheduledFor] = useState(addDays(today, 1));
+  const [chapterIds, setChapterIds] = useState([]);
+  const [portionIds, setPortionIds] = useState([]);
+  const toggle = (list, setList, id) => setList(list.includes(id)
+    ? list.filter((value) => value !== id) : [...list, id]);
+  const add = () => {
+    const clean = name.trim();
+    if (!clean || chapterIds.length + portionIds.length === 0) return;
+    onAdd(subjectId, { name: clean, scheduledFor, chapterIds, portionIds });
+    setName('Test de cours');
+    setScheduledFor(addDays(today, 1));
+    setChapterIds([]);
+    setPortionIds([]);
+    setOpen(false);
+  };
+  if (!open) return (
+    <Btn variant="bare" onClick={() => setOpen(true)} style={{ color: C.accent, paddingLeft: 0 }}>
+      <Plus size={14} /> Planifier un test de cours
+    </Btn>
+  );
+  return (
+    <div style={{ padding: 10, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 9 }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <TextInput value={name} onChange={setName} ariaLabel="nom du nouveau test de cours" style={{ maxWidth: 240 }} />
+        <TextInput type="date" value={scheduledFor} onChange={setScheduledFor}
+          ariaLabel="date du nouveau test de cours" style={{ maxWidth: 160 }} />
+      </div>
+      <ScopeSelector chapters={chapters} units={units} chapterIds={chapterIds} portionIds={portionIds}
+        onToggleChapter={(id) => {
+          const active = chapterIds.includes(id);
+          toggle(chapterIds, setChapterIds, id);
+          if (!active) setPortionIds((current) => current
+            .filter((portionId) => units.find((unit) => unit.id === portionId)?.parentChapterId !== id));
+        }}
+        onTogglePortion={(id) => toggle(portionIds, setPortionIds, id)}
+        onAll={() => { setChapterIds(chapters.map((chapter) => chapter.id)); setPortionIds([]); }}
+        onNone={() => { setChapterIds([]); setPortionIds([]); }} />
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <Btn variant="primary" onClick={add} disabled={!name.trim() || chapterIds.length + portionIds.length === 0}>
+          <Plus size={14} /> Créer le test
+        </Btn>
+        <Btn variant="bare" onClick={() => setOpen(false)} style={{ color: C.faint }}>annuler</Btn>
+      </div>
     </div>
   );
 }
@@ -3550,9 +3990,9 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
         <SectionTitle icon={Activity}>Principe</SectionTitle>
         <div style={{ fontFamily: SANS, fontSize: 12.5, color: C.dim, lineHeight: 1.6, maxWidth: 680 }}>
           Une portion nouvelle n’a pas de niveau. Dès le lendemain, restitue-la brièvement sans
-          le document, puis choisis <b>À revoir</b>, <b>Fragile</b> ou <b>Maîtrisé</b>.
-          Cette réponse déclenche sa prochaine date selon la courbe d’oubli. Les annales conservent
-          leur notation objective séparée.
+          le document, puis choisis l’un des cinq niveaux, d’<b>Oublié</b> à <b>Très solide</b>.
+          Cette réponse déclenche sa prochaine date selon la courbe d’oubli. Les tests de cours
+          notés et les annales conservent leurs résultats objectifs séparés.
         </div>
       </div>
 
@@ -3664,7 +4104,7 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
           <div className="cad-in" style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
             <textarea value={pasteText} onChange={(e) => setPasteText(e.target.value)} rows={5}
               aria-label="export JSON à coller"
-              placeholder='Colle ici le contenu d’un export CADENCE ({"version":8,"subjects":[…]}). Validation stricte avant tout remplacement.'
+              placeholder='Colle ici le contenu d’un export CADENCE ({"version":9,"subjects":[…]}). Validation stricte avant tout remplacement.'
               style={{
                 fontFamily: MONO, fontSize: 11.5, color: C.text, background: C.inset,
                 border: `1px solid ${C.line2}`, borderRadius: 7, padding: '8px 10px',
@@ -3713,7 +4153,7 @@ function SettingsView({ settings, state, chapters, onUpdate, onImport, onReset, 
         )}
         <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, marginTop: 10, lineHeight: 1.5, maxWidth: 620 }}>
           Tout est stocké localement sur cet appareil (une seule clé <Mono color={C.dim}>{STORAGE_KEY}</Mono>,
-          schéma v{state?.version ?? 8}), avec repli en mémoire si le stockage est indisponible.
+          schéma v{state?.version ?? 9}), avec repli en mémoire si le stockage est indisponible.
           La synchronisation GitHub n’envoie ces données que lorsqu’elle est activée dans CADENCE.
           Les <b>instantanés locaux</b> quotidiens vivent dans le même stockage : ils réparent
           une fausse manip, pas la perte de l’appareil. Ta seule vraie sauvegarde externe,

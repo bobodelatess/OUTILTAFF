@@ -87,7 +87,7 @@ describe('portions quotidiennes et courbe d’oubli', () => {
       lastExportAt: null,
     };
     const out = normalize(v7, TODAY);
-    expect(out.version).toBe(8);
+    expect(out.version).toBe(9);
     expect(out.chapters.filter(isReviewUnit)).toHaveLength(1);
     expect(out.chapters.find(isReviewUnit)).toMatchObject({
       parentChapterId: 'c1', introducedAt: YESTERDAY,

@@ -4,19 +4,21 @@ CADENCE relie le travail quotidien aux documents cumulatifs, puis fait
 réapparaître au bon moment les portions déjà étudiées. Il ne décide pas du
 nouveau contenu à travailler et ne fabrique pas de planning journalier.
 
-L'accueil répond à deux besoins seulement :
+L'accueil répond à trois besoins seulement :
 
 1. **Continuité quotidienne** — retrouver, pour chaque matière, le chapitre
    courant, le dernier point de reprise et ses liens Drive ;
 2. **Consolidations dues** — revoir rapidement les portions antérieures selon
-   leur propre courbe d'oubli.
+   leur propre courbe d'oubli ;
+3. **Tests de cours dus** — saisir une note réelle sans support et laisser le
+   modèle fixer la prochaine date.
 
 CADENCE est une PWA locale : aucun compte ni serveur CADENCE. Les données
 restent dans le navigateur, avec export/import JSON. La
 [synchronisation optionnelle](#synchronisation-entre-appareils) utilise un
 coffre privé appartenant au compte GitHub de l'utilisateur.
 
-## Modèle de suivi (schéma v8)
+## Modèle de suivi (schéma v9)
 
 Le **chapitre** est un repère stable : il organise le cours et porte les liens
 vers les documents cumulatifs. Une **portion quotidienne** est une unité de
@@ -33,8 +35,9 @@ Le comportement est volontairement asymétrique :
 - le jour de l'ajout, aucune maîtrise n'est demandée ou affichée ;
 - le lendemain, la portion apparaît une première fois dans les
   consolidations ;
-- après une restitution brève sans document, l'utilisateur choisit
-  **À revoir**, **Fragile** ou **Maîtrisé** ;
+- après une restitution brève sans document, l'utilisateur choisit l'un des
+  cinq niveaux : **Oublié**, **Très fragile**, **Fragile**, **Maîtrisé** ou
+  **Très solide** ;
 - cette réponse est enregistrée dans le journal et déclenche la prochaine
   date selon la courbe d'oubli ;
 - chaque portion avance indépendamment : ajouter du contenu au même chapitre
@@ -47,17 +50,21 @@ ou `exercice 12` reste un simple signet et ne crée aucune fausse révision.
 Lors d'une migration v7 → v8, CADENCE peut reconstruire honnêtement la dernière
 portion si le point existant respecte le format `Ajout du …`. Il n'invente pas
 les portions plus anciennes que l'ancien schéma ne connaissait pas.
+La migration v8 → v9 ajoute seulement les nouveaux champs neutres : aucune
+ancienne note, section, épreuve ou maîtrise n'est inventée.
 
 ## Auto-évaluation et courbe d'oubli
 
-Les trois catégories visibles sont des décisions de reprise, pas des notes
+Les cinq catégories visibles sont des décisions de reprise, pas des notes
 académiques :
 
 | Catégorie | Sens |
 | --- | --- |
-| **À revoir** | l'essentiel n'a pas été retrouvé sans le document |
-| **Fragile** | restitution hésitante ou avec une aide |
-| **Maîtrisé** | restitution correcte sans support |
+| **Oublié** | l'essentiel n'a pas été retrouvé |
+| **Très fragile** | quelques bribes ; support indispensable |
+| **Fragile** | ensemble retrouvé avec hésitation ou une aide |
+| **Maîtrisé** | restitution correcte et autonome sans support |
+| **Très solide** | restitution fluide, précise et justifiée sans support |
 
 La première échéance est toujours le lendemain de l'ajout. Ensuite, le rappel
 utilise les équations FSRS-4.5 avec leurs poids publiés par défaut et un seuil
@@ -69,7 +76,31 @@ synchronise comme le reste du journal. L'accueil n'affiche pas une jauge de
 maîtrise permanente : la catégorie n'est demandée que lorsqu'une consolidation
 est réellement due.
 
-## Annales et épreuves
+## Épreuves, pression et temps quotidien
+
+Une épreuve peut couvrir des chapitres entiers ou seulement des sections
+quotidiennes datées. La pression n'agit que sur ce périmètre : elle rapproche
+les consolidations concernées, resserre les tests de cours du même périmètre et
+module temporairement la répartition du temps entre matières.
+
+Chaque matière suivie porte une durée normale (120 min par défaut) et un
+minimum protégé (60 min par défaut). Le total normal quotidien reste fixe ; la
+part flexible va provisoirement vers les matières sous pression. Après
+l'épreuve, toutes les durées reviennent automatiquement à leur valeur normale.
+
+## Tests de cours, annales et épreuves
+
+Un test de cours est un élément stable et récurrent, ciblé sur des chapitres ou
+sections. Lorsqu'il est dû, l'accueil demande une note et un barème, avec
+confirmation que le test a été fait sans cours ni corrigé. La note brute est
+conservée et fixe la prochaine date : moins de 50 % → 1 jour, moins de 70 % →
+3 jours, moins de 85 % → 10 jours, sinon 24 jours, avec resserrement si une
+épreuve du même périmètre approche. Le résultat ne modifie jamais
+l'auto-évaluation des portions.
+
+À partir de cinq nouvelles sections non couvertes par un test (ou plusieurs
+sections restées une semaine sans test), CADENCE propose d'en planifier un sans
+enregistrer de faux résultat.
 
 Les annales restent séparées de l'auto-évaluation des portions. Elles utilisent
 quatre résultats objectifs : **Bloqué**, **Partiel**, **Résolu** et **Résolu
@@ -102,9 +133,9 @@ empêchent leur résurrection lors d'une fusion avec un appareil en retard.
 
 CADENCE comporte quatre vues :
 
-1. **Aujourd'hui** — continuité par matière, liens Drive, consolidations dues,
-   auto-évaluation à trois niveaux et bilans d'épreuve ;
-2. **Calendrier** — échéances de consolidation et épreuves à venir ;
+1. **Aujourd'hui** — continuité par matière, éventuel rééquilibrage temporaire,
+   consolidations dues, auto-évaluation à cinq niveaux, tests notés et bilans ;
+2. **Calendrier** — consolidations, tests de cours et épreuves à venir ;
 3. **Matières** — chapitres stables, ressources, points de reprise, documents
    et épreuves ;
 4. **Réglages** — seuil de rappel, paramètres avancés repliés,
@@ -113,10 +144,10 @@ CADENCE comporte quatre vues :
 La recherche de chapitres reste accessible depuis l'en-tête (`Ctrl/Cmd+K` ou
 `/`) et ignore les accents.
 
-Les anciennes notions de capacité du jour, classement automatique, plan en
-minutes et écran de progrès global ne sont plus dans le parcours actif. Le
-temps quotidien appartient à l'utilisateur ; CADENCE ne prescrit que les
-consolidations issues de données réellement enregistrées.
+Les anciennes notions de classement automatique, plan de contenu et écran de
+progrès global ne sont plus dans le parcours actif. CADENCE ne décide jamais
+du nouveau contenu. Le seul repère de durée est un rééquilibrage temporaire et
+à total fixe, déclenché par des épreuves réellement renseignées.
 
 Une portion compte environ cinq minutes dans le calendrier et la charge
 indicative : c'est un rappel bref, pas une nouvelle séance de cours.
@@ -145,8 +176,8 @@ hors-ligne plus longtemps pourrait ressusciter un ancien élément.
 
 ## Données et fiabilité
 
-- Clé locale stable `cadence.v2`, schéma interne versionné v8.
-- Migration automatique des schémas v1 à v7 ; toute version future inconnue
+- Clé locale stable `cadence.v2`, schéma interne versionné v9.
+- Migration automatique des schémas v1 à v8 ; toute version future inconnue
   est refusée.
 - Validation stricte des imports : identifiants, relations, dates ISO, enums,
   notes, bornes numériques, documents et références des portions.
@@ -161,8 +192,8 @@ hors-ligne plus longtemps pourrait ressusciter un ancien élément.
 ## Limites assumées
 
 - Les poids FSRS ne sont pas personnalisés à l'utilisateur.
-- Une auto-catégorisation reste une déclaration utilisateur ; seule une annale
-  ou une épreuve fournit un résultat académique objectif.
+- Une auto-catégorisation reste une déclaration utilisateur ; seuls un test de
+  cours noté, une annale ou une épreuve fournissent un résultat objectif.
 - Aucun indicateur n'est une prédiction de réussite à l'examen.
 - CADENCE ne stocke pas les PDF, ne rédige pas les notes et ne remplace pas un
   agenda, Anki ou un gestionnaire de tâches.
