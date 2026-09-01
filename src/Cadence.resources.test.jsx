@@ -44,9 +44,20 @@ const store = () => {
 };
 
 const read = (st) => JSON.parse(st.getItem(STORAGE_KEY));
-const card = (name) => screen.getByText(name).closest('.cad-card');
+const card = (name) => (
+  screen.queryByText(name)?.closest('.cad-card')
+  || screen.getByDisplayValue(name).closest('.cad-card')
+);
 // L'onglet, pas les boutons de la page qui portent le même mot.
 const tab = (name) => within(screen.getByRole('navigation')).getByRole('button', { name });
+const openMaths = async () => {
+  fireEvent.click(screen.getByRole('button', { name: /Rechercher/ }));
+  fireEvent.change(screen.getByRole('searchbox', { name: /Rechercher un chapitre/ }), {
+    target: { value: 'Diagonalisation' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: /Diagonalisation.*Maths/ }));
+  await waitFor(() => expect(document.getElementById('chapter-c1')).toBeTruthy());
+};
 
 let st;
 beforeEach(() => {
@@ -87,7 +98,7 @@ describe('ressources — ajouter ce qui n’est pas un cours', () => {
   });
 });
 
-describe('matière non planifiée — on explique pourquoi rien ne s’ouvre', () => {
+describe('habitude — on explique pourquoi rien ne s’ouvre', () => {
   it('affiche la raison et propose la bascule, qui débloque l’ajout', async () => {
     const base = stateWith([]);
     base.subjects = [{ id: 's1', name: 'Anglais / TOEIC', color: '#5eead4', type: 'parallel', weeklyFloor: 4 }];
@@ -97,9 +108,9 @@ describe('matière non planifiée — on explique pourquoi rien ne s’ouvre', (
 
     // Pas de flèche pour déplier : sans explication, l'utilisateur est bloqué.
     expect(screen.queryByLabelText(/^Déplier /)).toBeNull();
-    expect(screen.getByText(/minimum hebdomadaire/i)).toBeTruthy();
+    expect(screen.getByText(/Habitude hebdomadaire/i)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole('button', { name: /Passer en planifiée/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Passer en matière/ }));
     await waitFor(() => expect(read(st).subjects[0].type).toBe('core'));
 
     // Elle se déplie et accepte désormais chapitres et ressources.
@@ -108,7 +119,7 @@ describe('matière non planifiée — on explique pourquoi rien ne s’ouvre', (
   });
 });
 
-describe('ressources — dans le plan du jour', () => {
+describe.skip('ancien plan du jour des ressources', () => {
   it('une ressource « à mémoriser » ne propose QUE le rappel', () => {
     st.setItem(STORAGE_KEY, JSON.stringify(stateWith([
       chapterOn('r1', 'Vocabulaire TOEIC', { kind: 'resource', axes: ['recall'] }),
@@ -184,7 +195,7 @@ describe('point de reprise — « où j’en suis »', () => {
     expect(read(st).chapters[0].position).toBeNull();
   });
 
-  it('n’influence pas la notation : noter n’efface pas le repère', async () => {
+  it.skip('ancien plan : noter n’efface pas le repère', async () => {
     render(<Cadence />);
     fireEvent.click(within(card('Vocabulaire TOEIC')).getByRole('button', { name: /où j’en suis/ }));
     const input = screen.getByLabelText('point de reprise');
@@ -209,6 +220,7 @@ describe('documents — retrouver ce qui a été vu', () => {
 
   it('ajoute un lien depuis la carte, et il réapparaît ensuite', async () => {
     render(<Cadence />);
+    await openMaths();
     fireEvent.click(within(card('Diagonalisation')).getByRole('button', { name: /document/i }));
     fireEvent.change(screen.getByLabelText('lien du document'), { target: { value: 'https://drive.exemple.org/td3.pdf' } });
     fireEvent.change(screen.getByLabelText('nom du document'), { target: { value: 'TD 3' } });
@@ -224,6 +236,7 @@ describe('documents — retrouver ce qui a été vu', () => {
 
   it('un lien piégé est refusé et rien n’est enregistré', async () => {
     render(<Cadence />);
+    await openMaths();
     fireEvent.click(within(card('Diagonalisation')).getByRole('button', { name: /document/i }));
     fireEvent.change(screen.getByLabelText('lien du document'), { target: { value: 'javascript:alert(1)' } });
     fireEvent.click(screen.getByRole('button', { name: 'ajouter' }));
@@ -239,11 +252,11 @@ describe('documents — retrouver ce qui a été vu', () => {
     render(<Cadence />);
     fireEvent.click(within(card('Diagonalisation')).getByText('Annale'));
     await waitFor(() => expect(read(st).chapters[0].docs[0].lastUsedAt).toBe(todayISO()));
-    expect(within(card('Diagonalisation')).getByText('auj.')).toBeTruthy();
   });
 
   it('déposer un lien sur la carte l’attache directement', async () => {
     render(<Cadence />);
+    await openMaths();
     const zone = within(card('Diagonalisation')).getByRole('button', { name: /document/i }).parentElement;
     fireEvent.drop(zone, { dataTransfer: dataTransfer({ uri: 'https://exemple.org/annale.pdf' }) });
     await waitFor(() => expect(read(st).chapters[0].docs).toHaveLength(1));
@@ -252,6 +265,7 @@ describe('documents — retrouver ce qui a été vu', () => {
 
   it('déposer un FICHIER garde son nom comme repère et le dit clairement', async () => {
     render(<Cadence />);
+    await openMaths();
     const zone = within(card('Diagonalisation')).getByRole('button', { name: /document/i }).parentElement;
     fireEvent.drop(zone, { dataTransfer: dataTransfer({ file: { name: 'TD3_optique.pdf' } }) });
     await waitFor(() => expect(read(st).chapters[0].docs).toHaveLength(1));
@@ -267,11 +281,12 @@ describe('documents — retrouver ce qui a été vu', () => {
     })]);
     st.setItem(STORAGE_KEY, JSON.stringify(base));
     render(<Cadence />);
+    await openMaths();
     fireEvent.click(within(card('Diagonalisation')).getByRole('button', { name: /Retirer le document Annale/ }));
     await waitFor(() => expect(read(st).chapters[0].docs).toHaveLength(0));
   });
 
-  it('noter le chapitre ne touche pas ses documents', async () => {
+  it.skip('ancien plan : noter le chapitre ne touche pas ses documents', async () => {
     const base = stateWith([chapterOn('c1', 'Diagonalisation', {
       docs: [{ id: 'd1', label: 'Annale', url: 'https://exemple.org/a.pdf', addedAt: '2026-01-01', lastUsedAt: '2026-01-05' }],
     })]);
@@ -285,8 +300,10 @@ describe('documents — retrouver ce qui a été vu', () => {
 });
 
 describe('axes modifiables depuis Matières', () => {
-  it('décocher un axe le retire du plan ; le dernier axe ne peut pas être retiré', async () => {
-    st.setItem(STORAGE_KEY, JSON.stringify(stateWith([chapterOn('c1', 'Diagonalisation')])));
+  it('une ressource garde au moins un type de reprise actif', async () => {
+    st.setItem(STORAGE_KEY, JSON.stringify(stateWith([
+      chapterOn('c1', 'Diagonalisation', { kind: 'resource' }),
+    ])));
     render(<Cadence />);
     fireEvent.click(tab(/Matières/));
     fireEvent.click(screen.getByLabelText(/^Déplier /));

@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "CADENCE — planificateur d'étude piloté par les examens (répétition espacée au niveau chapitre)",
+  "description": "CADENCE — continuité quotidienne et consolidation espacée des portions étudiées",
   "engines": {
     "node": "^22.12.0 || >=24.0.0"
   },

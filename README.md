@@ -1,365 +1,192 @@
 # CADENCE
 
-Outil d'étude **spécialisé** qui répond à une seule question :
+CADENCE relie le travail quotidien aux documents cumulatifs, puis fait
+réapparaître au bon moment les portions déjà étudiées. Il ne décide pas du
+nouveau contenu à travailler et ne fabrique pas de planning journalier.
 
-> « Parmi mes unités académiques, lesquelles dois-je travailler ou retester
-> aujourd'hui, compte tenu de mon niveau constaté, des examens et du temps
-> réellement disponible ? »
+L'accueil répond à deux besoins seulement :
 
-Répétition espacée au niveau **chapitre** (maths / physique), pilotée par les
-examens et bornée par la capacité réelle du jour. PWA locale : **aucun serveur
-CADENCE**, aucun compte à créer, données sur l'appareil (export/import JSON).
-Pour retrouver les mêmes données sur téléphone et ordinateur, une
-[synchronisation optionnelle](#synchronisation-entre-appareils)
-passe par un **espace privé du compte GitHub de l'utilisateur** — c'est lui
-qui héberge ses données, personne d'autre.
+1. **Continuité quotidienne** — retrouver, pour chaque matière, le chapitre
+   courant, le dernier point de reprise et ses liens Drive ;
+2. **Consolidations dues** — revoir rapidement les portions antérieures selon
+   leur propre courbe d'oubli.
 
-CADENCE n'est volontairement **pas** : un emploi du temps, un gestionnaire
-d'habitudes ou de tâches, une prise de notes, un clone d'Anki, un Pomodoro.
+CADENCE est une PWA locale : aucun compte ni serveur CADENCE. Les données
+restent dans le navigateur, avec export/import JSON. La
+[synchronisation optionnelle](#synchronisation-entre-appareils) utilise un
+coffre privé appartenant au compte GitHub de l'utilisateur.
 
-## Les trois axes (schéma v7)
+## Modèle de suivi (schéma v8)
 
-Savoir un chapitre, ce sont **trois compétences distinctes** — CADENCE les
-suit **séparément**, et une note n'affecte JAMAIS un autre axe :
+Le **chapitre** est un repère stable : il organise le cours et porte les liens
+vers les documents cumulatifs. Une **portion quotidienne** est une unité de
+rappel interne rattachée à ce chapitre.
 
-| Axe | Ce qu'il mesure | Modèle | Durée par défaut |
-| --- | --- | --- | --- |
-| **Rappel** | restituer le cours de tête | équations FSRS‑4.5 (stabilité/difficulté par chapitre, poids publiés, **non personnalisés**) | 15 min |
-| **Exercice** | réussir un exercice type en autonomie | **score heuristique transparent** (résultats observés, tentatives, récence, échecs répétés) | 30 min |
-| **Problème / annale** | tenir sur un problème complet, conditions réelles | même heuristique, observée sur les annales | 60 min |
+Le format suivant crée ou met à jour la portion du jour :
 
-Honnêteté : seul le **rappel** a un modèle de mémoire (une *estimation de
-rappel*, pas une probabilité de réussite). Les axes exercice/problème
-n'utilisent **pas** de probabilité FSRS — leur « maîtrise observée » est un
-score heuristique assumé comme tel :
-
-```
-score   = moyenne mobile des résultats (α = 0.5, barème 0 / 0.4 / 0.8 / 1)
-risque  = (1 − score) + ancienneté (sature à 21 j, poids 0.4)
-        + 0.15 × échecs récents (plafond 3)
-jamais testé -> risque 1.2, plafonné par le niveau initial déclaré
+```text
+Ajout du jj/mm/aaaa — notion ou section précise
 ```
 
-Toutes les constantes sont **nommées et centralisées** dans `src/engine.js`
-(`RISK`, `AXIS_MINUTES`, `PRACTICE_GRADE`, `WORTH_RISK`…) — pas de
-coefficient caché.
+Le comportement est volontairement asymétrique :
 
-## Cours et ressources — tout ne se révise pas pareil
+- le jour de l'ajout, aucune maîtrise n'est demandée ou affichée ;
+- le lendemain, la portion apparaît une première fois dans les
+  consolidations ;
+- après une restitution brève sans document, l'utilisateur choisit
+  **À revoir**, **Fragile** ou **Maîtrisé** ;
+- cette réponse est enregistrée dans le journal et déclenche la prochaine
+  date selon la courbe d'oubli ;
+- chaque portion avance indépendamment : ajouter du contenu au même chapitre
+  ne remet pas artificiellement tout le chapitre à zéro.
 
-Un **chapitre de cours** porte les trois axes. Mais beaucoup de choses se
-révisent sans être un cours : une liste de vocabulaire, un recueil d'exercices,
-des annales, un entraînement. Une **ressource** déclare donc *ce qui la
-concerne* :
+Une correction du libellé le même jour met à jour la même portion, sans
+dupliquer ni perdre son historique. Un point libre comme `p. 47`, `unité 5`
+ou `exercice 12` reste un simple signet et ne crée aucune fausse révision.
 
-| Profil | Axes appliqués | Exemples |
-| --- | --- | --- |
-| À mémoriser | rappel | vocabulaire, cartes, formulaire |
-| À pratiquer | exercice | recueil d'exercices, entraînement |
-| Annales | problème | sujets complets, conditions réelles |
-| Complet | les trois | comme un chapitre de cours |
+Lors d'une migration v7 → v8, CADENCE peut reconstruire honnêtement la dernière
+portion si le point existant respecte le format `Ajout du …`. Il n'invente pas
+les portions plus anciennes que l'ancien schéma ne connaissait pas.
 
-Un axe non déclaré n'est **jamais** réclamé, ni compté dans les indicateurs, ni
-dans la couverture d'une épreuve — sinon une liste de vocabulaire afficherait
-éternellement « annales non testées ». Les axes restent modifiables case par
-case depuis **Matières**, et au moins un doit rester actif.
+## Auto-évaluation et courbe d'oubli
 
-## Où j'en suis
+Les trois catégories visibles sont des décisions de reprise, pas des notes
+académiques :
 
-Chaque élément porte un **point de reprise** : un repère court (« p. 47 »,
-« unité 5 », « exercice 12 »), modifiable en un clic depuis la carte du jour
-ou depuis Matières. Il n'entre dans **aucun calcul** — ce n'est pas une note,
-pas une échéance, pas une tâche : juste de quoi reprendre où tu t'es arrêté.
-
-CADENCE reste ce qu'il est : pas de sous-tâches, pas de cases à cocher, pas de
-rappels arbitraires, et **aucun fichier stocké** — des repères, pas un cloud.
-
-## Retrouver ce qu'on a vu
-
-Chaque élément porte une petite liste de **documents**, qu'on ajoute depuis la
-carte du jour (bouton « document ») ou en **déposant un lien dessus**. À la
-session suivante, ils sont là, **le plus récemment ouvert en tête** — c'est
-exactement ce qu'on cherche quand un chapitre revient trois semaines plus tard.
-Ouvrir un document le marque « utilisé aujourd'hui ».
-
-**Un document est une référence, jamais un fichier.** C'est une contrainte
-mesurée, pas un choix esthétique : un état réaliste (120 chapitres, ~2 900
-tests notés) pèse déjà 1,1 Mo pour ~5 Mo de budget navigateur, et un seul PDF
-de 2 Mo en occuperait 2,7 — retransmis **en entier à chaque synchronisation**.
-On stocke donc un lien (Drive, iCloud, une page), qui coûte une centaine
-d'octets et se synchronise partout. Déposer un fichier garde **son nom** comme
-repère de ce qui a été vu, en le disant clairement.
-
-Garde-fous : seuls les liens **http/https** sont acceptés — `javascript:`,
-`data:` et consorts sont refusés à la saisie **et** à l'import, puisque ces
-liens sont rendus cliquables. Ouverture en `noopener noreferrer`, 24 documents
-par élément au maximum. Entre appareils, les documents sont **réunis** par
-identifiant : un ajout sur le téléphone et un autre sur l'ordinateur donnent
-les deux.
-
-## Priorité et plan du jour
-
-```
-risque_rappel   = temps écoulé / intervalle visé      (urgence mémoire)
-risque_exercice = déficit observé + ancienneté + échecs (+ jamais testé)
-risque_problème = idem, sur les annales
-priorité        = max(risques des axes DÉCLARÉS) × pression_d'examen
-```
-
-La pression d'examen **multiplie** (elle n'additionne pas), modulée par
-l'importance de l'épreuve (`mult = 1 + (base−1)·w`, w ∈ {0.6, 1.0, 1.4}).
-La décomposition est affichée sur chaque carte — jamais de boîte noire.
-
-Chaque carte du plan affiche : le chapitre, sa matière, la **durée prévue**
-(celle de l'axe proposé), une **étiquette d'axe** (rappel / exercice /
-problème‑annale) et une raison courte (« rappel en retard de 3 j »,
-« exercices non testés », « annale importante avant Partiel »). L'axe proposé
-= l'axe au risque dominant ; **tu peux en changer sur la carte** au moment de
-noter, et noter jusqu'aux trois axes le même jour (une note par axe et par
-jour ; re-noter le même axe demande confirmation). CADENCE ne prescrit pas le
-contenu de la séance — il propose des chapitres, l'axe le plus utile, et
-mesure le résultat.
-
-## Des évaluations académiquement valides
-
-Noter = enregistrer le **résultat d'un test sans correction sous les yeux** —
-pas le temps passé, pas l'impression d'avoir compris. Les 4 issues s'adaptent
-à l'axe :
-
-| Axe | Échec → Réussite |
+| Catégorie | Sens |
 | --- | --- |
-| Rappel sans support | Oublié · Avec effort · Correct · Immédiat |
-| Exercice standard | Bloqué · Avec aide · Autonome · Autonome et propre |
-| Problème / annale | Bloqué · Partiel · Résolu · Résolu proprement dans le temps |
+| **À revoir** | l'essentiel n'a pas été retrouvé sans le document |
+| **Fragile** | restitution hésitante ou avec une aide |
+| **Maîtrisé** | restitution correcte sans support |
 
-Chaque note est journalisée avec son `evidenceType` et des instantanés
-avant/après de l'axe concerné (annulation exacte possible). Les anciennes
-notes migrées portent `legacy` et comptent côté rappel.
+La première échéance est toujours le lendemain de l'ajout. Ensuite, le rappel
+utilise les équations FSRS-4.5 avec leurs poids publiés par défaut et un seuil
+de rappel réglable. Il s'agit d'une estimation de mémoire, jamais d'une
+probabilité de réussir un examen.
 
-### Bilan d'épreuve
+La trace est conservée à chaque reprise (`source: self-review`) et se
+synchronise comme le reste du journal. L'accueil n'affiche pas une jauge de
+maîtrise permanente : la catégorie n'est demandée que lorsqu'une consolidation
+est réellement due.
 
-Une épreuve passée est le test en conditions réelles le plus fiable qui
-existe. Pendant **3 jours** après chaque épreuve, l'accueil propose de noter
-**ce qui a été constaté** pendant l'épreuve, chapitre par chapitre — ces
-constats alimentent l'axe problème/annale (rappel et exercices ne bougent
-pas). La bannière disparaît d'elle-même : tout noté, masquée, ou fenêtre
-écoulée. CADENCE n'enregistre pas la note /20 : ce serait suggérer une
-corrélation prédictive qu'il ne peut pas tenir.
+## Annales et épreuves
 
-## Niveaux initiaux réellement différenciés
+Les annales restent séparées de l'auto-évaluation des portions. Elles utilisent
+quatre résultats objectifs : **Bloqué**, **Partiel**, **Résolu** et **Résolu
+proprement dans le temps**.
 
-Un chapitre jamais testé est calibré par un niveau nommé : **Jamais vu 2.2 ·
-Fragile 1.6 · Moyen 1.0 · Solide 0.5** (risque de rappel initial). Le risque
-« pratique non testée » (1.2) est **plafonné par ce niveau** : un chapitre
-« Solide » n'encombre pas le plan, un « Jamais vu » y entre immédiatement.
-Recalibrer un chapitre (avec confirmation) fait repartir **les trois axes**
-du niveau choisi ; l'historique est **archivé**, jamais supprimé.
+Pendant trois jours après une épreuve, l'accueil permet aussi d'enregistrer le
+résultat réellement constaté, chapitre par chapitre. Ce constat alimente
+uniquement l'axe problème/annale ; il ne modifie ni les portions de rappel ni
+les exercices.
 
-## Capacité réelle & plan en minutes
+CADENCE n'invente jamais une note, une maîtrise ou une révision. Les résultats
+ne sont enregistrés qu'après une action explicite de l'utilisateur.
 
-- **Temps disponible aujourd'hui** réglable sur l'accueil (0 h · 2 h · 4 h ·
-  6 h · personnalisé), stocké par date. À 0 h : pas de faux plan, pas de faux
-  retard.
-- Chaque chapitre porte **une durée par axe** (modifiable : 15/30/45/60/90/120
-  min, depuis Matières **ou directement depuis les détails de la carte** du
-  jour — « ça m'a pris 60 min » se corrige sur place). Le plan se remplit
-  **en minutes** avec la durée de l'axe proposé — un chapitre de 90 min
-  n'entre pas dans une capacité de 60 min, et le total n'est jamais dépassé.
-- Le retard, la charge de croisière (entretien du rappel) et la prévision du
-  calendrier s'affichent **en minutes/heures d'abord**, en nombre de chapitres
-  ensuite. L'estimation « jours pour résorber » suppose la capacité par défaut
-  (c'est écrit dessus).
-- En surcharge, CADENCE propose de **réduire le périmètre ou d'augmenter le
-  temps** ; baisser la rétention cible reste possible mais est présenté comme
-  un compromis conscient — jamais un conseil automatique.
-- Matières classées par un **score robuste** (priorité max + moyenne du top
-  3) : saucissonner une matière ne lui donne aucun avantage.
+## Chapitres, ressources et documents
 
-## Indicateurs honnêtes (Progrès)
+Une **ressource** est un support durable qui n'est pas forcément un chapitre :
+recueil d'exercices, annales, vocabulaire ou formulaire. Son type de reprise
+reste configurable.
 
-Trois indicateurs **séparés** — jamais fondus en une « probabilité de
-réussite » unique :
+Les documents sont des références, jamais des fichiers incorporés. Seuls les
+liens HTTP/HTTPS sont acceptés ; `javascript:`, `data:` et les autres schémas
+actifs sont refusés à la saisie et à l'import. Les liens s'ouvrent avec
+`noopener noreferrer` et sont fusionnés sans perte entre appareils.
 
-1. **Rappel du cours** — rappel moyen estimé sur les chapitres testés, et
-   combien n'ont *jamais* été testés ;
-2. **Exercices — autonomie** — maîtrise observée moyenne (heuristique) ;
-3. **Problèmes/annales — transfert** — idem sur les annales.
+Supprimer un chapitre supprime aussi ses portions internes, leur journal actif,
+leurs reports et leurs références d'épreuve. Des pierres tombales datées
+empêchent leur résurrection lors d'une fusion avec un appareil en retard.
 
-Les « non testés » sont toujours une catégorie explicite, jamais dans une
-moyenne. La répartition des notes est **séparée par type de preuve**. Pas de
-« série de jours » : rien qui pousse à multiplier des tests faciles pour
-entretenir un compteur.
+## Interface
 
-## Navigation rapide
+CADENCE comporte quatre vues :
 
-- Une **recherche de chapitres** accessible depuis l'en-tête (`Ctrl/Cmd+K` ou
-  `/`) retrouve un chapitre par son nom ou sa matière, sans tenir compte des
-  accents, puis ouvre et met en évidence le résultat exact.
-- Le **mode focus** n'affiche qu'un chapitre à la fois, avec progression,
-  navigation précédente/suivante, raccourcis clavier et retour sûr au plan
-  complet. Il réutilise strictement la même notation multi-axes que les cartes
-  ordinaires.
+1. **Aujourd'hui** — continuité par matière, liens Drive, consolidations dues,
+   auto-évaluation à trois niveaux et bilans d'épreuve ;
+2. **Calendrier** — échéances de consolidation et épreuves à venir ;
+3. **Matières** — chapitres stables, ressources, points de reprise, documents
+   et épreuves ;
+4. **Réglages** — seuil de rappel, paramètres avancés repliés,
+   synchronisation, sauvegarde et import/export.
 
-## Les cinq vues
+La recherche de chapitres reste accessible depuis l'en-tête (`Ctrl/Cmd+K` ou
+`/`) et ignore les accents.
 
-1. **Aujourd'hui** — capacité du jour, plan par séances (minutes réelles),
-   **mode focus chapitre par chapitre**,
-   axe proposé + choix d'axe par carte, notation 4 issues, annulation,
-   reporter, **bilan d'épreuve**, clavier (Tab, r/e/p pour l'axe, 1–4 pour
-   noter), minimums hebdo *à protéger si possible*.
-2. **Calendrier** — épreuves (importance), rappel estimé le jour J *sans
-   nouvelle révision* (testés seulement, top 3 des plus fragiles),
-   **couverture des trois axes** par épreuve, prévision de charge de rappel
-   **en minutes**.
-3. **Matières** — UE, chapitres (niveau, maîtrise observée par axe, durées
-   par axe), ajout **en lot** (un par ligne), épreuves (date, importance,
-   chapitres couverts).
-4. **Progrès** — les trois indicateurs ci-dessus, rétention observée vs cible
-   (rappel uniquement), histogramme des tests, répartition par preuve.
-5. **Réglages** — capacité par défaut, rétention cible (avec charge
-   d'entretien du rappel en min/jour calculée sur tes chapitres), mode
-   simple/détaillé, paramètres du modèle repliés en section **experte**,
-   export/import validé, instantanés locaux (7 j).
+Les anciennes notions de capacité du jour, classement automatique, plan en
+minutes et écran de progrès global ne sont plus dans le parcours actif. Le
+temps quotidien appartient à l'utilisateur ; CADENCE ne prescrit que les
+consolidations issues de données réellement enregistrées.
 
 ## Synchronisation entre appareils
 
-Téléphone et ordinateur, les mêmes données, à jour partout — et toujours
-**aucun serveur CADENCE**. Les données sont déposées dans un **gist privé du
-compte GitHub de l'utilisateur** : c'est lui qui les héberge, les consulte, et
-peut les révoquer ou les supprimer à tout moment.
+Téléphone et ordinateur peuvent partager les mêmes données dans un **gist
+privé** du compte GitHub de l'utilisateur.
 
-- **Activation** : un jeton GitHub avec la **seule** portée « gists » (aucun
-  accès au code ni aux dépôts). Le jeton vit sous sa propre clé de stockage
-  (`cadence.sync`), **jamais** dans l'état CADENCE : un export JSON ne peut
-  pas le divulguer (testé).
-- **Second appareil** : « J'ai déjà un coffre » + l'identifiant affiché sur le
-  premier. Un appareil neuf **adopte** le coffre au lieu de fusionner, pour que
-  ses matières d'exemple ne polluent pas les vraies données.
-- **Fusion, jamais écrasement.** La boucle est toujours : lire le coffre →
-  valider → fusionner → appliquer → réécrire. Les propriétés sont testées :
+- Le jeton demandé n'a besoin que de la portée `gists`. Il vit dans une clé de
+  stockage séparée et n'entre jamais dans l'état exportable.
+- Un appareil neuf adopte le coffre existant au lieu d'y mélanger les matières
+  d'exemple.
+- La synchronisation suit toujours : lire → valider → fusionner → appliquer →
+  réécrire.
+- Le journal est réuni par identifiant ; deux auto-évaluations effectuées sur
+  des appareils différents ne sont pas perdues.
+- Les documents sont réunis, les suppressions respectées et les états de
+  rappel rejoués depuis le journal fusionné.
+- Un coffre illisible, un jeton refusé ou une panne réseau ne remplace jamais
+  l'état local.
 
-  | Garantie | Ce que ça veut dire |
-  | --- | --- |
-  | Convergence | `merge(a,b)` = `merge(b,a)`, et refusionner ne change plus rien |
-  | Aucun test perdu | le journal est une **union par identifiant** |
-  | Ordre sans importance | après fusion, les trois axes sont **rejoués** depuis le journal fusionné |
-  | Suppressions tenues | une suppression laisse une trace datée, sinon l'union la ressusciterait |
+Le coffre peut être détaché d'un appareil sans supprimer les données locales
+ni le gist. Les suppressions sont retenues 180 jours ; un appareil resté
+hors-ligne plus longtemps pourrait ressusciter un ancien élément.
 
-- Règles de départage, écrites et testées : reports → date la plus tardive ;
-  capacité d'un jour et réglages → appareil modifié en dernier ; compteurs
-  hebdo → maximum (un compteur manuel ne recule pas) ; bilan masqué → reste
-  masqué ; dernier export → date la plus récente.
-- **Le réseau ne fait jamais perdre de données** : le local reste la source de
-  vérité ; un coffre illisible ou un jeton refusé n'écrase rien et affiche une
-  erreur explicite. Hors-ligne, l'application fonctionne et se resynchronise au
-  retour. Échanges au chargement, après une pause de saisie, au retour sur
-  l'onglet et au retour du réseau ; une pastille dans l'en-tête indique l'état.
-- **Limite assumée** : une suppression n'est retenue que 180 jours. Un appareil
-  resté hors-ligne plus longtemps pourrait ressusciter un élément supprimé.
+## Données et fiabilité
 
-## Données, migrations, fiabilité
-
-- Un état principal (`cadence.v2`) au **schéma v7 versionné** ; les données
-  v1 à v6 sont migrées automatiquement, y compris par import JSON. Une
-  version future/inconnue est refusée : elle n'est jamais rétrogradée comme
-  si elle était ancienne.
-- Migration v4 → v5 : horodatage de modification et historique de suppression.
-- Migration v6 → v7 : chaque élément reçoit une liste de documents vide.
-- Migration v5 → v6 : tout élément existant devient un « chapitre de cours »
-  avec les trois axes — c'est-à-dire exactement son comportement actuel.
-  **Aucune donnée existante n'est touchée** (vérifié : priorité identique
-  avant et après migration).
-- Migration v3 → v4 **déterministe et non destructive** : le journal est
-  intégralement conservé (les notes sans type deviennent `legacy` = rappel).
-  L'état de rappel est **reconstruit en rejouant uniquement les événements de
-  rappel** depuis le niveau initial (v3 mélangeait tous les types dans un seul
-  état FSRS ; le rejeu nettoie cette pollution). Les axes exercice/problème
-  sont construits depuis leurs propres événements. Sans événement exploitable,
-  l'état v3 est conservé tel quel, marqué `source: 'legacy'` — on n'invente
-  pas de précision. Durées : rappel `min(30, ancienne)`, exercice `ancienne`,
-  problème `max(60, ancienne)`.
-- Import JSON **strictement validé** avant tout remplacement : version
-  connue, identifiants présents et uniques, références chapitre→matière et
-  épreuve→chapitres valides, dates ISO réelles, niveaux/enums connus,
-  notes/scores bornés, **durées d'axe (5–480 min), capacités datées
-  (0–1440 min) et minimums hebdo bornés**, nombres finis (NaN refusé). En
-  cas d'erreur : **liste lisible des problèmes, aucune donnée existante
-  modifiée**.
-- Au démarrage, un état illisible est mis en quarantaine. CADENCE restaure le
-  dernier instantané quotidien valide ; sans instantané exploitable, toute
-  réécriture reste bloquée jusqu'à un choix explicite. Le contenu brut reste
-  téléchargeable depuis la bannière de récupération.
-- Chaque écriture locale est relue et vérifiée. Quota dépassé, navigateur
-  privé ou repli en mémoire volatile deviennent des alertes visibles avec un
-  accès direct à l'export. Un événement `storage` suspend aussi les écritures
-  lorsque deux onglets divergent, puis demande quelle version conserver.
-- Les instantanés locaux sont pris une fois au début de la journée (7 jours),
-  sans reparser toutes les copies à chaque frappe. Une réinitialisation
-  complète efface état principal, ancien schéma, instantanés et quarantaine.
-- Export par **fichier JSON** ou par **presse-papiers** (« Copier
-  l'export »), import par fichier ou **par collage** — la voie fiable sur
-  téléphone, où le téléchargement de fichier échoue parfois en silence.
-- Rappel discret d'export si aucun export récent. Hors-ligne dès la première
-  installation grâce à un service worker généré au build : shell, bundle
-  hashé, manifeste et icônes sont précachés sous une révision dédiée. Le
-  nettoyage ne touche qu'aux caches préfixés `cadence-`.
+- Clé locale stable `cadence.v2`, schéma interne versionné v8.
+- Migration automatique des schémas v1 à v7 ; toute version future inconnue
+  est refusée.
+- Validation stricte des imports : identifiants, relations, dates ISO, enums,
+  notes, bornes numériques, documents et références des portions.
+- État illisible mis en quarantaine, avec restauration du dernier instantané
+  quotidien valide lorsque possible.
+- Écritures relues et vérifiées ; conflit entre onglets détecté avant tout
+  écrasement.
+- Sept instantanés locaux quotidiens, export par fichier ou presse-papiers,
+  import par fichier ou collage.
+- Service worker généré au build pour l'utilisation hors ligne.
 
 ## Limites assumées
 
-- Les poids FSRS sont les valeurs publiées par défaut, **non ajustés** à
-  l'utilisateur ; l'« estimation de rappel » n'est pas une garantie.
-- Les scores exercice/problème sont des **heuristiques transparentes**, pas
-  des modèles validés scientifiquement.
-- **Aucun chiffre de CADENCE n'est une prédiction de réussite à un examen** :
-  réussir dépend aussi du transfert, de la rédaction, du barème, du jour J.
-- Sur un site de projet GitHub Pages, `localStorage` est partagé avec les
-  autres projets du même domaine. Une origine ou un domaine dédié est requis
-  si cette isolation entre applications est importante.
-- Hors périmètre (volontairement) : agenda universel, notes, fichiers,
-  Pomodoro, cartes Anki, IA générative.
+- Les poids FSRS ne sont pas personnalisés à l'utilisateur.
+- Une auto-catégorisation reste une déclaration utilisateur ; seule une annale
+  ou une épreuve fournit un résultat académique objectif.
+- Aucun indicateur n'est une prédiction de réussite à l'examen.
+- CADENCE ne stocke pas les PDF, ne rédige pas les notes et ne remplace pas un
+  agenda, Anki ou un gestionnaire de tâches.
 
-## Lancer
+## Développement
 
 Prérequis : Node.js 22.12+ ou Node.js 24 LTS.
 
 ```bash
 npm ci
-npm run dev      # serveur de dev Vite
-npm run build    # build de production + précache PWA révisionné -> dist/
-npm test         # 255 tests : moteur, ressources, documents, fusion multi-appareils,
-                 # interactions réelles (RTL + jsdom), PWA/service worker
-                 # et génération déterministe du build hors-ligne
+npm run dev
+npm test
+npm run build
 ```
 
-## Architecture
+Principaux modules :
 
-- `src/engine.js` — **fonctions pures** : modèle de rappel (axe rappel),
-  heuristiques pratiques (axes exercice/problème), `applyEvidence` (un axe à
-  la fois), priorité multi-axes, plan en minutes, préparation d'examen,
-  bilan d'épreuve, migrations v1→v2→v3→v4, validation d'import, recalibrage.
-  Testé directement.
-- `src/Cadence.jsx` — interface React (un composant par vue), mutations et
-  états visibles de sauvegarde/conflit.
-- `src/ChapterSearch.jsx`, `src/FocusMode.jsx` — recherche clavier accessible
-  et séance chapitre par chapitre.
-- `src/storage.js` — chargement sûr, quarantaine/récupération, écritures
-  vérifiées et instantanés quotidiens.
-- `src/sync.js` — **fusion pure** de deux états (convergente, sans réseau) ;
-  `src/remote.js` — transport vers le coffre privé (jeton, création, lecture,
-  écriture, erreurs lisibles) ; `src/useSync.js` — quand lire et écrire.
-  Les trois sont testés séparément, puis de bout en bout dans
-  `src/Cadence.sync.test.jsx` (deux appareils simulés qui convergent).
-- `src/useCurrentDay.js` — bascule à minuit et resynchronisation au retour au
-  premier plan, pour qu'une PWA laissée ouverte date toujours correctement.
-- `src/Cadence.test.js` — tests du moteur ; `src/Cadence.ui.test.jsx` — tests
-  d'interaction (React Testing Library + jsdom) ; `src/Cadence.smoke.test.jsx`
-  — rendu SSR.
-- `scripts/generate-service-worker.mjs` — injecte après le build une révision et
-  la liste exhaustive des assets dans le service worker, puis vérifie que le
-  shell, le manifeste et les icônes sont bien précachés.
-- CI/CD GitHub Pages (`.github/workflows/deploy.yml`) : Node 24, audit npm,
-  255 tests et build sur chaque push/PR ; permissions Pages limitées au job
-  de déploiement.
+- `src/engine.js` — modèle de rappel, portions quotidiennes, migrations,
+  validation, annales et fonctions pures ;
+- `src/Cadence.jsx` — interface, mutations et intégration du stockage ;
+- `src/storage.js` — chargement sûr, quarantaine et instantanés ;
+- `src/sync.js` — fusion convergente de deux états ;
+- `src/remote.js` et `src/useSync.js` — transport et orchestration du coffre
+  privé ;
+- `src/review-units.test.js` et `src/Cadence.continuity.test.jsx` — invariants
+  du nouveau modèle et parcours utilisateur ;
+- `src/Cadence.sync.test.jsx` — synchronisation de bout en bout entre deux
+  appareils simulés.
 
-Défauts : `requestRetention=0.90`, `subjectsPerDay=3`, `sessionHours=2`,
-durées par axe 15/30/60 min, `maxExamPressure=5`, `pressureHorizon=35`,
-`examModeThreshold=21`.
+La CI GitHub Pages exécute les tests et le build avant déploiement.
