@@ -153,9 +153,10 @@ export const RESOURCE_PRESETS = [
 // volontairement : c'est un repère, pas un carnet de notes.
 export const POSITION_MAX = 120;
 
-// Une portion quotidienne est un rappel bref, pas une nouvelle séance de
-// cours. Cette durée alimente uniquement le calendrier et la charge indicative.
-export const REVIEW_UNIT_MINUTES = 5;
+// Une portion quotidienne correspond au temps réellement consacré à la
+// reprise du lendemain. Cette durée alimente uniquement le calendrier et la
+// charge indicative ; elle ne prescrit pas le nouveau cours du jour.
+export const REVIEW_UNIT_MINUTES = 17;
 
 /* ---- Documents attachés (v7) --------------------------------------
  * Un document est une RÉFÉRENCE, jamais un fichier : un lien (Drive,
@@ -321,16 +322,17 @@ export const DEBRIEF_WINDOW = 3;
 export const SUBJECT_DAILY_MINUTES = 120;
 export const SUBJECT_PROTECTED_MINUTES = 60;
 
-// Un test de cours est un élément stable et récurrent. Sa prochaine date
-// dépend uniquement du score réellement saisi sans support.
+// CADENCE ne génère aucun test : il rappelle seulement quand reprendre le
+// même périmètre. La note est toujours saisie sur 20 et maintient une cadence
+// de plusieurs passages par semaine, modulée par le résultat.
 export const COURSE_TEST_INTERVALS = [
   { below: 0.5, days: 1 },
-  { below: 0.7, days: 3 },
-  { below: 0.85, days: 10 },
-  { below: Infinity, days: 24 },
+  { below: 0.7, days: 2 },
+  { below: 0.85, days: 3 },
+  { below: Infinity, days: 4 },
 ];
-export const COURSE_TEST_PORTION_THRESHOLD = 5;
-export const COURSE_TEST_MAX_NEW_DAYS = 7;
+export const COURSE_TEST_PORTION_THRESHOLD = 3;
+export const COURSE_TEST_MAX_NEW_DAYS = 3;
 
 // Bornes acceptées à l'import (garde-fous, pas des réglages).
 export const IMPORT_BOUNDS = {
@@ -797,7 +799,7 @@ export function annalesModeFor(subjectId, exams, s, today) {
 }
 
 /* ================================================================== *
- *  Tests de cours notés (stables, récurrents, sans support)
+ *  Rappels de tests de cours (contenu géré par l'utilisateur)
  * ================================================================== */
 
 export function newCourseTest(subjectId, name, scheduledFor, chapterIds = [], portionIds = [], today = todayISO()) {
@@ -843,8 +845,9 @@ export function scopesOverlap(a, b, chapters = []) {
   return false;
 }
 
-// Le score fixe l'intervalle de base ; la pression d'une épreuve qui couvre
-// réellement le même périmètre le resserre. Après l'épreuve, ce facteur vaut 1.
+// Le score sur 20 fixe l'intervalle de base du même périmètre ; la pression
+// d'une épreuve qui le couvre réellement le resserre. CADENCE ne produit
+// jamais les questions. Après l'épreuve, ce facteur vaut 1.
 export function nextCourseTestDate(test, ratio, exams, settings, today, chapters = []) {
   const baseDays = courseTestBaseInterval(ratio);
   let factor = 1;
@@ -868,9 +871,10 @@ export function dueCourseTests(courseTests, today) {
     .slice().sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor) || a.name.localeCompare(b.name));
 }
 
-// CADENCE propose un nouveau test quand plusieurs portions ne sont encore
-// couvertes par aucun test stable. La proposition est dérivée, jamais comptée
-// comme un test ni une révision tant que l'utilisateur ne la crée pas.
+// CADENCE propose de suivre un test quand plusieurs portions ne sont encore
+// couvertes par aucun rappel stable. La proposition ne contient aucune
+// question et ne compte jamais comme une révision tant que l'utilisateur
+// n'a pas réellement fait le test et saisi sa note sur 20.
 export function courseTestSuggestions(subjects, chapters, courseTests, today) {
   const units = (chapters || []).filter((item) => isReviewUnit(item) && item.introducedAt <= today);
   const out = [];

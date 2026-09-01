@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AXIS_MINUTES,
   DEFAULT_SETTINGS,
+  REVIEW_UNIT_MINUTES,
   addDays,
   allocateSubjectMinutes,
   applySelfAssessment,
@@ -48,6 +49,12 @@ describe('v9 — cinq niveaux de maîtrise', () => {
     });
     expect(intervals).toEqual([1, 2, 3, 10, 25]);
   });
+
+  it('compte 17 minutes pour chaque consolidation quotidienne', () => {
+    const unit = newReviewUnit(chapter(), 'Ajout du 31/08/2026 — noyau', addDays(TODAY, -1), S);
+    expect(REVIEW_UNIT_MINUTES).toBe(17);
+    expect(unit.minutes.recall).toBe(17);
+  });
 });
 
 describe('v9 — pression ciblée et rééquilibrage temporaire', () => {
@@ -86,19 +93,22 @@ describe('v9 — tests de cours notés', () => {
   it('replanifie selon la note et resserre seulement pour une épreuve au même périmètre', () => {
     const test = newCourseTest('s1', 'Test hebdo', TODAY, ['c1'], [], TODAY);
     expect(nextCourseTestDate(test, 0.4, [], S, TODAY, [chapter()]).interval).toBe(1);
-    expect(nextCourseTestDate(test, 0.9, [], S, TODAY, [chapter()]).interval).toBe(24);
+    expect(nextCourseTestDate(test, 0.5, [], S, TODAY, [chapter()]).interval).toBe(2);
+    expect(nextCourseTestDate(test, 0.7, [], S, TODAY, [chapter()]).interval).toBe(3);
+    expect(nextCourseTestDate(test, 0.85, [], S, TODAY, [chapter()]).interval).toBe(4);
+    expect(nextCourseTestDate(test, 0.9, [], S, TODAY, [chapter()]).interval).toBe(4);
     const relevant = {
       id: 'e1', subjectId: 's1', name: 'CC', date: addDays(TODAY, 8),
       chapterIds: ['c1'], portionIds: [], importance: 'major',
     };
-    expect(nextCourseTestDate(test, 0.9, [relevant], S, TODAY, [chapter()]).interval).toBeLessThan(24);
+    expect(nextCourseTestDate(test, 0.9, [relevant], S, TODAY, [chapter()]).interval).toBeLessThan(4);
     const unrelated = { ...relevant, chapterIds: ['c2'] };
-    expect(nextCourseTestDate(test, 0.9, [unrelated], S, TODAY, [chapter(), chapter('c2')]).interval).toBe(24);
+    expect(nextCourseTestDate(test, 0.9, [unrelated], S, TODAY, [chapter(), chapter('c2')]).interval).toBe(4);
   });
 
-  it('suggère un test après cinq nouvelles portions non couvertes, sans créer de faux résultat', () => {
+  it('suggère un rappel après trois nouvelles portions sans générer de test ni de résultat', () => {
     const parent = chapter();
-    const units = Array.from({ length: 5 }, (_, index) => newReviewUnit(
+    const units = Array.from({ length: 3 }, (_, index) => newReviewUnit(
       parent,
       `Ajout du ${String(27 + index).padStart(2, '0')}/08/2026 — portion ${index + 1}`,
       addDays(TODAY, index - 5),
@@ -106,7 +116,7 @@ describe('v9 — tests de cours notés', () => {
     ));
     const suggestions = courseTestSuggestions([SUBJECT], [parent, ...units], [], TODAY);
     expect(suggestions).toHaveLength(1);
-    expect(suggestions[0].portionIds).toHaveLength(5);
+    expect(suggestions[0].portionIds).toHaveLength(3);
   });
 
   it('fusionne deux résultats pris sur des appareils différents', () => {
