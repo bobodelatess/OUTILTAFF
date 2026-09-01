@@ -16,6 +16,7 @@ import {
   Download, Upload, RotateCcw, AlertTriangle, Lock, Undo2,
   BookOpen, FlaskConical, Flame, Pencil, Clock3,
   RefreshCw, Cloud, CloudOff, Smartphone, Bookmark, Library, Link2, X,
+  ListChecks, Minus, Repeat2, Target,
 } from 'lucide-react';
 
 import {
@@ -36,9 +37,14 @@ import {
   newDoc, sortedDocs, isSafeDocUrl, normDocs, DOCS_PER_CHAPTER_MAX,
   isReviewUnit, reviewUnitInfo, forecastReviewUnits, additionDateFromPosition,
   upsertReviewUnit,
-  allocateSubjectMinutes, dueCourseTests, courseTestSuggestions,
+  allocateSubjectMinutes, subjectDailyLoads, dueCourseTests, courseTestSuggestions,
   newCourseTest, nextCourseTestDate, latestCourseTestResult,
-  SUBJECT_DAILY_MINUTES, SUBJECT_PROTECTED_MINUTES,
+  SUBJECT_DAILY_MINUTES, SUBJECT_PROTECTED_MINUTES, COURSE_TEST_DEFAULT_MINUTES,
+  CHAPTER_STATUSES, CHAPTER_STATUS_KEYS,
+  DEFAULT_ROUTINE_TARGETS, ROUTINE_TARGET_KEYS, ROUTINE_COUNTER_KINDS,
+  ROUTINE_ITEM_PRESETS, ROUTINE_INTERVAL_CHOICES, ROUTINE_TARGET_MAX,
+  ROUTINE_ITEM_LABEL_MAX, normRoutineTargets, newRoutineItem, newRoutineEvent,
+  subjectRoutineProgress, routineItemInfo,
 } from './engine.js';
 import { stampState, contentSignature, newDeviceId } from './sync.js';
 import { getDeviceId } from './remote.js';
@@ -1226,6 +1232,7 @@ const GLOBAL_CSS = `
 const TABS = [
   { id: 'today', label: 'Aujourd’hui', icon: Activity },
   { id: 'calendar', label: 'Calendrier', icon: CalendarDays },
+  { id: 'routines', label: 'Checklist', icon: ListChecks },
   { id: 'subjects', label: 'Matières', icon: Layers },
   { id: 'settings', label: 'Réglages', icon: SettingsIcon },
 ];
@@ -1353,6 +1360,7 @@ export default function Cadence() {
   }, []);
   const {
     subjects, chapters, exams, courseTests = [], courseTestLog = [],
+    routineItems = [], routineLog = [],
     settings, reviewLog, examDebriefs, lastExportAt,
   } = state;
   const studyChapters = useMemo(() => chapters.filter((c) => !isReviewUnit(c)), [chapters]);
@@ -1414,6 +1422,7 @@ export default function Cadence() {
     ...p, subjects: [...p.subjects, {
       id: uid(), name, color: '#7c9cf5', type: 'core',
       dailyMinutes: SUBJECT_DAILY_MINUTES, minimumMinutes: SUBJECT_PROTECTED_MINUTES,
+      routineTargets: { ...DEFAULT_ROUTINE_TARGETS },
     }],
   }));
   const updateSubject = (id, up) => patch((p) => ({
@@ -1424,6 +1433,7 @@ export default function Cadence() {
     const idSet = new Set(chapIds);
     const examIds = new Set(p.exams.filter((e) => e.subjectId === id).map((e) => e.id));
     const courseTestIds = new Set((p.courseTests || []).filter((test) => test.subjectId === id).map((test) => test.id));
+    const routineItemIds = (p.routineItems || []).filter((item) => item.subjectId === id).map((item) => item.id);
     return {
       ...p,
       subjects: p.subjects.filter((s) => s.id !== id),
@@ -1431,6 +1441,8 @@ export default function Cadence() {
       exams: stripChapterIds(p.exams.filter((e) => e.subjectId !== id), chapIds),
       courseTests: (p.courseTests || []).filter((test) => !courseTestIds.has(test.id)),
       courseTestLog: (p.courseTestLog || []).filter((entry) => !courseTestIds.has(entry.testId)),
+      routineItems: (p.routineItems || []).filter((item) => item.subjectId !== id),
+      routineLog: (p.routineLog || []).filter((entry) => entry.subjectId !== id),
       reviewLog: p.reviewLog.filter((r) => !idSet.has(r.chapterId)),
       archivedReviews: (p.archivedReviews || []).filter((r) => !idSet.has(r.chapterId)),
       skips: Object.fromEntries(Object.entries(p.skips || {}).filter(([chapterId]) => !idSet.has(chapterId))),
@@ -1440,19 +1452,38 @@ export default function Cadence() {
       examDebriefs: Object.fromEntries(Object.entries(p.examDebriefs || {}).filter(([examId]) => !examIds.has(examId))),
       // Traces de suppression : sans elles, un autre appareil ressusciterait
       // la matière (et son contenu) à la prochaine synchronisation.
-      deleted: markDeleted(markDeleted(
+      deleted: markDeleted(markDeleted(markDeleted(
         markDeleted(markDeleted(p.deleted, 'subjects', [id], today), 'chapters', chapIds, today),
         'exams', [...examIds], today), 'courseTests', [...courseTestIds], today),
+      'routineItems', routineItemIds, today),
     };
   });
 
-  const addChapter = (subjectId, name, level) => patch((p) => ({
-    ...p, chapters: [...p.chapters, newChapter(subjectId, name, level || LEVELS[0], p.settings)],
-  }));
+  const addChapter = (subjectId, name, level) => patch((p) => {
+    const chapter = newChapter(subjectId, name, level || LEVELS[0], p.settings, { status: 'current' });
+    return {
+      ...p,
+      chapters: [
+        ...p.chapters.map((item) => (
+          !isReviewUnit(item) && item.subjectId === subjectId
+            && item.kind === 'course' && item.status === 'current'
+            ? { ...item, status: 'consolidating' }
+            : item
+        )),
+        chapter,
+      ],
+    };
+  });
   // Ajout groupé : un chapitre par ligne (niveau + durées par défaut).
-  const addChaptersBulk = (subjectId, names, level) => patch((p) => ({
-    ...p, chapters: [...p.chapters, ...names.map((n) => newChapter(subjectId, n, level || LEVELS[0], p.settings))],
-  }));
+  const addChaptersBulk = (subjectId, names, level) => patch((p) => {
+    const hasCurrent = p.chapters.some((chapter) => !isReviewUnit(chapter)
+      && chapter.subjectId === subjectId && chapter.kind === 'course' && chapter.status === 'current');
+    const added = names.map((name, index) => newChapter(
+      subjectId, name, level || LEVELS[0], p.settings,
+      { status: !hasCurrent && index === 0 ? 'current' : 'consolidating' },
+    ));
+    return { ...p, chapters: [...p.chapters, ...added] };
+  });
   // Ressource : tout ce qui se révise sans être un chapitre de cours
   // (vocabulaire, recueil d'exercices, annales…). Seuls les axes choisis
   // s'appliquent — sinon elle réclamerait éternellement des tests hors sujet.
@@ -1462,6 +1493,25 @@ export default function Cadence() {
   const updateChapter = (id, up) => patch((p) => ({
     ...p, chapters: p.chapters.map((c) => (c.id === id ? { ...c, ...up } : c)),
   }));
+  const setChapterStatus = (id, status) => {
+    if (!CHAPTER_STATUS_KEYS.includes(status)) return;
+    patch((p) => {
+      const target = p.chapters.find((chapter) => chapter.id === id && !isReviewUnit(chapter));
+      if (!target || target.kind !== 'course') return p;
+      return {
+        ...p,
+        chapters: p.chapters.map((chapter) => {
+          if (chapter.id === id) return { ...chapter, status };
+          if (status === 'current' && !isReviewUnit(chapter)
+            && chapter.subjectId === target.subjectId
+            && chapter.kind === 'course' && chapter.status === 'current') {
+            return { ...chapter, status: 'consolidating' };
+          }
+          return chapter;
+        }),
+      };
+    });
+  };
   // Documents : des RÉFÉRENCES attachées à un élément. Le contenu des fichiers
   // n'est jamais stocké — il ferait exploser l'état synchronisé.
   const addChapterDoc = (id, label, url) => patch((p) => ({
@@ -1560,7 +1610,11 @@ export default function Cadence() {
       const prior = p.reviewLog.find(sameSlot);
       // Un remplacement repart de l'état AVANT la preuve remplacée : il ne
       // cumule pas deux transitions dont une disparaîtrait du journal.
-      const base = prior ? { ...ch, [axis]: { ...prior.before } } : ch;
+      const base = prior ? {
+        ...ch,
+        [axis]: { ...prior.before },
+        ...(prior.lifecycleBefore || {}),
+      } : ch;
       const result = options.source === 'self-review' && Number.isInteger(options.masteryLevel)
         ? applySelfAssessment(base, options.masteryLevel, evidenceDate, p.settings)
         : applyEvidence(base, evidenceType, grade, evidenceDate);
@@ -1573,6 +1627,18 @@ export default function Cadence() {
         ...(options.source ? { source: options.source } : {}),
         ...(options.examId ? { examId: options.examId } : {}),
         ...(options.examId ? { recordedAt: today } : {}),
+        ...(isReviewUnit(base) ? {
+          lifecycleBefore: {
+            reviewSuccessStreak: base.reviewSuccessStreak || 0,
+            integratedAt: base.integratedAt || null,
+            lastMasteryLevel: base.lastMasteryLevel ?? null,
+          },
+          lifecycleAfter: {
+            reviewSuccessStreak: chapter.reviewSuccessStreak || 0,
+            integratedAt: chapter.integratedAt || null,
+            lastMasteryLevel: chapter.lastMasteryLevel ?? null,
+          },
+        } : {}),
       };
       return {
         ...p,
@@ -1597,7 +1663,7 @@ export default function Cadence() {
       return {
         ...p,
         chapters: p.chapters.map((c) => (c.id === entry.chapterId
-          ? { ...c, [axis]: { ...entry.before } } : c)),
+          ? { ...c, [axis]: { ...entry.before }, ...(entry.lifecycleBefore || {}) } : c)),
         reviewLog: p.reviewLog.filter((r) => r.id !== entryId),
       };
     });
@@ -1674,17 +1740,32 @@ export default function Cadence() {
     courseTests: [...(p.courseTests || []), newCourseTest(
       subjectId, test.name, test.scheduledFor,
       test.chapterIds || [], test.portionIds || [], today,
+      test.estimatedMinutes || COURSE_TEST_DEFAULT_MINUTES,
     )],
   }));
   const updateCourseTest = (id, up) => patch((p) => ({
     ...p,
-    courseTests: (p.courseTests || []).map((test) => (test.id === id ? { ...test, ...up } : test)),
+    courseTests: (p.courseTests || []).map((test) => (test.id === id ? {
+      ...test,
+      ...up,
+      ...((Object.prototype.hasOwnProperty.call(up, 'chapterIds')
+        || Object.prototype.hasOwnProperty.call(up, 'portionIds')) ? { strongStreak: 0 } : {}),
+    } : test)),
   }));
   const deleteCourseTest = (id) => patch((p) => ({
     ...p,
     courseTests: (p.courseTests || []).filter((test) => test.id !== id),
     courseTestLog: (p.courseTestLog || []).filter((entry) => entry.testId !== id),
     deleted: markDeleted(p.deleted, 'courseTests', [id], today),
+  }));
+  const extendCourseTest = (testId, portionIds) => patch((p) => ({
+    ...p,
+    courseTests: (p.courseTests || []).map((test) => (test.id === testId ? {
+      ...test,
+      portionIds: [...new Set([...(test.portionIds || []), ...(portionIds || [])])],
+      scheduledFor: test.scheduledFor <= addDays(today, 1) ? test.scheduledFor : addDays(today, 1),
+      strongStreak: 0,
+    } : test)),
   }));
   const recordCourseTest = (testId, score) => {
     const maxScore = 20;
@@ -1699,12 +1780,13 @@ export default function Cadence() {
       const entry = {
         id: uid(), testId, date: today, score, maxScore, ratio, closedBook: true,
         chapterIds: [...(test.chapterIds || [])], portionIds: [...(test.portionIds || [])],
-        nextScheduledFor: next.date,
+        nextScheduledFor: next.date, baseInterval: next.baseDays,
+        strongStreak: next.strongStreak,
       };
       return {
         ...p,
         courseTests: (p.courseTests || []).map((item) => (item.id === testId
-          ? { ...item, scheduledFor: next.date } : item)),
+          ? { ...item, scheduledFor: next.date, strongStreak: next.strongStreak } : item)),
         courseTestLog: [...(p.courseTestLog || []), entry],
       };
     });
@@ -1712,6 +1794,69 @@ export default function Cadence() {
     setToast({ text: `Test noté : ${score}/${maxScore} · prochain le ${next.date.split('-').reverse().join('/')}` });
     toastTimer.current = setTimeout(() => setToast(null), 6000);
   };
+
+  const updateRoutineTarget = (subjectId, key, value) => {
+    if (!ROUTINE_TARGET_KEYS.includes(key)) return;
+    patch((p) => ({
+      ...p,
+      subjects: p.subjects.map((subject) => (subject.id === subjectId ? {
+        ...subject,
+        routineTargets: {
+          ...normRoutineTargets(subject.routineTargets),
+          [key]: Math.round(clamp(Number(value) || 0, 0, ROUTINE_TARGET_MAX)),
+        },
+      } : subject)),
+    }));
+  };
+  const adjustRoutineCounter = (subjectId, kind, delta) => {
+    if (!ROUTINE_COUNTER_KINDS.includes(kind) || !delta) return;
+    patch((p) => ({
+      ...p,
+      routineLog: [...(p.routineLog || []), newRoutineEvent(subjectId, kind, today, delta)],
+    }));
+  };
+  const addRoutineItem = (subjectId, label, intervalDays) => {
+    const clean = String(label || '').trim().slice(0, ROUTINE_ITEM_LABEL_MAX);
+    if (!clean) return;
+    patch((p) => {
+      const exists = (p.routineItems || []).some((item) => item.subjectId === subjectId
+        && item.label.toLocaleLowerCase('fr') === clean.toLocaleLowerCase('fr'));
+      if (exists) return p;
+      return {
+        ...p,
+        routineItems: [...(p.routineItems || []), newRoutineItem(subjectId, clean, intervalDays, today)],
+      };
+    });
+  };
+  const updateRoutineItem = (id, up) => patch((p) => ({
+    ...p,
+    routineItems: (p.routineItems || []).map((item) => (item.id === id ? {
+      ...item,
+      ...(Object.prototype.hasOwnProperty.call(up, 'label') ? {
+        label: String(up.label || '').trim().slice(0, ROUTINE_ITEM_LABEL_MAX) || item.label,
+      } : {}),
+      ...(Object.prototype.hasOwnProperty.call(up, 'intervalDays') ? {
+        intervalDays: Math.round(clamp(Number(up.intervalDays) || 7, 1, 365)),
+      } : {}),
+    } : item)),
+  }));
+  const toggleRoutineItemToday = (id) => patch((p) => {
+    const item = (p.routineItems || []).find((candidate) => candidate.id === id);
+    if (!item) return p;
+    const info = routineItemInfo(item, p.routineLog || [], today);
+    return {
+      ...p,
+      routineLog: [...(p.routineLog || []), newRoutineEvent(
+        item.subjectId, 'maintenance', today, info.doneToday ? -1 : 1, item.id,
+      )],
+    };
+  });
+  const deleteRoutineItem = (id) => patch((p) => ({
+    ...p,
+    routineItems: (p.routineItems || []).filter((item) => item.id !== id),
+    routineLog: (p.routineLog || []).filter((event) => event.itemId !== id),
+    deleted: markDeleted(p.deleted, 'routineItems', [id], today),
+  }));
 
   const updateSetting = (key, value) => patch((p) => ({ ...p, settings: { ...p.settings, [key]: value } }));
 
@@ -1769,14 +1914,25 @@ export default function Cadence() {
   // Rappel d'export discret : jamais exporté (ou > 21 j) avec un historique réel.
   const exportStale = reviewLog.length >= 20 &&
     (!lastExportAt || daysBetween(lastExportAt, today) > 21);
-  // Continuité : un seul chapitre courant par matière, choisi par la date du
-  // dernier ajout. Cela guide vers le document sans décider du nouveau travail.
+  // Continuité : le chapitre courant est désormais explicite. Modifier un
+  // ancien point de reprise ne doit plus détourner l'accueil par accident.
   const currentBySubject = useMemo(() => {
     const map = {};
     for (const chapter of studyChapters) {
+      if (chapter.kind === 'course' && chapter.status === 'current') {
+        map[chapter.subjectId] = chapter;
+      }
+    }
+    // Une matière composée uniquement de ressources garde un accès direct au
+    // support le plus récemment utilisé, sans lui inventer un statut de cours.
+    const subjectsWithCourse = new Set(studyChapters
+      .filter((chapter) => chapter.kind === 'course')
+      .map((chapter) => chapter.subjectId));
+    for (const chapter of studyChapters) {
+      if (chapter.kind !== 'resource' || subjectsWithCourse.has(chapter.subjectId)) continue;
       const previous = map[chapter.subjectId];
-      const date = chapter.positionUpdatedAt || additionDateFromPosition(chapter.position) || '';
-      const previousDate = previous?.positionUpdatedAt || additionDateFromPosition(previous?.position) || '';
+      const date = chapter.positionUpdatedAt || '';
+      const previousDate = previous?.positionUpdatedAt || '';
       if (!previous || date >= previousDate) map[chapter.subjectId] = chapter;
     }
     return map;
@@ -1786,8 +1942,17 @@ export default function Cadence() {
   const dueReviewUnits = useMemo(() => reviewUnits
     .map((unit) => ({ unit, info: reviewUnitInfo(unit, settings, today, exams) }))
     .filter(({ info }) => info.due)
-    .sort((a, b) => a.info.dueAt.localeCompare(b.info.dueAt)
-      || a.unit.introducedAt.localeCompare(b.unit.introducedAt)),
+    .sort((a, b) => {
+      const first = Number(!b.info.tested) - Number(!a.info.tested);
+      if (first) return first;
+      const weakness = (a.unit.lastMasteryLevel ?? 4) - (b.unit.lastMasteryLevel ?? 4);
+      if (weakness) return weakness;
+      const pressure = (b.info.pressureFactor || 1) - (a.info.pressureFactor || 1);
+      if (pressure) return pressure;
+      return b.info.overdueDays - a.info.overdueDays
+        || a.info.dueAt.localeCompare(b.info.dueAt)
+        || a.unit.introducedAt.localeCompare(b.unit.introducedAt);
+    }),
   [reviewUnits, settings, today, exams]);
   const selfReviewsToday = useMemo(
     () => reviewLog.filter((r) => r.date === today && r.source === 'self-review').length,
@@ -1797,6 +1962,9 @@ export default function Cadence() {
     [subjects, exams, settings, today]);
   const courseTestsDue = useMemo(
     () => dueCourseTests(courseTests, today), [courseTests, today]);
+  const dailyLoads = useMemo(
+    () => subjectDailyLoads(timeAllocations, dueReviewUnits, courseTestsDue),
+    [timeAllocations, dueReviewUnits, courseTestsDue]);
   const testSuggestions = useMemo(
     () => courseTestSuggestions(subjects, chapters, courseTests, today),
     [subjects, chapters, courseTests, today]);
@@ -1902,13 +2070,14 @@ export default function Cadence() {
               today={today} coreSubjects={coreSubjects} currentBySubject={currentBySubject}
               dueReviewUnits={dueReviewUnits} parentById={parentById}
               subjectById={subjectById} selfReviewsToday={selfReviewsToday}
-              timeAllocations={timeAllocations}
+              timeAllocations={dailyLoads}
               courseTestsDue={courseTestsDue} courseTestLog={courseTestLog}
               testSuggestions={testSuggestions}
               nextExam={nextExam} annalesBanners={annalesBanners} debriefs={debriefs}
               exportStale={exportStale}
               onGrade={gradeEvidence} onDismissDebrief={dismissDebrief}
               onRecordCourseTest={recordCourseTest}
+              onExtendCourseTest={extendCourseTest}
               onSetPosition={setChapterPosition}
               onUseDoc={useChapterDoc}
               onGoSubjects={goToSubjects}
@@ -1918,6 +2087,16 @@ export default function Cadence() {
             <CalendarView today={today} exams={exams} subjectById={subjectById}
               courseTests={courseTests} settings={settings}
               upcomingExams={upcomingExams} dueForecast={dueForecast} />
+          )}
+          {tab === 'routines' && (
+            <RoutinesView today={today} subjects={coreSubjects}
+              courseTests={courseTests} courseTestLog={courseTestLog}
+              routineItems={routineItems} routineLog={routineLog}
+              onUpdateTarget={updateRoutineTarget}
+              onAdjustCounter={adjustRoutineCounter}
+              onAddItem={addRoutineItem} onUpdateItem={updateRoutineItem}
+              onToggleItem={toggleRoutineItemToday} onDeleteItem={deleteRoutineItem}
+              onGoSubjects={goToSubjects} />
           )}
           {tab === 'subjects' && (
             <SubjectsView
@@ -1929,6 +2108,7 @@ export default function Cadence() {
               onAddResource={addResource} onSetPosition={setChapterPosition} onSetAxes={setChapterAxes}
               onAddDoc={addChapterDoc} onUseDoc={useChapterDoc} onRemoveDoc={removeChapterDoc}
               onUpdateChapter={updateChapter} onDeleteChapter={deleteChapter}
+              onSetChapterStatus={setChapterStatus}
               onSetLevel={setChapterLevel} onSetAxisMinutes={setChapterAxisMinutes}
               onAddExam={addExam} onUpdateExam={updateExam} onDeleteExam={deleteExam}
               onToggleExamChapter={toggleExamChapter} onToggleExamPortion={toggleExamPortion}
@@ -1980,19 +2160,24 @@ const SELF_ASSESSMENTS = MASTERY_LEVELS.map((item) => ({
   hint: SELF_ASSESSMENT_HINTS[item.level],
 }));
 
-function SelfAssessmentButtons({ onGrade }) {
+function SelfAssessmentButtons({ onGrade, disabledLevels = [] }) {
+  const disabled = new Set(disabledLevels);
   return (
     <div role="group" aria-label="Maîtrise après reprise" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-      {SELF_ASSESSMENTS.map((option) => (
-        <button key={option.level} type="button" onClick={() => onGrade(option.grade, option.level)}
-          title={option.hint} style={{
-            fontFamily: SANS, fontSize: 12, fontWeight: 650, padding: '6px 11px', borderRadius: 8,
-            cursor: 'pointer', border: `1px solid ${option.color}66`,
-            color: option.color, background: `${option.color}12`,
-          }}>
-          {option.label}
-        </button>
-      ))}
+      {SELF_ASSESSMENTS.map((option) => {
+        const locked = disabled.has(option.level);
+        return (
+          <button key={option.level} type="button" disabled={locked}
+            onClick={() => onGrade(option.grade, option.level)}
+            title={locked ? 'Disponible après une première restitution espacée réussie.' : option.hint} style={{
+              fontFamily: SANS, fontSize: 12, fontWeight: 650, padding: '6px 11px', borderRadius: 8,
+              cursor: locked ? 'not-allowed' : 'pointer', opacity: locked ? .42 : 1,
+              border: `1px solid ${option.color}66`, color: option.color, background: `${option.color}12`,
+            }}>
+            {option.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -2046,10 +2231,23 @@ function ContinuityCard({ subject, chapter, allocation, today, onSetPosition, on
         <span style={{ fontFamily: SANS, fontSize: 14.5, fontWeight: 700 }}>{subject.name}</span>
         <span style={{ fontFamily: SANS, fontSize: 12.5, color: C.dim }}>{chapter.name}</span>
         {additionDate === today && <Chip color={C.accent}>ajout du jour</Chip>}
+        {allocation && <Chip color={C.dim}>enveloppe {fmtMinutes(allocation.minutes)}</Chip>}
+        {allocation?.maintenanceMinutes > 0 && (
+          <Chip color={allocation.overloadMinutes ? C.bad : C.warn}
+            title={`${fmtMinutes(allocation.reviewMinutes)} de consolidation${allocation.testMinutes ? ` · ${fmtMinutes(allocation.testMinutes)} de test indicatif` : ''}`}>
+            entretien {fmtMinutes(allocation.maintenanceMinutes)}
+          </Chip>
+        )}
+        {allocation && !allocation.overloadMinutes && (
+          <Chip color={C.good}>reste nouveau travail {fmtMinutes(allocation.remainingMinutes)}</Chip>
+        )}
+        {allocation?.overloadMinutes > 0 && (
+          <Chip color={C.bad}>surcharge {fmtMinutes(allocation.overloadMinutes)}</Chip>
+        )}
         {allocation?.changed && (
           <Chip color={allocation.minutes > allocation.base ? C.warn : C.dim}
             title={`${allocation.exam?.name || 'Examen'} · pression ×${f2(allocation.factor)} · retour automatique à ${fmtMinutes(allocation.base)} après l’épreuve`}>
-            aujourd’hui {fmtMinutes(allocation.minutes)} · normal {fmtMinutes(allocation.base)}
+            normal {fmtMinutes(allocation.base)} · rééquilibré {fmtMinutes(allocation.minutes)}
           </Chip>
         )}
       </div>
@@ -2065,8 +2263,9 @@ function ContinuityCard({ subject, chapter, allocation, today, onSetPosition, on
 
 function CourseTestCard({ test, subject, latestResult, today, onRecord }) {
   const [scoreText, setScoreText] = useState('');
+  const [closedBook, setClosedBook] = useState(false);
   const score = Number(scoreText);
-  const valid = scoreText !== '' && Number.isFinite(score) && score >= 0 && score <= 20;
+  const valid = closedBook && scoreText !== '' && Number.isFinite(score) && score >= 0 && score <= 20;
   const overdue = Math.max(0, daysBetween(test.scheduledFor, today));
   return (
     <div className="cad-card" role="group" aria-label={`${test.name} — test de cours`} style={{
@@ -2085,14 +2284,19 @@ function CourseTestCard({ test, subject, latestResult, today, onRecord }) {
       <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', alignItems: 'center' }}>
         <Chip color={C.dim}>{(test.chapterIds || []).length} chapitre{(test.chapterIds || []).length > 1 ? 's' : ''}</Chip>
         <Chip color={C.dim}>{(test.portionIds || []).length} section{(test.portionIds || []).length > 1 ? 's' : ''}</Chip>
+        <Chip color={C.dim}>≈ {fmtMinutes(test.estimatedMinutes || COURSE_TEST_DEFAULT_MINUTES)}</Chip>
         {latestResult && (
           <Chip color={C.faint}>dernier : {latestResult.score}/{latestResult.maxScore} le {latestResult.date.split('-').reverse().join('/')}</Chip>
         )}
       </div>
       <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint }}>
-        CADENCE ne génère aucune question. Compose et corrige toi-même le test sur ce périmètre,
-        sans support, puis saisis uniquement ta note sur 20.
+        CADENCE et le LLM ne génèrent aucune question, aucun barème et aucune correction.
+        Compose et corrige toi-même le test sur ce périmètre, puis saisis uniquement ta note sur 20.
       </div>
+      <label style={{ display: 'flex', gap: 7, alignItems: 'center', fontFamily: SANS, fontSize: 11.5, color: C.dim }}>
+        <input type="checkbox" checked={closedBook} onChange={(event) => setClosedBook(event.target.checked)} />
+        Je confirme l’avoir réalisé sans cours, sans corrigé et sans aide.
+      </label>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <input type="number" min="0" step="0.25" value={scoreText} onChange={(event) => setScoreText(event.target.value)}
           aria-label={`note obtenue pour ${test.name}`} placeholder="note" style={{
@@ -2124,18 +2328,22 @@ function ReviewUnitCard({ item, subject, parent, today, onGrade, onUseDoc }) {
         <span style={{ fontFamily: SANS, fontSize: 13.5, fontWeight: 700 }}>{subject?.name}</span>
         <span style={{ fontFamily: SANS, fontSize: 12, color: C.dim }}>{parent?.name}</span>
         {info.pressureFactor > 1 && <Chip color={C.warn}>pression {info.exam?.name} ×{f2(info.pressureFactor)}</Chip>}
-        <Chip color={C.dim}>≈ {fmtMinutes(unit.minutes?.recall ?? 17)}</Chip>
+        <Chip color={C.dim}>≈ {fmtMinutes(info.minutes)}</Chip>
         <Chip color={info.overdueDays ? C.warn : C.accent} style={{ marginLeft: 'auto' }}>{timing}</Chip>
       </div>
       <div style={{ fontFamily: MONO, fontSize: 12, color: C.text }}>{unit.name}</div>
       {parent && <ReadOnlyDocs chapter={parent} onUseDoc={onUseDoc} />}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint }}>
-          Après l’avoir restitué sans support :
+          Après l’avoir restitué sans support selon son point le plus faible :
         </span>
         <SelfAssessmentButtons onGrade={(grade, masteryLevel) => onGrade(unit.id, 'recall', grade, {
           source: 'self-review', masteryLevel,
-        })} />
+        })} disabledLevels={first ? [4] : []} />
+      </div>
+      <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>
+        Deux restitutions satisfaisantes successives intègrent ensuite cette portion au chapitre ;
+        les tests cumulatifs prennent le relais.
       </div>
     </div>
   );
@@ -2146,7 +2354,7 @@ function TodayView({
   selfReviewsToday, timeAllocations, courseTestsDue, courseTestLog, testSuggestions,
   debriefs, annalesBanners, nextExam, exportStale,
   onGrade, onRecordCourseTest, onDismissDebrief, onSetPosition, onUseDoc,
-  onGoSubjects,
+  onExtendCourseTest, onGoSubjects,
 }) {
   const allocationBySubject = Object.fromEntries((timeAllocations || []).map((row) => [row.subject.id, row]));
   const adjusted = (timeAllocations || []).filter((row) => row.changed);
@@ -2231,20 +2439,32 @@ function TodayView({
                 onRecord={onRecordCourseTest} />
             ))}
             {(testSuggestions || []).map((suggestion) => (
-              <div key={suggestion.subject.id} style={{
+              <div key={`${suggestion.subject.id}:${suggestion.parentChapterId}`} style={{
                 display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap', padding: '10px 12px',
                 border: `1px dashed ${C.line2}`, borderRadius: 9, background: C.panel2,
               }}>
                 <Pastille color={suggestion.subject.color} />
                 <span style={{ fontFamily: SANS, fontSize: 12.5 }}>
-                  <b>{suggestion.subject.name}</b> · {suggestion.count} nouvelles sections à regrouper dans un test
+                  <b>{suggestion.subject.name}</b> · {suggestion.parent?.name || 'chapitre'} · {suggestion.count} nouvelles sections
+                  {suggestion.action === 'extend' ? ' à ajouter au rappel existant' : ' prêtes pour un rappel de test'}
                 </span>
-                <Btn variant="bare" onClick={() => onGoSubjects({ subjectId: suggestion.subject.id, target: 'test-add' })}
+                <Btn variant="bare" onClick={() => {
+                  if (suggestion.action === 'extend' && suggestion.test) {
+                    onExtendCourseTest(suggestion.test.id, suggestion.portionIds);
+                  } else {
+                    onGoSubjects({ subjectId: suggestion.subject.id, target: 'test-add' });
+                  }
+                }}
                   style={{ marginLeft: 'auto', color: C.accent, fontSize: 12 }}>
-                  Suivre ce périmètre
+                  {suggestion.action === 'extend' ? 'Étendre le périmètre' : 'Configurer le rappel'}
                 </Btn>
               </div>
             ))}
+            {(testSuggestions || []).length > 0 && (
+              <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>
+                Il s’agit uniquement d’un rappel et d’un périmètre : tu composes et corriges toujours le test toi-même.
+              </div>
+            )}
           </div>
         )}
       </section>
@@ -3040,7 +3260,191 @@ function CalendarView({ today, exams, courseTests, subjectById, settings, upcomi
 }
 
 /* ================================================================== *
- *  Vue 3 — Matières
+ *  Vue 3 — Checklist de production et entretien
+ * ================================================================== */
+
+function RoutineCounter({ label, detail, done, target, derived, onAdjust, onTarget }) {
+  const active = target > 0;
+  const complete = active && done >= target;
+  const progress = active ? clamp((done / target) * 100, 0, 100) : 0;
+  return (
+    <div style={{ flex: '1 1 230px', minWidth: 210, padding: 11, borderRadius: 9, background: C.panel2, border: `1px solid ${C.line}` }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+        <span style={{ fontFamily: SANS, fontSize: 12.5, fontWeight: 650 }}>{label}</span>
+        {derived && <Chip color={C.accent}>automatique</Chip>}
+        <Mono style={{ marginLeft: 'auto', color: complete ? C.good : active ? C.text : C.faint, fontSize: 14 }}>
+          {done}/{target}
+        </Mono>
+      </div>
+      <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, marginTop: 3 }}>{detail}</div>
+      <div style={{ height: 5, background: C.inset, borderRadius: 3, margin: '9px 0', overflow: 'hidden', border: `1px solid ${C.line}` }}>
+        <div className="cad-bar" style={{ width: `${progress}%`, height: '100%', background: complete ? C.good : C.accent, opacity: .8 }} />
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+        {!derived && (
+          <>
+            <IconBtn icon={Minus} title={done > 0 ? `Retirer une réalisation — ${label}` : `Aucune réalisation à retirer — ${label}`}
+              onClick={() => { if (done > 0) onAdjust(-1); }} />
+            <IconBtn icon={Plus} title={`Ajouter une réalisation — ${label}`} onClick={() => onAdjust(1)} />
+          </>
+        )}
+        <label style={{ marginLeft: derived ? 0 : 'auto', display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: SANS, fontSize: 10.5, color: C.faint }}>
+          objectif
+          <input type="number" min={0} max={ROUTINE_TARGET_MAX} value={target}
+            onChange={(event) => onTarget(Number(event.target.value) || 0)}
+            aria-label={`Objectif — ${label}`}
+            style={{ width: 48, fontFamily: MONO, fontSize: 11.5, color: C.text, background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 6, padding: '4px 5px' }} />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function AddRoutineItem({ subjectId, activeLabels, onAdd }) {
+  const [preset, setPreset] = useState(ROUTINE_ITEM_PRESETS[0]);
+  const [custom, setCustom] = useState('');
+  const [customMode, setCustomMode] = useState(false);
+  const [intervalDays, setIntervalDays] = useState(7);
+  const label = customMode ? custom : preset;
+  const add = () => {
+    if (!label.trim()) return;
+    onAdd(subjectId, label, intervalDays);
+    if (customMode) setCustom('');
+  };
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', paddingTop: 8, borderTop: `1px solid ${C.line}` }}>
+      <select value={customMode ? '__custom' : preset} onChange={(event) => {
+        if (event.target.value === '__custom') setCustomMode(true);
+        else { setCustomMode(false); setPreset(event.target.value); }
+      }} aria-label="Routine à ajouter" style={{
+        flex: '1 1 230px', minWidth: 190, fontFamily: SANS, fontSize: 11.5,
+        color: C.text, background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 7, padding: '6px 8px',
+      }}>
+        {ROUTINE_ITEM_PRESETS.map((item) => (
+          <option key={item} value={item} disabled={activeLabels.has(item.toLocaleLowerCase('fr'))}>{item}</option>
+        ))}
+        <option value="__custom">Autre routine ou livre précis…</option>
+      </select>
+      {customMode && (
+        <input value={custom} maxLength={ROUTINE_ITEM_LABEL_MAX}
+          onChange={(event) => setCustom(event.target.value)} placeholder="Ex. Livre X — exercices"
+          aria-label="Nom de la routine personnalisée" style={{
+            flex: '1 1 190px', fontFamily: SANS, fontSize: 11.5, color: C.text,
+            background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 7, padding: '6px 8px',
+          }} />
+      )}
+      <select value={intervalDays} onChange={(event) => setIntervalDays(Number(event.target.value))}
+        aria-label="Fréquence de la routine" style={{
+          fontFamily: SANS, fontSize: 11.5, color: C.text, background: C.inset,
+          border: `1px solid ${C.line2}`, borderRadius: 7, padding: '6px 8px',
+        }}>
+        {ROUTINE_INTERVAL_CHOICES.map((choice) => <option key={choice.days} value={choice.days}>{choice.label}</option>)}
+      </select>
+      <Btn variant="bare" disabled={!label.trim() || activeLabels.has(label.trim().toLocaleLowerCase('fr'))}
+        onClick={add} style={{ color: C.accent }}><Plus size={13} /> activer</Btn>
+    </div>
+  );
+}
+
+function RoutinesView({
+  today, subjects, courseTests, courseTestLog, routineItems, routineLog,
+  onUpdateTarget, onAdjustCounter, onAddItem, onUpdateItem, onToggleItem, onDeleteItem,
+  onGoSubjects,
+}) {
+  const weekStart = mondayOf(today);
+  const weekEnd = addDays(weekStart, 6);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div>
+        <div className="cad-eyebrow"><Target size={13} /> Production réelle</div>
+        <h1 style={{ fontFamily: SANS, fontSize: 22, margin: 0 }}>Checklist par matière</h1>
+        <p style={{ fontFamily: SANS, fontSize: 12.5, color: C.dim, lineHeight: 1.6, margin: '7px 0 0', maxWidth: 760 }}>
+          Les compteurs ne donnent aucun niveau de maîtrise. Les tests sont comptés uniquement après une note /20 réellement enregistrée ; tu en crées et corriges toujours le contenu toi-même.
+        </p>
+        <Mono style={{ display: 'block', fontSize: 10.5, color: C.faint, marginTop: 5 }}>
+          semaine du {weekStart.split('-').reverse().join('/')} au {weekEnd.split('-').reverse().join('/')}
+        </Mono>
+      </div>
+
+      {subjects.length === 0 ? <Empty>Aucune matière de cours à suivre.</Empty> : subjects.map((subject) => {
+        const progress = subjectRoutineProgress(subject, routineLog, courseTests, courseTestLog, today);
+        const items = routineItems.filter((item) => item.subjectId === subject.id)
+          .map((item) => ({ item, info: routineItemInfo(item, routineLog, today) }))
+          .sort((a, b) => Number(b.info.due) - Number(a.info.due)
+            || b.info.overdueDays - a.info.overdueDays || a.item.label.localeCompare(b.item.label, 'fr'));
+        const activeLabels = new Set(items.map(({ item }) => item.label.toLocaleLowerCase('fr')));
+        return (
+          <section key={subject.id} className="cad-card" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 11, padding: 14 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 11 }}>
+              <Pastille color={subject.color} />
+              <span style={{ fontFamily: SANS, fontWeight: 750, fontSize: 15 }}>{subject.name}</span>
+            </div>
+            <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
+              <RoutineCounter label="Exercices aujourd’hui" detail="exercices réellement terminés"
+                done={progress.exercises} target={progress.targets.dailyExercises}
+                onAdjust={(delta) => onAdjustCounter(subject.id, 'exercise', delta)}
+                onTarget={(value) => onUpdateTarget(subject.id, 'dailyExercises', value)} />
+              <RoutineCounter label="Annales cette semaine" detail="sujets complets réellement traités"
+                done={progress.pastPapers} target={progress.targets.weeklyPastPapers}
+                onAdjust={(delta) => onAdjustCounter(subject.id, 'past-paper', delta)}
+                onTarget={(value) => onUpdateTarget(subject.id, 'weeklyPastPapers', value)} />
+              <RoutineCounter label="Tests de connaissances cette semaine" detail="résultats /20 saisis sans support"
+                done={progress.knowledgeTests} target={progress.targets.weeklyKnowledgeTests} derived
+                onTarget={(value) => onUpdateTarget(subject.id, 'weeklyKnowledgeTests', value)} />
+            </div>
+            <div style={{ marginTop: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+                <Repeat2 size={14} color={C.accent} />
+                <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700 }}>Entretien régulier</span>
+                <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>une routine redevient due selon sa fréquence ; elle n’est jamais cochée définitivement</span>
+              </div>
+              {items.length === 0 ? (
+                <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, padding: '4px 0 9px' }}>
+                  Active seulement les sources et compétences réellement pertinentes pour cette matière.
+                </div>
+              ) : items.map(({ item, info }) => {
+                const until = daysBetween(today, info.dueAt);
+                const status = info.doneToday ? 'fait aujourd’hui'
+                  : !info.lastDoneAt ? 'à lancer'
+                    : info.due ? (info.overdueDays ? `en retard de ${info.overdueDays} j` : 'à faire aujourd’hui')
+                      : `revient dans ${until} j`;
+                return (
+                  <div key={item.id} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '8px 0', borderTop: `1px solid ${C.line}` }}>
+                    <span style={{ flex: '1 1 260px', fontFamily: SANS, fontSize: 12.5 }}>{item.label}</span>
+                    <select value={item.intervalDays} onChange={(event) => onUpdateItem(item.id, { intervalDays: Number(event.target.value) })}
+                      aria-label={`Fréquence — ${item.label}`} style={{
+                        fontFamily: SANS, fontSize: 10.5, color: C.dim, background: C.inset,
+                        border: `1px solid ${C.line2}`, borderRadius: 6, padding: '4px 6px',
+                      }}>
+                      {ROUTINE_INTERVAL_CHOICES.map((choice) => <option key={choice.days} value={choice.days}>{choice.label}</option>)}
+                    </select>
+                    <Chip color={info.doneToday ? C.good : info.due ? C.warn : C.dim}>{status}</Chip>
+                    <Btn variant={info.doneToday ? 'bare' : 'primary'} onClick={() => onToggleItem(item.id)}
+                      style={{ fontSize: 11.5 }}>
+                      {info.doneToday ? <><Undo2 size={12} /> annuler aujourd’hui</> : <><Check size={12} /> fait aujourd’hui</>}
+                    </Btn>
+                    <IconBtn icon={Trash2} danger title={`Supprimer la routine ${item.label}`} onClick={() => onDeleteItem(item.id)} />
+                  </div>
+                );
+              })}
+              <AddRoutineItem subjectId={subject.id} activeLabels={activeLabels} onAdd={onAddItem} />
+            </div>
+            <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint, marginTop: 9 }}>
+              Pour un livre clé, crée une routine par livre afin d’éviter une case vague impossible à auditer.
+              {' '}<button type="button" onClick={() => onGoSubjects({ subjectId: subject.id, target: 'test-add' })}
+                style={{ border: 0, padding: 0, background: 'transparent', color: C.accent, cursor: 'pointer', font: 'inherit' }}>
+                Configurer les rappels de tests
+              </button>
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ================================================================== *
+ *  Vue 4 — Matières
  * ================================================================== */
 
 function LevelPicker({ current, onPick, compact }) {
@@ -3131,7 +3535,7 @@ function SubjectsView({
   subjects, chapters, reviewUnits, exams, courseTests, courseTestLog, settings, today,
   onAddSubject, onUpdateSubject, onDeleteSubject,
   onAddChapter, onAddChaptersBulk, onAddResource, onUpdateChapter, onDeleteChapter,
-  onSetLevel, onSetAxisMinutes, onSetPosition, onSetAxes,
+  onSetLevel, onSetAxisMinutes, onSetPosition, onSetAxes, onSetChapterStatus,
   onAddDoc, onUseDoc, onRemoveDoc,
   onAddExam, onUpdateExam, onDeleteExam, onToggleExamChapter, onToggleExamPortion,
   onAddCourseTest, onUpdateCourseTest, onDeleteCourseTest,
@@ -3307,11 +3711,24 @@ function SubjectsView({
                           <TextInput value={c.name} onChange={(value) => onUpdateChapter(c.id, { name: value })}
                             ariaLabel={`Nom du chapitre ${c.name}`} />
                           {c.kind === 'resource' && <Chip color={C.dim}><Library size={11} /> ressource</Chip>}
+                          {c.kind === 'course' && subUnits.some((unit) => unit.parentChapterId === c.id) && (
+                            <Chip color={C.dim} title="Les portions intégrées ne reviennent plus séparément ; le test cumulatif du chapitre prend le relais.">
+                              {subUnits.filter((unit) => unit.parentChapterId === c.id && unit.integratedAt).length}/
+                              {subUnits.filter((unit) => unit.parentChapterId === c.id).length} intégrées
+                            </Chip>
+                          )}
                           <IconBtn icon={Trash2} danger title={`Supprimer le chapitre ${c.name}`}
                             onClick={() => {
                               if (confirm(`Supprimer « ${c.name} » ? Son historique et ses références d’épreuve seront aussi supprimés.`)) onDeleteChapter(c.id);
                             }} />
                         </div>
+                        {c.kind === 'course' && (
+                          <Segmented value={c.status || 'consolidating'} ariaLabel={`Statut du chapitre ${c.name}`}
+                            onChange={(status) => onSetChapterStatus(c.id, status)}
+                            options={CHAPTER_STATUSES.map((status) => ({
+                              value: status.key, label: status.label,
+                            }))} />
+                        )}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                           <PositionField value={c.position} onSave={(value) => onSetPosition(c.id, value)} compact />
                           {c.positionUpdatedAt && <Chip color={C.faint}>mis à jour le {c.positionUpdatedAt.split('-').reverse().join('/')}</Chip>}
@@ -3408,8 +3825,8 @@ function SubjectsView({
                 <div>
                   <SectionTitle icon={RefreshCw}>Rappels de tests de cours</SectionTitle>
                   <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint, margin: '-3px 0 9px' }}>
-                    CADENCE ne génère aucune question. Tu gères le test, tu saisis ta note sur 20,
-                    puis le même périmètre revient 1 à 4 jours plus tard selon le résultat.
+                    Ni CADENCE ni le LLM ne génèrent le test. Tu le composes et le corriges,
+                    puis le même périmètre revient de J+1 à J+60 selon tes résultats successifs.
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
                     {subTests.map((test) => {
@@ -3422,6 +3839,15 @@ function SubjectsView({
                             <TextInput type="date" value={test.scheduledFor}
                               onChange={(scheduledFor) => { if (scheduledFor) onUpdateCourseTest(test.id, { scheduledFor }); }}
                               ariaLabel={`Prochaine date du test ${test.name}`} style={{ maxWidth: 160 }} />
+                            <input type="number" min={5} max={180} step={5}
+                              value={test.estimatedMinutes || COURSE_TEST_DEFAULT_MINUTES}
+                              onChange={(event) => onUpdateCourseTest(test.id, {
+                                estimatedMinutes: clamp(Number(event.target.value) || COURSE_TEST_DEFAULT_MINUTES, 5, 180),
+                              })}
+                              aria-label={`Durée indicative du test ${test.name}`}
+                              title="Durée réservée dans l’enveloppe quotidienne ; le contenu reste entièrement géré par toi."
+                              style={{ width: 60, fontFamily: MONO, fontSize: 12, color: C.text, background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 6, padding: '5px 6px' }} />
+                            <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>min</span>
                             {latest && <Chip color={C.good}>dernier {latest.score}/{latest.maxScore}</Chip>}
                             <div style={{ marginLeft: 'auto' }}>
                               <IconBtn icon={Trash2} danger title={`Supprimer le test ${test.name}`}
@@ -3603,6 +4029,7 @@ function AddCourseTest({ subjectId, today, chapters, units, onAdd }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('Test de cours');
   const [scheduledFor, setScheduledFor] = useState(addDays(today, 1));
+  const [estimatedMinutes, setEstimatedMinutes] = useState(COURSE_TEST_DEFAULT_MINUTES);
   const [chapterIds, setChapterIds] = useState([]);
   const [portionIds, setPortionIds] = useState([]);
   const toggle = (list, setList, id) => setList(list.includes(id)
@@ -3610,11 +4037,12 @@ function AddCourseTest({ subjectId, today, chapters, units, onAdd }) {
   const add = () => {
     const clean = name.trim();
     if (!clean || chapterIds.length + portionIds.length === 0) return;
-    onAdd(subjectId, { name: clean, scheduledFor, chapterIds, portionIds });
+    onAdd(subjectId, { name: clean, scheduledFor, chapterIds, portionIds, estimatedMinutes });
     setName('Test de cours');
     setScheduledFor(addDays(today, 1));
     setChapterIds([]);
     setPortionIds([]);
+    setEstimatedMinutes(COURSE_TEST_DEFAULT_MINUTES);
     setOpen(false);
   };
   if (!open) return (
@@ -3628,6 +4056,15 @@ function AddCourseTest({ subjectId, today, chapters, units, onAdd }) {
         <TextInput value={name} onChange={setName} ariaLabel="nom du nouveau test de cours" style={{ maxWidth: 240 }} />
         <TextInput type="date" value={scheduledFor} onChange={setScheduledFor}
           ariaLabel="date du nouveau test de cours" style={{ maxWidth: 160 }} />
+        <input type="number" min={5} max={180} step={5} value={estimatedMinutes}
+          onChange={(event) => setEstimatedMinutes(clamp(Number(event.target.value) || COURSE_TEST_DEFAULT_MINUTES, 5, 180))}
+          aria-label="durée indicative du rappel de test"
+          style={{ width: 64, fontFamily: MONO, fontSize: 12, color: C.text, background: C.inset, border: `1px solid ${C.line2}`, borderRadius: 6, padding: '5px 6px' }} />
+        <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint, alignSelf: 'center' }}>min</span>
+      </div>
+      <div style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>
+        Tu crées et corriges intégralement le test. CADENCE ne conserve ici que son périmètre,
+        sa durée indicative et sa prochaine date.
       </div>
       <ScopeSelector chapters={chapters} units={units} chapterIds={chapterIds} portionIds={portionIds}
         onToggleChapter={(id) => {

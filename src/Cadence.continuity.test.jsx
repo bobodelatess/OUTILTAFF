@@ -70,6 +70,7 @@ describe('accueil simplifié — continuité et consolidations', () => {
     expect(within(review).getByRole('link', { name: /Suivi cumulatif/ })).toBeTruthy();
     expect(within(review).getByRole('group', { name: 'Maîtrise après reprise' })
       .querySelectorAll('button')).toHaveLength(5);
+    expect(within(review).getByRole('button', { name: 'Très solide' }).disabled).toBe(true);
     fireEvent.click(within(review).getByRole('button', { name: 'Maîtrisé' }));
 
     await waitFor(() => expect(screen.queryByRole('group', { name: /— consolidation/ })).toBeNull());
@@ -124,6 +125,7 @@ describe('accueil simplifié — continuité et consolidations', () => {
 
     const card = screen.getByRole('group', { name: 'Test hebdo — test de cours' });
     fireEvent.change(within(card).getByLabelText('note obtenue pour Test hebdo'), { target: { value: '14' } });
+    fireEvent.click(within(card).getByLabelText(/Je confirme/));
     fireEvent.click(within(card).getByRole('button', { name: 'Enregistrer la note' }));
 
     await waitFor(() => expect(screen.queryByRole('group', { name: 'Test hebdo — test de cours' })).toBeNull());
@@ -132,7 +134,31 @@ describe('accueil simplifié — continuité et consolidations', () => {
     expect(saved.courseTestLog[0]).toMatchObject({
       testId: 't1', score: 14, maxScore: 20, ratio: 0.7, closedBook: true,
     });
-    expect(saved.courseTests[0].scheduledFor).toBe(addDays(todayISO(), 3));
+    expect(saved.courseTests[0].scheduledFor).toBe(addDays(todayISO(), 4));
+    expect(saved.reviewLog).toHaveLength(0);
+  });
+
+  it('compte la production réelle et fait revenir une routine sans toucher à la maîtrise', async () => {
+    const st = stateWith({ includeUnit: false });
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(st));
+    render(<Cadence />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Checklist/ }));
+    const addExercise = screen.getByTitle('Ajouter une réalisation — Exercices aujourd’hui');
+    for (let index = 0; index < 5; index++) fireEvent.click(addExercise);
+    expect(screen.getByText('5/5')).toBeTruthy();
+    expect(screen.getByText('0/3')).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText('Routine à ajouter'), {
+      target: { value: 'Comprendre et savoir refaire les démonstrations' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /activer/ }));
+    fireEvent.click(screen.getByRole('button', { name: /fait aujourd’hui/ }));
+
+    await waitFor(() => expect(readState().routineItems).toHaveLength(1));
+    const saved = readState();
+    expect(saved.routineLog.filter((event) => event.kind === 'exercise')).toHaveLength(5);
+    expect(saved.routineLog.filter((event) => event.kind === 'maintenance')).toHaveLength(1);
     expect(saved.reviewLog).toHaveLength(0);
   });
 });
