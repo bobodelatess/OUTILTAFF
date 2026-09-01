@@ -10,12 +10,13 @@ describe('Cadence — rendu', () => {
     const html = renderToStaticMarkup(React.createElement(Cadence));
     expect(html).toContain('CADENCE');
     expect(html).toContain('Aujourd’hui');
-    // bande des minimums hebdo issue du seed (matières parallèles)
-    expect(html).toContain('Anglais / TOEIC');
-    expect(html).toContain('Minimums hebdo — à protéger si possible');
-    // capacité réelle du jour
-    expect(html).toContain('Temps disponible aujourd’hui');
-    // état vide invitant à agir
-    expect(html).toContain('ajoute tes chapitres');
+    // les matières du seed apparaissent comme points de continuité
+    expect(html).toContain('Continuité quotidienne');
+    expect(html).toContain('Algèbre linéaire 2');
+    // les habitudes parallèles ne polluent plus l'accueil quotidien
+    expect(html).not.toContain('Anglais / TOEIC');
+    expect(html).not.toContain('Minimums hebdo — à protéger si possible');
+    expect(html).not.toContain('Temps disponible aujourd’hui');
+    expect(html).toContain('Rien à consolider aujourd’hui');
   });
 });

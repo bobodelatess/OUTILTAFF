@@ -194,7 +194,7 @@ describe('migration v5 -> v6', () => {
 
   it('tout élément existant devient un chapitre de cours complet — comportement inchangé', () => {
     const out = migrateV5(v5());
-    expect(out.version).toBe(6); // migrateV5 rend de la v6 ; migrateV6/normalize passe en v7
+    expect(out.version).toBe(6); // migrateV5 rend de la v6 ; normalize poursuit jusqu'au schéma courant
     expect(out.chapters[0].kind).toBe('course');
     expect(out.chapters[0].axes).toEqual(['recall', 'exercise', 'problem']);
     expect(out.chapters[0].position).toBeNull();
@@ -211,7 +211,7 @@ describe('migration v5 -> v6', () => {
 
   it('normalize accepte v5 et v6, et reste idempotent', () => {
     const once = normalize(v5(), TODAY);
-    expect(once.version).toBe(7);
+    expect(once.version).toBe(8);
     const twice = normalize(once, TODAY);
     expect(JSON.stringify(twice.chapters)).toBe(JSON.stringify(once.chapters));
   });

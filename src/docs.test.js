@@ -155,7 +155,7 @@ describe('fusion des documents entre appareils', () => {
  *  Migration & import
  * ------------------------------------------------------------------ */
 
-describe('migration v6 -> v7', () => {
+describe('migration v6 -> v7 puis normalisation v8', () => {
   const v6 = () => ({
     version: 6,
     subjects: [{ id: 's1', name: 'Maths', type: 'core' }],
@@ -179,9 +179,9 @@ describe('migration v6 -> v7', () => {
     expect(out.chapters[0].recall).toEqual(v6().chapters[0].recall);
   });
 
-  it('normalize passe en v7 et reste idempotent', () => {
+  it('normalize passe en v8 et reste idempotent', () => {
     const once = normalize(v6(), TODAY);
-    expect(once.version).toBe(7);
+    expect(once.version).toBe(8);
     expect(JSON.stringify(normalize(once, TODAY).chapters)).toBe(JSON.stringify(once.chapters));
   });
 

@@ -37,7 +37,7 @@ describe('persistance sûre', () => {
 
     expect(loaded.writeBlocked).toBe(false);
     expect(loaded.notice.code).toBe('recovered');
-    expect(loaded.state.version).toBe(7);
+    expect(loaded.state.version).toBe(8);
     expect(store.getItem(STORAGE_KEY)).toBe(futureRaw);
     expect(JSON.parse(store.getItem(QUARANTINE_KEY)).raw).toBe(futureRaw);
   });
@@ -78,4 +78,3 @@ describe('persistance sûre', () => {
     expect(JSON.parse(store.getItem(BACKUP_KEY))['2026-07-15'].subjects).toHaveLength(first.subjects.length);
   });
 });
-

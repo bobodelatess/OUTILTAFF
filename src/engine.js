@@ -1,7 +1,11 @@
 /*
  * Moteur CADENCE — fonctions pures, sans React.
  *
- * v4 : trois axes de preuve INDÉPENDANTS par chapitre.
+ * v8 : le chapitre reste le repère stable ; chaque ajout quotidien daté crée
+ * une unité de reprise interne avec son propre état de rappel.
+ *
+ * Le moteur conserve aussi les trois axes de preuve INDÉPENDANTS historiques,
+ * notamment pour les annales et les bilans d'épreuve.
  *   - recall   : mémoire du cours   -> modèle inspiré de FSRS-4.5 (stabilité)
  *   - exercise : application standard -> score heuristique transparent
  *   - problem  : transfert (annale)   -> score heuristique transparent
@@ -13,9 +17,9 @@
  *     score/risque HEURISTIQUE fondé sur : résultats observés, nombre de
  *     tentatives, récence, répétition des erreurs. À présenter comme tel.
  *
- * Schéma v4
+ * Schéma v8 (champs principaux)
  *   Subject  = { id, name, color, type: 'core'|'parallel', weeklyFloor? }
- *   Chapter  = { id, subjectId, name, initialLevel,
+ *   Chapter  = { id, subjectId, name, position, positionUpdatedAt, docs[],
  *                recall:   { stability, difficulty, lastReviewed, source? },
  *                exercise: { score: 0..1|null, attempts, lastTested, recentFails },
  *                problem:  { score: 0..1|null, attempts, lastTested, recentFails },
@@ -23,7 +27,9 @@
  *   Exam     = { id, subjectId, name, date, chapterIds[], importance }
  *   Review   = { id, chapterId, date, grade: 1..4, evidenceType,
  *                before, after }               // before/after = snapshot de l'axe
- *   State    = { version: 4, subjects, chapters, exams, settings, parallelLog,
+ *   ReviewUnit = Chapter & { reviewUnit:true, parentChapterId, introducedAt,
+ *                            kind:'resource', axes:['recall'] }
+ *   State    = { version: 8, subjects, chapters, exams, settings, parallelLog,
  *                reviewLog, archivedReviews, skips, capacityOverrides, lastExportAt }
  */
 
@@ -34,8 +40,8 @@
 export const STORAGE_KEY = 'cadence.v2'; // clé stable ; la version vit DANS l'état
 export const LEGACY_KEY = 'cadence.v1';
 export const BACKUP_KEY = 'cadence.backups';
-export const SCHEMA_VERSION = 7;
-export const KNOWN_VERSIONS = [1, 2, 3, 4, 5, 6, 7];
+export const SCHEMA_VERSION = 8;
+export const KNOWN_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8];
 
 // v5 — synchronisation multi-appareils :
 //   syncMeta = { deviceId, updatedAt (ms), rev }   qui a modifié en dernier
@@ -72,9 +78,11 @@ export function pruneTombstones(deleted, today, days = TOMBSTONE_DAYS) {
 
 export const DEFAULT_SETTINGS = {
   requestRetention: 0.9, // rétention cible du rappel
-  subjectsPerDay: 3,     // capacité par défaut : matières par jour
-  sessionHours: 2,       // durée d'une séance par matière (défaut)
-  minutesPerChapter: 30, // durée héritée (compat) — v4 utilise `minutes` par axe
+  // Champs historiques conservés pour migrations/imports et annales. Ils ne
+  // pilotent plus l'accueil quotidien simplifié.
+  subjectsPerDay: 3,
+  sessionHours: 2,
+  minutesPerChapter: 30,
   maxExamPressure: 5,
   pressureHorizon: 35,
   examModeThreshold: 21,
@@ -128,7 +136,7 @@ export const RESOURCE_PRESETS = [
 
 // Longueur maximale du point de reprise (« p. 47 », « unité 5 »). Court
 // volontairement : c'est un repère, pas un carnet de notes.
-export const POSITION_MAX = 60;
+export const POSITION_MAX = 120;
 
 /* ---- Documents attachés (v7) --------------------------------------
  * Un document est une RÉFÉRENCE, jamais un fichier : un lien (Drive,
@@ -512,6 +520,61 @@ export function recallInfo(chapter, s, today) {
   return { risk, ti, since, R, dueIn, tested: since != null };
 }
 
+// Une unité de reprise est une portion datée du document cumulatif. Elle
+// réutilise l'état FSRS du rappel, mais reste invisible dans la liste des
+// chapitres : le chapitre organise le cours, l'unité organise la mémoire.
+export function isReviewUnit(chapter) {
+  return chapter?.reviewUnit === true;
+}
+
+// Contrairement à un chapitre historique, une portion nouvelle n'est jamais
+// présentée comme « maîtrisée » ou « non maîtrisée ». Son premier rappel est
+// simplement exigible le lendemain ; la courbe ne démarre qu'après ce rappel.
+export function reviewUnitInfo(unit, s, today) {
+  const introducedAt = isValidISODate(unit?.introducedAt) ? unit.introducedAt : today;
+  const rec = unit?.recall || {};
+  if (!rec.lastReviewed) {
+    const dueAt = addDays(introducedAt, 1);
+    return {
+      tested: false,
+      dueAt,
+      due: dueAt <= today,
+      overdueDays: Math.max(0, daysBetween(dueAt, today)),
+      interval: 1,
+      R: null,
+    };
+  }
+  const interval = Math.max(1, Math.round(optimalInterval(rec.stability, s.requestRetention)));
+  const dueAt = addDays(rec.lastReviewed, interval);
+  const since = Math.max(0, daysBetween(rec.lastReviewed, today));
+  return {
+    tested: true,
+    dueAt,
+    due: dueAt <= today,
+    overdueDays: Math.max(0, daysBetween(dueAt, today)),
+    interval,
+    since,
+    R: retrievability(since, rec.stability),
+  };
+}
+
+// Prévision dédiée aux portions. Les échéances déjà dépassées sont regroupées
+// aujourd'hui : le calendrier ne prétend pas qu'on peut réviser dans le passé.
+export function forecastReviewUnits(units, s, today, horizon = 28) {
+  const map = {};
+  for (const unit of units || []) {
+    if (!isReviewUnit(unit)) continue;
+    const info = reviewUnitInfo(unit, s, today);
+    const date = info.dueAt < today ? today : info.dueAt;
+    const offset = daysBetween(today, date);
+    if (offset < 0 || offset > horizon) continue;
+    const cell = map[date] || (map[date] = { count: 0, minutes: 0 });
+    cell.count += 1;
+    cell.minutes += unit.minutes?.recall ?? AXIS_MINUTES.recall;
+  }
+  return map;
+}
+
 // Axe au risque le plus élevé, parmi ceux qui s'appliquent. À égalité, l'ordre
 // pédagogique tranche (apprendre -> appliquer -> transférer).
 function argmaxAxis(risks, axes = AXIS_KEYS) {
@@ -890,6 +953,7 @@ export function validateImport(obj) {
     };
 
     const chapterIds = new Set();
+    const reviewUnitRefs = [];
     for (const c of chapters) {
       if (!isRecord(c)) { push('Un chapitre n’est pas un objet.'); continue; }
       const label = safeName(c);
@@ -910,6 +974,23 @@ export function validateImport(obj) {
       }
       if (c.position != null && (typeof c.position !== 'string' || c.position.length > POSITION_MAX)) {
         push(`« ${label} » : point de reprise invalide ou trop long.`);
+      }
+      if (c.positionUpdatedAt != null && !isValidISODate(c.positionUpdatedAt)) {
+        push(`« ${label} » : date de mise à jour du point invalide.`);
+      }
+      if (c.reviewUnit != null && typeof c.reviewUnit !== 'boolean') {
+        push(`« ${label} » : indicateur d’unité de reprise invalide.`);
+      }
+      if (c.reviewUnit === true) {
+        if (typeof c.parentChapterId !== 'string' || !c.parentChapterId) {
+          push(`« ${label} » : chapitre parent manquant.`);
+        }
+        if (!isValidISODate(c.introducedAt)) push(`« ${label} » : date d’introduction invalide.`);
+        if (c.kind !== 'resource') push(`« ${label} » : une unité de reprise doit être une ressource interne.`);
+        if (!Array.isArray(c.axes) || c.axes.length !== 1 || c.axes[0] !== 'recall') {
+          push(`« ${label} » : une unité de reprise ne doit porter que le rappel.`);
+        }
+        reviewUnitRefs.push({ id: c.id, parentChapterId: c.parentChapterId, label });
       }
       // v7 : documents attachés (références, jamais de fichiers).
       if (c.docs != null) {
@@ -952,6 +1033,12 @@ export function validateImport(obj) {
       if (c.estimatedMinutes != null && !(Number.isFinite(c.estimatedMinutes)
         && c.estimatedMinutes >= IMPORT_BOUNDS.axisMinutes[0] && c.estimatedMinutes <= IMPORT_BOUNDS.axisMinutes[1])) {
         push(`Chapitre « ${label} » : durée historique hors bornes.`);
+      }
+    }
+
+    for (const unit of reviewUnitRefs) {
+      if (!chapterIds.has(unit.parentChapterId) || unit.parentChapterId === unit.id) {
+        push(`« ${unit.label} » : chapitre parent introuvable.`);
       }
     }
 
@@ -1183,7 +1270,7 @@ export function migrateV3(v3) {
 // S'assure qu'un état déjà v4 a tous les champs (idempotent, sans rejeu).
 // `today` sert uniquement à l'hygiène (purge des vieux reports) — passer une
 // date fixe dans les tests garde la fonction déterministe.
-export function ensureV7(s, today = todayISO()) {
+export function ensureV8(s, today = todayISO()) {
   const settings = { ...DEFAULT_SETTINGS, ...(s?.settings || {}) };
   const deleted = pruneTombstones(s.deleted, today);
   const exams = (Array.isArray(s.exams) ? s.exams : [])
@@ -1197,34 +1284,50 @@ export function ensureV7(s, today = todayISO()) {
   // qu'hier sont du poids mort.
   const skips = Object.fromEntries(Object.entries(s.skips && typeof s.skips === 'object' ? s.skips : {})
     .filter(([, d]) => typeof d === 'string' && d >= addDays(today, -1)));
-  return {
-    version: 7,
-    subjects: (Array.isArray(s.subjects) ? s.subjects : []).filter((x) => !deleted.subjects[x?.id]),
-    chapters: (Array.isArray(s.chapters) ? s.chapters : []).filter((x) => !deleted.chapters[x?.id]).map((c) => {
+  const normalizedChapters = (Array.isArray(s.chapters) ? s.chapters : [])
+    .filter((x) => !deleted.chapters[x?.id])
+    .map((c) => {
       const initialLevel = c.initialLevel ?? closestLevel(c.recall?.difficulty ?? c.difficulty ?? 5).key;
       const level = LEVELS.find((l) => l.key === initialLevel) || LEVELS[0];
       const rec = c.recall || {};
+      const reviewUnit = c.reviewUnit === true;
+      const kind = reviewUnit ? 'resource' : (KIND_KEYS.includes(c.kind) ? c.kind : 'course');
+      const position = reviewUnit ? null : normPosition(c.position);
+      const positionUpdatedAt = isValidISODate(c.positionUpdatedAt)
+        ? c.positionUpdatedAt : additionDateFromPosition(position);
       return {
-        id: c.id, subjectId: c.subjectId, name: c.name, initialLevel,
-        kind: KIND_KEYS.includes(c.kind) ? c.kind : 'course',
-        axes: normAxes(c.axes, KIND_KEYS.includes(c.kind) ? c.kind : 'course'),
-        position: normPosition(c.position),
-        docs: normDocs(c.docs),
+        id: c.id, subjectId: c.subjectId, name: normPosition(c.name) || c.name, initialLevel,
+        kind,
+        axes: reviewUnit ? ['recall'] : normAxes(c.axes, kind),
+        position,
+        positionUpdatedAt,
+        docs: reviewUnit ? [] : normDocs(c.docs),
+        ...(reviewUnit ? {
+          reviewUnit: true,
+          parentChapterId: typeof c.parentChapterId === 'string' ? c.parentChapterId : null,
+          introducedAt: isValidISODate(c.introducedAt) ? c.introducedAt : positionUpdatedAt,
+        } : {}),
         recall: {
           stability: Math.max(S_MIN, rec.stability ?? targetInterval(level.m, settings)),
           difficulty: clamp(rec.difficulty ?? level.D, 1, 10),
           lastReviewed: rec.lastReviewed ?? null,
           source: rec.source ?? 'seed',
         },
-        exercise: normPractice(c.exercise),
-        problem: normPractice(c.problem),
+        exercise: reviewUnit ? emptyPractice() : normPractice(c.exercise),
+        problem: reviewUnit ? emptyPractice() : normPractice(c.problem),
         minutes: {
           recall: clampMinutes(c.minutes?.recall, AXIS_MINUTES.recall),
           exercise: clampMinutes(c.minutes?.exercise, AXIS_MINUTES.exercise),
           problem: clampMinutes(c.minutes?.problem, AXIS_MINUTES.problem),
         },
       };
-    }),
+    });
+  const parentIds = new Set(normalizedChapters.filter((c) => !isReviewUnit(c)).map((c) => c.id));
+  return {
+    version: 8,
+    subjects: (Array.isArray(s.subjects) ? s.subjects : []).filter((x) => !deleted.subjects[x?.id]),
+    chapters: normalizedChapters.filter((c) => !isReviewUnit(c)
+      || (c.parentChapterId && c.introducedAt && parentIds.has(c.parentChapterId))),
     exams,
     settings,
     parallelLog: s.parallelLog && typeof s.parallelLog === 'object' ? s.parallelLog : {},
@@ -1246,6 +1349,10 @@ export function ensureV7(s, today = todayISO()) {
     lastExportAt: s.lastExportAt ?? null,
   };
 }
+
+// Alias temporaire pour les imports internes historiques ; tout état produit
+// est néanmoins bien un état v8.
+export const ensureV7 = ensureV8;
 function normPractice(p) {
   if (!p || typeof p !== 'object') return emptyPractice();
   return {
@@ -1284,17 +1391,42 @@ export function migrateV6(v6) {
   };
 }
 
-// Accepte v1 à v7 -> renvoie toujours un état v7 sain.
-// Tout passe par ensureV7 (bornes + hygiène), y compris après migration.
+// v7 -> v8 : un « Ajout du jj/mm/aaaa » déjà présent devient une unité de
+// reprise. C'est la seule donnée que l'ancien schéma permet de reconstruire
+// honnêtement ; les sections antérieures restent dans le PDF mais ne sont pas
+// inventées dans CADENCE.
+export function migrateV7(v7, today = todayISO()) {
+  const settings = { ...DEFAULT_SETTINGS, ...(v7?.settings || {}) };
+  const base = (v7?.chapters || []).map((c) => ({
+    ...c,
+    positionUpdatedAt: isValidISODate(c.positionUpdatedAt)
+      ? c.positionUpdatedAt : additionDateFromPosition(c.position),
+  }));
+  let chapters = [...base];
+  for (const chapter of base) {
+    if (isReviewUnit(chapter)) continue;
+    const introducedAt = additionDateFromPosition(chapter.position);
+    if (!introducedAt || introducedAt > today) continue;
+    const id = reviewUnitId(chapter.id, introducedAt);
+    if (!chapters.some((c) => c.id === id)) {
+      chapters.push(newReviewUnit(chapter, chapter.position, introducedAt, settings));
+    }
+  }
+  return { ...v7, version: 8, chapters };
+}
+
+// Accepte v1 à v8 -> renvoie toujours un état v8 sain.
+// Tout passe par ensureV8 (bornes + hygiène), y compris après migration.
 export function normalize(s, today = todayISO()) {
   if (!s || typeof s !== 'object') return seedState();
-  if (s.version === 7) return ensureV7(s, today);
-  if (s.version === 6) return ensureV7(migrateV6(s), today);
-  if (s.version === 5) return ensureV7(migrateV6(migrateV5(s)), today);
-  if (s.version === 4) return ensureV7(migrateV6(migrateV5(migrateV4(s))), today);
-  if (s.version === 3) return ensureV7(migrateV6(migrateV5(migrateV4(migrateV3(s)))), today);
-  if (s.version === 2) return ensureV7(migrateV6(migrateV5(migrateV4(migrateV3(migrateV2(s))))), today);
-  return ensureV7(migrateV6(migrateV5(migrateV4(migrateV3(migrateV2(migrateV1(s)))))), today);
+  if (s.version === 8) return ensureV8(s, today);
+  if (s.version === 7) return ensureV8(migrateV7(s, today), today);
+  if (s.version === 6) return ensureV8(migrateV7(migrateV6(s), today), today);
+  if (s.version === 5) return ensureV8(migrateV7(migrateV6(migrateV5(s)), today), today);
+  if (s.version === 4) return ensureV8(migrateV7(migrateV6(migrateV5(migrateV4(s))), today), today);
+  if (s.version === 3) return ensureV8(migrateV7(migrateV6(migrateV5(migrateV4(migrateV3(s)))), today), today);
+  if (s.version === 2) return ensureV8(migrateV7(migrateV6(migrateV5(migrateV4(migrateV3(migrateV2(s))))), today), today);
+  return ensureV8(migrateV7(migrateV6(migrateV5(migrateV4(migrateV3(migrateV2(migrateV1(s)))))), today), today);
 }
 
 // `opts` : { kind, axes, position } — par défaut, un chapitre de cours complet.
@@ -1332,6 +1464,61 @@ export function normPosition(value) {
   return value.replace(/\s+/g, ' ').trim().slice(0, POSITION_MAX) || null;
 }
 
+// Le récapitulatif quotidien utilise « Ajout du jj/mm/aaaa — notion ». La
+// date est l'identifiant stable de la portion : corriger son libellé le même
+// jour met à jour la même unité au lieu d'en créer plusieurs.
+export function additionDateFromPosition(value) {
+  const position = normPosition(value);
+  const match = position?.match(/\bAjout du\s+(\d{1,2})\/(\d{1,2})\/(\d{4})\b/i);
+  if (!match) return null;
+  const iso = `${match[3]}-${String(Number(match[2])).padStart(2, '0')}-${String(Number(match[1])).padStart(2, '0')}`;
+  return isValidISODate(iso) ? iso : null;
+}
+
+export function reviewUnitId(parentChapterId, introducedAt) {
+  return `reprise:${parentChapterId}:${introducedAt}`;
+}
+
+export function newReviewUnit(parent, label, introducedAt, settings) {
+  const position = normPosition(label);
+  const date = isValidISODate(introducedAt) ? introducedAt : todayISO();
+  const unit = newChapter(parent.subjectId, position || parent.name, LEVELS[0], settings, {
+    kind: 'resource', axes: ['recall'],
+  });
+  return {
+    ...unit,
+    id: reviewUnitId(parent.id, date),
+    name: position || parent.name,
+    reviewUnit: true,
+    parentChapterId: parent.id,
+    introducedAt: date,
+    position: null,
+    positionUpdatedAt: date,
+    docs: [],
+  };
+}
+
+// Crée la portion liée à un nouvel « Ajout du … », ou corrige son libellé si
+// elle existe déjà. Un point libre (« p. 47 ») reste un simple signet et ne
+// déclenche aucune fausse révision.
+export function upsertReviewUnit(chapters, parentChapterId, value, settings) {
+  const label = normPosition(value);
+  const introducedAt = additionDateFromPosition(label);
+  const parent = (chapters || []).find((c) => c.id === parentChapterId && !isReviewUnit(c));
+  if (!parent || !label || !introducedAt) return chapters;
+  const id = reviewUnitId(parentChapterId, introducedAt);
+  const existing = (chapters || []).find((c) => c.id === id);
+  if (!existing) return [...chapters, newReviewUnit(parent, label, introducedAt, settings)];
+  return chapters.map((c) => (c.id === id ? {
+    ...c,
+    name: label,
+    subjectId: parent.subjectId,
+    parentChapterId,
+    introducedAt,
+    reviewUnit: true,
+  } : c));
+}
+
 export function seedState() {
   const core = [
     ['Algèbre linéaire 2', '#7c9cf5'],
@@ -1346,7 +1533,7 @@ export function seedState() {
     { id: uid(), name: 'Anki', color: '#fca5a5', type: 'parallel', weeklyFloor: 6 },
   ];
   return {
-    version: 7, subjects: [...core, ...parallel], chapters: [], exams: [],
+    version: 8, subjects: [...core, ...parallel], chapters: [], exams: [],
     settings: { ...DEFAULT_SETTINGS }, parallelLog: {}, reviewLog: [],
     archivedReviews: [], skips: {}, capacityOverrides: {}, examDebriefs: {},
     deleted: emptyDeleted(), syncMeta: null,

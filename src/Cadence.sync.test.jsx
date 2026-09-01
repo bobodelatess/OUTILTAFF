@@ -3,7 +3,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import React from 'react';
 import { render, screen, within, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
 import Cadence from './Cadence.jsx';
-import { STORAGE_KEY, AXIS_MINUTES, emptyPractice, emptyDeleted, todayISO } from './engine.js';
+import {
+  STORAGE_KEY, AXIS_MINUTES, DEFAULT_SETTINGS, addDays, emptyPractice,
+  emptyDeleted, newReviewUnit, todayISO,
+} from './engine.js';
 import { SYNC_KEY, DEVICE_KEY, VAULT_FILE } from './remote.js';
 
 /*
@@ -46,6 +49,18 @@ const stateWith = (chapters) => ({
   capacityOverrides: {}, examDebriefs: {}, deleted: emptyDeleted(),
   syncMeta: null, lastExportAt: null,
 });
+
+const withDueReview = (chapters) => {
+  const state = stateWith(chapters);
+  const parent = state.chapters[0];
+  const introducedAt = addDays(todayISO(), -1);
+  const label = `Ajout du ${introducedAt.split('-').reverse().join('/')} — ${parent.name}`;
+  parent.position = label;
+  parent.positionUpdatedAt = introducedAt;
+  state.version = 8;
+  state.chapters.push(newReviewUnit(parent, label, introducedAt, DEFAULT_SETTINGS));
+  return state;
+};
 
 // Coffre distant partagé, en mémoire.
 let vault;
@@ -90,6 +105,7 @@ const boot = async (device, { synced = true } = {}) => {
 const vaultState = () => (vault.content ? JSON.parse(vault.content) : null);
 const localState = (device) => JSON.parse(device.getItem(STORAGE_KEY));
 const card = (name) => screen.getByText(name).closest('.cad-card');
+const reviewCard = () => screen.getByRole('group', { name: /— consolidation/ });
 
 // Attend que le coffre satisfasse une condition (le pilote enchaîne
 // lecture -> fusion -> écriture de façon asynchrone).
@@ -117,7 +133,7 @@ describe('synchronisation multi-appareils — bout en bout', () => {
     // Deuxième appareil, stockage vierge, même coffre.
     const phone = makeDevice('dev-phone');
     await boot(phone);
-    await waitFor(() => expect(screen.getByText('Diagonalisation')).toBeTruthy());
+    await waitFor(() => expect(screen.getAllByText('Diagonalisation').length).toBeGreaterThan(0));
     expect(localState(phone).chapters.map((c) => c.name)).toContain('Diagonalisation');
   });
 
@@ -131,7 +147,7 @@ describe('synchronisation multi-appareils — bout en bout', () => {
     // Téléphone vierge : il démarre sur les matières proposées par défaut.
     const phone = makeDevice('dev-phone');
     await boot(phone);
-    await waitFor(() => expect(screen.getByText('Diagonalisation')).toBeTruthy());
+    await waitFor(() => expect(screen.getAllByText('Diagonalisation').length).toBeGreaterThan(0));
     // Il a adopté l'état distant : une seule matière, pas les 8 du départ.
     expect(localState(phone).subjects.map((s) => s.name)).toEqual(['Maths']);
     expect(vaultState().subjects.map((s) => s.name)).toEqual(['Maths']);
@@ -139,18 +155,16 @@ describe('synchronisation multi-appareils — bout en bout', () => {
 
   it('une note prise sur le téléphone remonte sur l’ordinateur', async () => {
     const pc = makeDevice('dev-pc');
-    pc.setItem(STORAGE_KEY, JSON.stringify(stateWith([chapterOn('c1', 'Diagonalisation')])));
+    pc.setItem(STORAGE_KEY, JSON.stringify(withDueReview([chapterOn('c1', 'Diagonalisation')])));
     await boot(pc);
-    await untilVault((st) => st.chapters.length === 1);
+    await untilVault((st) => st.chapters.length === 2);
     cleanup();
 
-    // Le téléphone note un exercice réussi.
+    // Le téléphone classe une portion réellement reprise.
     const phone = makeDevice('dev-phone');
     await boot(phone);
-    await waitFor(() => expect(screen.getByText('Diagonalisation')).toBeTruthy());
-    const c = card('Diagonalisation');
-    fireEvent.click(within(c).getByRole('button', { name: /^Exercice/ }));
-    fireEvent.click(within(card('Diagonalisation')).getByText('Autonome'));
+    await waitFor(() => expect(screen.getAllByText('Diagonalisation').length).toBeGreaterThan(0));
+    fireEvent.click(within(reviewCard()).getByRole('button', { name: 'Maîtrisé' }));
     fireEvent.click(screen.getByRole('button', { name: /Synchronisation/i }));
     await untilVault((st) => st.reviewLog.length === 1);
     cleanup();
@@ -162,27 +176,26 @@ describe('synchronisation multi-appareils — bout en bout', () => {
     await waitFor(() => {
       const st = localState(pc2);
       expect(st.reviewLog).toHaveLength(1);
-      expect(st.chapters[0].exercise.attempts).toBe(1);
-      expect(st.chapters[0].recall.lastReviewed).toBeNull(); // l'axe rappel n'a pas bougé
+      expect(st.chapters.find((c) => c.reviewUnit).recall.lastReviewed).toBe(todayISO());
+      expect(st.chapters.find((c) => !c.reviewUnit).recall.lastReviewed).toBeNull();
     });
   });
 
   it('deux appareils modifiés hors ligne fusionnent sans rien perdre', async () => {
     // État commun déposé dans le coffre.
     const pc = makeDevice('dev-pc');
-    pc.setItem(STORAGE_KEY, JSON.stringify(stateWith([chapterOn('c1', 'Diagonalisation')])));
+    pc.setItem(STORAGE_KEY, JSON.stringify(withDueReview([chapterOn('c1', 'Diagonalisation')])));
     await boot(pc);
-    await untilVault((st) => st.chapters.length === 1);
+    await untilVault((st) => st.chapters.length === 2);
     const shared = pc.getItem(STORAGE_KEY);
     cleanup();
 
-    // Le téléphone note un exercice pendant que l'ordinateur ajoute un chapitre.
+    // Le téléphone classe une portion pendant que l'ordinateur ajoute un chapitre.
     const phone = makeDevice('dev-phone');
     phone.setItem(STORAGE_KEY, shared);
     await boot(phone);
-    await waitFor(() => expect(screen.getByText('Diagonalisation')).toBeTruthy());
-    fireEvent.click(within(card('Diagonalisation')).getByRole('button', { name: /^Exercice/ }));
-    fireEvent.click(within(card('Diagonalisation')).getByText('Autonome'));
+    await waitFor(() => expect(screen.getAllByText('Diagonalisation').length).toBeGreaterThan(0));
+    fireEvent.click(within(reviewCard()).getByRole('button', { name: 'Maîtrisé' }));
     fireEvent.click(screen.getByRole('button', { name: /Synchronisation/i }));
     await untilVault((st) => st.reviewLog.length === 1);
     cleanup();
@@ -198,11 +211,12 @@ describe('synchronisation multi-appareils — bout en bout', () => {
     // Les deux contributions coexistent.
     await waitFor(() => {
       const st = localState(pc2);
-      expect(st.chapters.map((c) => c.name).sort()).toEqual(['Diagonalisation', 'Espaces euclidiens']);
+      expect(st.chapters.filter((c) => !c.reviewUnit).map((c) => c.name).sort())
+        .toEqual(['Diagonalisation', 'Espaces euclidiens']);
       expect(st.reviewLog).toHaveLength(1);
-      expect(st.chapters.find((c) => c.id === 'c1').exercise.attempts).toBe(1);
+      expect(st.chapters.find((c) => c.reviewUnit).recall.lastReviewed).toBe(todayISO());
     });
-    await untilVault((st) => st.chapters.length === 2 && st.reviewLog.length === 1);
+    await untilVault((st) => st.chapters.length === 3 && st.reviewLog.length === 1);
   });
 
   it('un chapitre supprimé sur un appareil ne revient pas depuis l’autre', async () => {
@@ -215,10 +229,14 @@ describe('synchronisation multi-appareils — bout en bout', () => {
     // Le téléphone en supprime un.
     const phone = makeDevice('dev-phone');
     await boot(phone);
-    await waitFor(() => expect(screen.getByText('Diagonalisation')).toBeTruthy());
-    fireEvent.click(screen.getByRole('button', { name: /Matières/ }));
-    fireEvent.click(screen.getByLabelText(/^Déplier /));
-    fireEvent.click(screen.getByTitle('Supprimer le chapitre Diagonalisation'));
+    await waitFor(() => expect(localState(phone).chapters).toHaveLength(2));
+    await waitFor(() => expect(screen.getByText('Espaces euclidiens')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: /Rechercher/ }));
+    fireEvent.change(screen.getByRole('searchbox', { name: /Rechercher un chapitre/ }), {
+      target: { value: 'Diagonalisation' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Diagonalisation.*Maths/ }));
+    fireEvent.click(await screen.findByTitle('Supprimer le chapitre Diagonalisation'));
     fireEvent.click(screen.getByRole('button', { name: /Synchronisation/i }));
     await untilVault((st) => st.chapters.length === 1);
     cleanup();
@@ -297,13 +315,12 @@ describe('synchronisation — activation et confidentialité', () => {
 
   it('pas d’emballement : le nombre d’échanges reste borné après une note', async () => {
     const pc = makeDevice('dev-pc');
-    pc.setItem(STORAGE_KEY, JSON.stringify(stateWith([chapterOn('c1', 'Diagonalisation')])));
+    pc.setItem(STORAGE_KEY, JSON.stringify(withDueReview([chapterOn('c1', 'Diagonalisation')])));
     await boot(pc);
-    await untilVault((st) => st.chapters.length === 1);
+    await untilVault((st) => st.chapters.length === 2);
 
     const before = global.fetch.mock.calls.length;
-    fireEvent.click(within(card('Diagonalisation')).getByRole('button', { name: /^Exercice/ }));
-    fireEvent.click(within(card('Diagonalisation')).getByText('Autonome'));
+    fireEvent.click(within(reviewCard()).getByRole('button', { name: 'Maîtrisé' }));
     fireEvent.click(screen.getByRole('button', { name: /Synchronisation/i }));
     await untilVault((st) => st.reviewLog.length === 1);
 
