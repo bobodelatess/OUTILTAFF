@@ -118,6 +118,9 @@ minutes et écran de progrès global ne sont plus dans le parcours actif. Le
 temps quotidien appartient à l'utilisateur ; CADENCE ne prescrit que les
 consolidations issues de données réellement enregistrées.
 
+Une portion compte environ cinq minutes dans le calendrier et la charge
+indicative : c'est un rappel bref, pas une nouvelle séance de cours.
+
 ## Synchronisation entre appareils
 
 Téléphone et ordinateur peuvent partager les mêmes données dans un **gist
