@@ -40,14 +40,14 @@ Le comportement est volontairement asymétrique :
 
 - le jour de l'ajout, aucune maîtrise n'est demandée ou affichée ;
 - le lendemain, la portion apparaît une première fois dans les
-  consolidations pour environ 17 minutes ;
+  consolidations pour environ 25 minutes ;
 - après une restitution brève sans document, l'utilisateur choisit l'un des
   cinq niveaux : **Oublié**, **Très fragile**, **Fragile**, **Maîtrisé** ou
   **Très solide** ;
 - cette réponse est enregistrée dans le journal et déclenche la prochaine
   date selon la courbe d'oubli ;
-- les rappels espacés suivants durent environ 7 minutes ; un oubli ou un état
-  très fragile rouvre un bloc de récupération de 17 minutes ;
+- les rappels espacés suivants durent environ 8 minutes ; un oubli ou un état
+  très fragile rouvre un bloc de récupération de 25 minutes ;
 - après deux restitutions satisfaisantes successives, la portion est intégrée
   au chapitre : elle ne revient plus isolément et le test cumulatif prend le
   relais ;

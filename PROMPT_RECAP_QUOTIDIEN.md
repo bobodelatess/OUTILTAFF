@@ -64,8 +64,9 @@ Pour un projet, ne l’ajoute à CADENCE que s’il doit réellement réapparaî
 ### Consolidations et niveaux de maîtrise
 
 - Une portion nouvelle ne reçoit aucun niveau de maîtrise.
-- Sa première consolidation doit apparaître le lendemain et représente environ 17 minutes.
-- Les rappels espacés ultérieurs sont plus courts et sont gérés automatiquement par CADENCE.
+- Sa première consolidation doit apparaître le lendemain et représente environ 25 minutes.
+- Les rappels espacés ultérieurs représentent environ 8 minutes et sont gérés automatiquement par CADENCE.
+- Un oubli ou un niveau « Très fragile » rouvre un bloc de récupération d’environ 25 minutes.
 - Après deux restitutions satisfaisantes successives, CADENCE peut intégrer automatiquement la portion au chapitre afin que le suivi cumulatif prenne le relais.
 - Ne force jamais manuellement cette intégration et ne l’interprète pas comme une preuve de réussite à un examen.
 - Enregistre un niveau uniquement si j’ai réellement repris la portion sans le document et si mon appréciation est explicitement disponible.
