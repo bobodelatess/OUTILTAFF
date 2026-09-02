@@ -53,11 +53,11 @@ describe('v10 — cycle de consolidation', () => {
     expect(intervals).toEqual([1, 2, 3, 10, 25]);
   });
 
-  it('réserve 17 minutes à J+1 puis 7 minutes aux rappels espacés', () => {
+  it('réserve 25 minutes à J+1 puis 8 minutes aux rappels espacés', () => {
     const unit = newReviewUnit(chapter(), 'Ajout du 31/08/2026 — noyau', addDays(TODAY, -1), S);
-    expect(REVIEW_UNIT_MINUTES).toBe(17);
-    expect(unit.minutes.recall).toBe(17);
-    expect(reviewUnitInfo(unit, S, TODAY).minutes).toBe(17);
+    expect(REVIEW_UNIT_MINUTES).toBe(25);
+    expect(unit.minutes.recall).toBe(25);
+    expect(reviewUnitInfo(unit, S, TODAY).minutes).toBe(25);
     const reviewed = applySelfAssessment(unit, 3, TODAY, S).chapter;
     expect(reviewUnitInfo(reviewed, S, TODAY).minutes).toBe(SPACED_REVIEW_MINUTES);
   });
@@ -74,10 +74,10 @@ describe('v10 — cycle de consolidation', () => {
     expect(reviewUnitInfo(second, S, secondDate)).toMatchObject({ integrated: true, due: false, minutes: 0 });
   });
 
-  it('rouvre un bloc de 17 minutes après un oubli', () => {
+  it('rouvre un bloc de 25 minutes après un oubli', () => {
     const unit = newReviewUnit(chapter(), 'Ajout du 31/08/2026 — noyau', addDays(TODAY, -1), S);
     const forgotten = applySelfAssessment(unit, 0, TODAY, S).chapter;
-    expect(reviewUnitInfo(forgotten, S, TODAY).minutes).toBe(17);
+    expect(reviewUnitInfo(forgotten, S, TODAY).minutes).toBe(25);
   });
 });
 
@@ -118,7 +118,7 @@ describe('v10 — pression ciblée et budget réel', () => {
     const item = { unit, info: reviewUnitInfo(unit, S, TODAY) };
     const test = newCourseTest('s1', 'Test du chapitre', TODAY, ['c1'], [], TODAY, 20);
     expect(subjectDailyLoads(allocation, [item], [test])[0]).toMatchObject({
-      maintenanceMinutes: 37, remainingMinutes: 83, overloadMinutes: 0,
+      maintenanceMinutes: 45, remainingMinutes: 75, overloadMinutes: 0,
     });
   });
 });

@@ -171,9 +171,9 @@ export const POSITION_MAX = 120;
 
 // J+1 est une vraie consolidation. Les rappels suivants sont volontairement
 // brefs ; un oubli ou un état très fragile rouvre un bloc de récupération.
-export const CONSOLIDATION_MINUTES = 17;
-export const SPACED_REVIEW_MINUTES = 7;
-export const REVIEW_RECOVERY_MINUTES = 17;
+export const CONSOLIDATION_MINUTES = 25;
+export const SPACED_REVIEW_MINUTES = 8;
+export const REVIEW_RECOVERY_MINUTES = 25;
 export const REVIEW_INTEGRATION_SUCCESS_STREAK = 2;
 // Alias historique conservé pour les imports et appels existants.
 export const REVIEW_UNIT_MINUTES = CONSOLIDATION_MINUTES;
