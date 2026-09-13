@@ -71,7 +71,9 @@ describe('v10 — cycle de consolidation', () => {
     const second = applySelfAssessment(first, 3, secondDate, S).chapter;
     expect(second.reviewSuccessStreak).toBe(2);
     expect(second.integratedAt).toBe(secondDate);
-    expect(reviewUnitInfo(second, S, secondDate)).toMatchObject({ integrated: true, due: false, minutes: 0 });
+    const cumulativeTest = newCourseTest('s1', 'Test du chapitre', addDays(secondDate, 7), ['c1'], [], TODAY);
+    expect(reviewUnitInfo(second, S, secondDate, [], [cumulativeTest]))
+      .toMatchObject({ integrated: true, due: false, minutes: 0 });
   });
 
   it('rouvre un bloc de 25 minutes après un oubli', () => {

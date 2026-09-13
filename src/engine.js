@@ -793,10 +793,15 @@ export function isReviewUnit(chapter) {
 // Contrairement à un chapitre historique, une portion nouvelle n'est jamais
 // présentée comme « maîtrisée » ou « non maîtrisée ». Son premier rappel est
 // simplement exigible le lendemain ; la courbe ne démarre qu'après ce rappel.
-export function reviewUnitInfo(unit, s, today, exams = []) {
+export function reviewUnitInfo(unit, s, today, exams = [], courseTests = []) {
   const introducedAt = isValidISODate(unit?.introducedAt) ? unit.introducedAt : today;
   const rec = unit?.recall || {};
-  if (isValidISODate(unit?.integratedAt)) {
+  const cumulativeTest = (courseTests || []).find((test) =>
+    test.subjectId === unit?.subjectId && isValidISODate(test.scheduledFor)
+    && examCoversItem(test, unit));
+  // Une portion intégrée garde ses rappels individuels tant qu'aucun rappel
+  // cumulatif daté ne la couvre. Une intégration seule ne doit pas l'oublier.
+  if (isValidISODate(unit?.integratedAt) && cumulativeTest) {
     return {
       tested: Boolean(rec.lastReviewed), integrated: true, integratedAt: unit.integratedAt,
       dueAt: null, due: false, overdueDays: 0, interval: null, R: null, minutes: 0,
@@ -834,11 +839,13 @@ export function reviewUnitInfo(unit, s, today, exams = []) {
 
 // Prévision dédiée aux portions. Les échéances déjà dépassées sont regroupées
 // aujourd'hui : le calendrier ne prétend pas qu'on peut réviser dans le passé.
-export function forecastReviewUnits(units, s, today, horizon = 28, exams = []) {
+export function forecastReviewUnits(units, s, today, horizon = 28, exams = [], courseTests = []) {
   const map = {};
   for (const unit of units || []) {
     if (!isReviewUnit(unit)) continue;
-    const info = reviewUnitInfo(unit, s, today, exams);
+    const info = reviewUnitInfo(unit, s, today, exams, courseTests);
+    // Les portions reprises par un test cumulatif n'ont pas de date propre.
+    if (!isValidISODate(info.dueAt)) continue;
     const date = info.dueAt < today ? today : info.dueAt;
     const offset = daysBetween(today, date);
     if (offset < 0 || offset > horizon) continue;

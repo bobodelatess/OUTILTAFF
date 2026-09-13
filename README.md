@@ -19,32 +19,24 @@ restent dans le navigateur, avec export/import JSON. La
 [synchronisation optionnelle](#synchronisation-entre-appareils) utilise un
 coffre privé appartenant au compte GitHub de l'utilisateur.
 
-## Réviser en trois listes
+## Documents de révision et cartes Anki
 
-Chaque portion datée peut désormais contenir uniquement :
+L’accueil reste centré sur la continuité, les rappels et les liens Drive.
+Les trois rubriques **Cours**, **Méthodes d’exercices** et **Démonstrations**
+structurent les documents cumulatifs : des points espacés et lisibles,
+avec des explications suffisantes et des preuves complètes.
 
-- **Cours** : notions, formules et conditions à retenir ;
-- **Méthodes d’exercices** : quand utiliser une méthode et comment la refaire ;
-- **Démonstrations** : résultat, hypothèses, idée et étapes essentielles.
+Le [prompt du soir](PROMPT_RECAP_QUOTIDIEN.md) demande au LLM connecté à Drive
+de mettre à jour les fichiers LaTeX et PDF, puis d’associer leur lien à la
+portion étudiée dans CADENCE. Il prépare aussi des cartes Anki en questions
+et réponses sur le cours, les idées des exercices et les étapes décisives
+des démonstrations. CADENCE ne produit pas lui-même ces fichiers.
 
-Dans la continuité, une consolidation ou la vue **Matières**, utiliser
-**Renseigner les listes** puis saisir un point par ligne. Les formules entre
-`$…$`, `$$…$$`, `\(…\)` ou `\[…\]` sont rendues en LaTeX. Ajouter
-`Blocage : … → explication : …` au point concerné : il sera mis en évidence,
-sans créer une quatrième rubrique. Les rubriques vides restent masquées.
-
-Le sélecteur **À revoir** permet de retrouver les portions antérieures, même
-celles déjà intégrées au chapitre. **Masquer pour me tester** cache les listes
-sans enregistrer de maîtrise. Les documents Drive restent disponibles.
-
-Les listes suivent l’export/import, la sauvegarde locale et le coffre
-multi-appareils. Chaque point a une identité et un horodatage propres ; les
-ajouts concurrents sont conservés et les suppressions restent mémorisées.
-Éditer le contenu ne change ni les échéances ni les résultats.
-
-Le [prompt du soir](PROMPT_RECAP_QUOTIDIEN.md) applique le même format aux
-fichiers cumulatifs Drive. CADENCE ne génère ni ne réécrit lui-même les PDF :
-le LLM connecté à Drive les prépare, puis renseigne les listes et leurs liens.
+Les notes déjà saisies dans l’ancienne interface restent accessibles dans
+**Matières → Déplier → Notes enregistrées**, repliées par défaut. Elles
+conservent leurs formules, leur édition, leurs identifiants et la fusion
+entre appareils. Aucune nouvelle liste n’est demandée sur l’accueil ;
+consulter ou modifier ces notes ne change ni les échéances ni les résultats.
 
 ## Modèle de suivi (schéma v13)
 
@@ -76,14 +68,19 @@ Le comportement est volontairement asymétrique :
 - les rappels espacés suivants durent environ 8 minutes ; un oubli ou un état
   très fragile rouvre un bloc de récupération de 25 minutes ;
 - après deux restitutions satisfaisantes successives, la portion est intégrée
-  au chapitre : elle ne revient plus isolément et le test cumulatif prend le
-  relais ;
+  au chapitre. Un test cumulatif daté couvrant cette portion peut prendre le
+  relais ; tant qu’il n’existe pas, les rappels individuels continuent ;
 - chaque portion avance indépendamment : ajouter du contenu au même chapitre
   ne remet pas artificiellement tout le chapitre à zéro.
 
 Une correction du libellé le même jour met à jour la même portion, sans
 dupliquer ni perdre son historique. Un point libre comme `p. 47`, `unité 5`
 ou `exercice 12` reste un simple signet et ne crée aucune fausse révision.
+
+Le calendrier ignore les échéances individuelles absentes lorsqu’un test
+cumulatif prend le relais. Supprimer ce test, sa date ou son périmètre rétablit
+les rappels individuels concernés, calculés depuis les dernières restitutions
+réelles. Aucune note ni révision supplémentaire n’est inventée.
 
 Lors d'une migration v7 → v8, CADENCE peut reconstruire honnêtement la dernière
 portion si le point existant respecte le format `Ajout du …`. Il n'invente pas
@@ -260,8 +257,8 @@ du nouveau contenu. Il soustrait seulement l'entretien réellement dû de
 l'enveloppe quotidienne, avec un rééquilibrage temporaire et à total fixe avant
 les épreuves renseignées.
 
-Une portion compte environ dix-sept minutes lors de la consolidation du
-lendemain, puis sept minutes lors des rappels espacés. Ces durées sont des
+Une portion compte environ vingt-cinq minutes lors de la consolidation du
+lendemain, puis huit minutes lors des rappels espacés. Ces durées sont des
 repères de charge, pas une nouvelle séance de cours.
 
 ## Synchronisation entre appareils
