@@ -1,0 +1,21 @@
+.cad-revision { min-width: 0; font-family: system-ui, sans-serif; color: #cdd8e6; }
+.cad-revision-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin: .25rem 0 .6rem; }
+.cad-revision-actions button { border: 1px solid #2b3645; border-radius: 6px; padding: .4rem .6rem; background: #111824; color: #9fcaff; font: inherit; font-size: .875rem; cursor: pointer; }
+.cad-revision-actions button:focus-visible, .cad-revision-field textarea:focus-visible,
+.cad-revision-portion select:focus-visible { outline: 2px solid #5ea9ff; outline-offset: 3px; }
+.cad-revision-section { margin-top: .7rem; }
+.cad-revision-section h4 { margin: 0 0 .35rem; font-size: .95rem; font-weight: 650; color: #e0ebfb; }
+.cad-revision-section ul { margin: 0; padding-left: 1.2rem; }
+.cad-revision-section li { padding: .15rem 0 .3rem .15rem; font-size: 1rem; line-height: 1.5; overflow-wrap: anywhere; }
+.cad-revision-blocker::marker { color: #fbbf24; }
+.cad-revision-blocker { border-left: 2px solid #fbbf24; padding-left: .5rem !important; }
+.cad-revision-text { white-space: pre-wrap; }
+.cad-revision-text .katex-display { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: .3rem 0; margin: .3rem 0; text-align: left; }
+.cad-revision-text .katex { white-space: normal; }
+.cad-revision-help { margin: .3rem 0; font-size: .875rem; line-height: 1.5; color: #7c8a9e; }
+.cad-revision-error { color: #f87171; font-size: .875rem; }
+.cad-revision-field { display: grid; gap: .4rem; margin: .75rem 0; font-size: .95rem; }
+.cad-revision-field textarea { width: 100%; box-sizing: border-box; min-height: 6rem; resize: vertical; background: #0a0e14; border: 1px solid #2b3645; color: #cdd8e6; border-radius: 6px; padding: .65rem; font: inherit; line-height: 1.5; }
+.cad-revision-portion { min-width: 0; }
+.cad-revision-portion > label { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; font: 600 .9rem system-ui, sans-serif; }
+.cad-revision-portion select { flex: 1; min-width: 0; max-width: 100%; background: #0a0e14; color: #cdd8e6; border: 1px solid #2b3645; border-radius: 6px; font: 400 .875rem system-ui, sans-serif; padding: .5rem; }

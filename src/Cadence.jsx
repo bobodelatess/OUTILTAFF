@@ -60,6 +60,8 @@ import {
 import { useCurrentDay } from './useCurrentDay.js';
 import ChapterSearch from './ChapterSearch.jsx';
 import FocusMode from './FocusMode.jsx';
+import RevisionChecklist, { PortionRevisionLists } from './RevisionChecklist.jsx';
+import { updateRevisionPoints } from './revisionPoints.js';
 
 /* ================================================================== *
  *  Thème & aides d'affichage
@@ -1419,6 +1421,14 @@ export default function Cadence() {
     return next;
   });
 
+  const saveRevisionPoints = (unitId, baseline, draft) => {
+    const unit = stateRef.current.chapters.find((chapter) => chapter.id === unitId && isReviewUnit(chapter));
+    if (!unit) throw new Error('Cette portion n’existe plus. Recharge la liste des chapitres.');
+    const points = updateRevisionPoints(unit.revisionPoints, baseline, draft, Date.now(), uid);
+    patch((p) => ({ ...p, chapters: p.chapters.map((chapter) => chapter.id === unitId
+      ? { ...chapter, revisionPoints: points } : chapter) }));
+  };
+
   const addSubject = (name) => patch((p) => ({
     ...p, subjects: [...p.subjects, {
       id: uid(), name, color: '#7c9cf5', type: 'core',
@@ -2104,6 +2114,7 @@ export default function Cadence() {
               onRecordCourseTest={recordCourseTest}
               onExtendCourseTest={extendCourseTest}
               onSetPosition={setChapterPosition}
+              reviewUnits={reviewUnits} onSaveRevisionPoints={saveRevisionPoints}
               onUseDoc={useChapterDoc}
               onGoSubjects={goToSubjects}
             />
@@ -2135,6 +2146,7 @@ export default function Cadence() {
               onAddDoc={addChapterDoc} onUseDoc={useChapterDoc} onRemoveDoc={removeChapterDoc}
               onUpdateChapter={updateChapter} onDeleteChapter={deleteChapter}
               onSetChapterStatus={setChapterStatus}
+              onSaveRevisionPoints={saveRevisionPoints}
               onSetLevel={setChapterLevel} onSetAxisMinutes={setChapterAxisMinutes}
               onAddExam={addExam} onUpdateExam={updateExam} onDeleteExam={deleteExam}
               onToggleExamChapter={toggleExamChapter} onToggleExamPortion={toggleExamPortion}
@@ -2231,7 +2243,8 @@ function ReadOnlyDocs({ chapter, onUseDoc }) {
   );
 }
 
-function ContinuityCard({ subject, chapter, allocation, today, onSetPosition, onUseDoc, onGoSubjects }) {
+function ContinuityCard({ subject, chapter, allocation, today, onSetPosition, onUseDoc, onGoSubjects,
+  reviewUnits, onSaveRevisionPoints }) {
   if (!chapter) {
     return (
       <div className="cad-card" style={{
@@ -2283,6 +2296,8 @@ function ContinuityCard({ subject, chapter, allocation, today, onSetPosition, on
           style={{ color: C.faint, fontSize: 11.5 }}>modifier</Btn>
       </div>
       <ReadOnlyDocs chapter={chapter} onUseDoc={onUseDoc} />
+      <PortionRevisionLists units={(reviewUnits || []).filter((unit) => unit.parentChapterId === chapter.id)}
+        onSave={onSaveRevisionPoints} />
     </div>
   );
 }
@@ -2338,7 +2353,7 @@ function CourseTestCard({ test, subject, latestResult, today, onRecord }) {
   );
 }
 
-function ReviewUnitCard({ item, subject, parent, today, onGrade, onUseDoc }) {
+function ReviewUnitCard({ item, subject, parent, today, onGrade, onUseDoc, onSaveRevisionPoints }) {
   const { unit, info } = item;
   const first = !info.tested;
   const timing = first
@@ -2359,6 +2374,7 @@ function ReviewUnitCard({ item, subject, parent, today, onGrade, onUseDoc }) {
       </div>
       <div style={{ fontFamily: MONO, fontSize: 12, color: C.text }}>{unit.name}</div>
       {parent && <ReadOnlyDocs chapter={parent} onUseDoc={onUseDoc} />}
+      <RevisionChecklist key={unit.id} unit={unit} onSave={onSaveRevisionPoints} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint }}>
           Après l’avoir restitué sans support selon son point le plus faible :
@@ -2381,6 +2397,7 @@ function TodayView({
   debriefs, annalesBanners, nextExam, exportStale,
   onGrade, onRecordCourseTest, onDismissDebrief, onSetPosition, onUseDoc,
   onExtendCourseTest, onGoSubjects,
+  reviewUnits, onSaveRevisionPoints,
 }) {
   const allocationBySubject = Object.fromEntries((timeAllocations || []).map((row) => [row.subject.id, row]));
   const adjusted = (timeAllocations || []).filter((row) => row.changed);
@@ -2416,6 +2433,7 @@ function TodayView({
             <ContinuityCard key={subject.id} subject={subject} chapter={currentBySubject[subject.id]}
               allocation={allocationBySubject[subject.id]}
               today={today} onSetPosition={onSetPosition} onUseDoc={onUseDoc}
+              reviewUnits={reviewUnits} onSaveRevisionPoints={onSaveRevisionPoints}
               onGoSubjects={onGoSubjects} />
           ))}
         </div>
@@ -2440,7 +2458,7 @@ function TodayView({
               return (
                 <ReviewUnitCard key={item.unit.id} item={item} parent={parent}
                   subject={subjectById[item.unit.subjectId]} today={today}
-                  onGrade={onGrade} onUseDoc={onUseDoc} />
+                  onGrade={onGrade} onUseDoc={onUseDoc} onSaveRevisionPoints={onSaveRevisionPoints} />
               );
             })}
           </div>
@@ -3633,6 +3651,7 @@ function SubjectsView({
   onAddSubject, onUpdateSubject, onDeleteSubject,
   onAddChapter, onAddChaptersBulk, onAddResource, onUpdateChapter, onDeleteChapter,
   onSetLevel, onSetAxisMinutes, onSetPosition, onSetAxes, onSetChapterStatus,
+  onSaveRevisionPoints,
   onAddDoc, onUseDoc, onRemoveDoc,
   onAddExam, onUpdateExam, onDeleteExam, onToggleExamChapter, onToggleExamPortion,
   onAddCourseTest, onUpdateCourseTest, onDeleteCourseTest,
@@ -3832,6 +3851,8 @@ function SubjectsView({
                         </div>
                         <DocsRow chapter={c} today={today} compact
                           onAddDoc={onAddDoc} onUseDoc={onUseDoc} onRemoveDoc={onRemoveDoc} />
+                        <PortionRevisionLists units={subUnits.filter((unit) => unit.parentChapterId === c.id)}
+                          onSave={onSaveRevisionPoints} />
                         {c.kind === 'resource' && (
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                             <span style={{ fontFamily: SANS, fontSize: 11, color: C.faint }}>type de reprise</span>

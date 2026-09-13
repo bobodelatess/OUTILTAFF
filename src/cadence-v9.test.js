@@ -232,7 +232,7 @@ describe('v8 → v11', () => {
     delete old.subjects[0].dailyMinutes;
     delete old.subjects[0].minimumMinutes;
     const migrated = normalize(old, TODAY);
-    expect(migrated.version).toBe(12);
+    expect(migrated.version).toBe(13);
     expect(migrated.subjects[0]).toMatchObject({ dailyMinutes: 120, minimumMinutes: 60 });
     expect(migrated.chapters[0].status).toBe('current');
     expect(migrated.courseTests).toEqual([]);

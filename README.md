@@ -19,7 +19,34 @@ restent dans le navigateur, avec export/import JSON. La
 [synchronisation optionnelle](#synchronisation-entre-appareils) utilise un
 coffre privé appartenant au compte GitHub de l'utilisateur.
 
-## Modèle de suivi (schéma v12)
+## Réviser en trois listes
+
+Chaque portion datée peut désormais contenir uniquement :
+
+- **Cours** : notions, formules et conditions à retenir ;
+- **Méthodes d’exercices** : quand utiliser une méthode et comment la refaire ;
+- **Démonstrations** : résultat, hypothèses, idée et étapes essentielles.
+
+Dans la continuité, une consolidation ou la vue **Matières**, utiliser
+**Renseigner les listes** puis saisir un point par ligne. Les formules entre
+`$…$`, `$$…$$`, `\(…\)` ou `\[…\]` sont rendues en LaTeX. Ajouter
+`Blocage : … → explication : …` au point concerné : il sera mis en évidence,
+sans créer une quatrième rubrique. Les rubriques vides restent masquées.
+
+Le sélecteur **À revoir** permet de retrouver les portions antérieures, même
+celles déjà intégrées au chapitre. **Masquer pour me tester** cache les listes
+sans enregistrer de maîtrise. Les documents Drive restent disponibles.
+
+Les listes suivent l’export/import, la sauvegarde locale et le coffre
+multi-appareils. Chaque point a une identité et un horodatage propres ; les
+ajouts concurrents sont conservés et les suppressions restent mémorisées.
+Éditer le contenu ne change ni les échéances ni les résultats.
+
+Le [prompt du soir](PROMPT_RECAP_QUOTIDIEN.md) applique le même format aux
+fichiers cumulatifs Drive. CADENCE ne génère ni ne réécrit lui-même les PDF :
+le LLM connecté à Drive les prépare, puis renseigne les listes et leurs liens.
+
+## Modèle de suivi (schéma v13)
 
 Le **chapitre** est un repère stable : il organise le cours et porte les liens
 vers les documents cumulatifs. Une **portion quotidienne** est une unité de
@@ -69,6 +96,10 @@ La migration v10 → v11 ajoute les objectifs de checklist et des journaux vides
 aucun exercice, aucune annale et aucun test n'est déclaré accompli.
 La migration v11 → v12 ajoute le journal global d'habitudes vide : aucune
 habitude antérieure n'est inventée ou déclarée accomplie.
+La migration v12 → v13 ajoute des listes `revisionPoints` vides aux anciennes
+portions, sans inventer leur contenu ni changer leurs documents, dates ou
+niveaux. Actualiser CADENCE sur les autres appareils avant de les synchroniser
+avec le nouveau schéma ; aucune reconfiguration du coffre n’est nécessaire.
 
 ## Auto-évaluation et courbe d'oubli
 

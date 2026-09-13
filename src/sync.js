@@ -36,6 +36,7 @@ import {
   applySelfAssessment, emptyPractice, emptyDeleted, evidenceAxis, uid, normDocs,
   REVIEW_INTEGRATION_SUCCESS_STREAK, HABIT_KEYS,
 } from './engine.js';
+import { mergeRevisionPoints } from './revisionPoints.js';
 
 // Documents : UNION par identifiant, comme le journal. Ajouter un document sur
 // le téléphone et un autre sur l'ordinateur doit donner les deux, jamais un
@@ -260,7 +261,12 @@ export function mergeStates(a, b) {
     .map((chapter) => chapter.id));
   const chapters = uniqueCurrentChapters(mergeById(hi.chapters, lo.chapters, deleted.chapters)
     // …mais ses documents sont réunis des deux côtés.
-    .map((c) => ({ ...c, docs: mergeDocs(c.docs, otherById.get(c.id)?.docs) })), preferredCurrentIds);
+    .map((c) => ({
+      ...c, docs: mergeDocs(c.docs, otherById.get(c.id)?.docs),
+      ...(c.reviewUnit ? {
+        revisionPoints: mergeRevisionPoints(c.revisionPoints, otherById.get(c.id)?.revisionPoints),
+      } : {}),
+    })), preferredCurrentIds);
   const chapterIds = new Set(chapters.map((c) => c.id));
   const studyChapterIds = new Set(chapters.filter((c) => !c.reviewUnit).map((c) => c.id));
   const portionIds = new Set(chapters.filter((c) => c.reviewUnit).map((c) => c.id));
