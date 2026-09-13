@@ -97,7 +97,7 @@ describe('v10 → v12', () => {
     delete old.routineItems;
     delete old.routineLog;
     const migrated = normalize(old, TODAY);
-    expect(migrated.version).toBe(12);
+    expect(migrated.version).toBe(13);
     expect(migrated.subjects[0].routineTargets).toEqual(DEFAULT_ROUTINE_TARGETS);
     expect(migrated.routineItems).toEqual([]);
     expect(migrated.routineLog).toEqual([]);
@@ -138,7 +138,7 @@ describe('v12 — habitudes transversales', () => {
     old.version = 11;
     delete old.habitLog;
     const migrated = normalize(old, TODAY);
-    expect(migrated.version).toBe(12);
+    expect(migrated.version).toBe(13);
     expect(migrated.habitLog).toEqual([]);
   });
 });

@@ -1,7 +1,8 @@
 /*
  * Moteur CADENCE — fonctions pures, sans React.
  *
- * v12 : le chapitre reste le repère stable ; chaque ajout quotidien daté crée
+ * v13 : chaque portion possède trois listes concises de révision, sans note.
+ * Le chapitre reste le repère stable ; chaque ajout quotidien daté crée
  * une unité de reprise interne qui mûrit ensuite vers le chapitre. Les
  * routines et habitudes comptent seulement des actions réellement effectuées.
  *
@@ -18,7 +19,7 @@
  *     score/risque HEURISTIQUE fondé sur : résultats observés, nombre de
  *     tentatives, récence, répétition des erreurs. À présenter comme tel.
  *
- * Schéma v12 (champs principaux)
+ * Schéma v13 (champs principaux)
  *   Subject  = { id, name, color, type: 'core'|'parallel', weeklyFloor?,
  *                dailyMinutes?, minimumMinutes? }
  *   Chapter  = { id, subjectId, name, status?, position, positionUpdatedAt, docs[],
@@ -31,17 +32,19 @@
  *                masteryLevel?: 0..4, before, after }
  *   ReviewUnit = Chapter & { reviewUnit:true, parentChapterId, introducedAt,
  *                            reviewSuccessStreak, integratedAt?, lastMasteryLevel?,
- *                            kind:'resource', axes:['recall'] }
+ *                            kind:'resource', axes:['recall'], revisionPoints[] }
  *   CourseTest = { id, subjectId, name, scheduledFor, chapterIds[], portionIds[],
  *                  estimatedMinutes, strongStreak }
  *   CourseTestResult = { id, testId, date, score, maxScore, ratio, closedBook:true }
  *   RoutineItem = { id, subjectId, label, intervalDays, createdAt }
  *   RoutineEvent = { id, subjectId, kind, date, amount, itemId? }
  *   HabitEvent = { id, habitKey, date, amount }
- *   State    = { version: 12, subjects, chapters, exams, courseTests,
+ *   State    = { version: 13, subjects, chapters, exams, courseTests,
  *                courseTestLog, routineItems, routineLog, habitLog, settings,
  *                reviewLog, ... }
  */
+
+import { normRevisionPoints, validateRevisionPoints } from './revisionPoints.js';
 
 /* ================================================================== *
  *  Constantes
@@ -50,8 +53,8 @@
 export const STORAGE_KEY = 'cadence.v2'; // clé stable ; la version vit DANS l'état
 export const LEGACY_KEY = 'cadence.v1';
 export const BACKUP_KEY = 'cadence.backups';
-export const SCHEMA_VERSION = 12;
-export const KNOWN_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+export const SCHEMA_VERSION = 13;
+export const KNOWN_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
 
 // v5 — synchronisation multi-appareils :
 //   syncMeta = { deviceId, updatedAt (ms), rev }   qui a modifié en dernier
@@ -1567,6 +1570,10 @@ export function validateImport(obj) {
       if (c.reviewUnit != null && typeof c.reviewUnit !== 'boolean') {
         push(`« ${label} » : indicateur d’unité de reprise invalide.`);
       }
+      if (c.revisionPoints != null) {
+        if (c.reviewUnit !== true) push(`« ${label} » : les listes de révision appartiennent à une portion.`);
+        for (const error of validateRevisionPoints(c.revisionPoints)) push(`« ${label} » : ${error}`);
+      }
       if (c.reviewUnit === true) {
         if (typeof c.parentChapterId !== 'string' || !c.parentChapterId) {
           push(`« ${label} » : chapitre parent manquant.`);
@@ -1983,7 +1990,7 @@ export function migrateV3(v3) {
 // S'assure qu'un état déjà v4 a tous les champs (idempotent, sans rejeu).
 // `today` sert uniquement à l'hygiène (purge des vieux reports) — passer une
 // date fixe dans les tests garde la fonction déterministe.
-export function ensureV12(s, today = todayISO()) {
+export function ensureV13(s, today = todayISO()) {
   const settings = { ...DEFAULT_SETTINGS, ...(s?.settings || {}) };
   const deleted = pruneTombstones(s.deleted, today);
   const rawExams = (Array.isArray(s.exams) ? s.exams : [])
@@ -2024,6 +2031,7 @@ export function ensureV12(s, today = todayISO()) {
         docs: reviewUnit ? [] : normDocs(c.docs),
         ...(reviewUnit ? {
           reviewUnit: true,
+          revisionPoints: normRevisionPoints(c.revisionPoints),
           parentChapterId: typeof c.parentChapterId === 'string' ? c.parentChapterId : null,
           introducedAt: isValidISODate(c.introducedAt) ? c.introducedAt : positionUpdatedAt,
           reviewSuccessStreak: isValidISODate(c.integratedAt)
@@ -2172,7 +2180,7 @@ export function ensureV12(s, today = todayISO()) {
   }
   const habitLog = [...habitLogById.values()];
   return {
-    version: 12,
+    version: SCHEMA_VERSION,
     subjects,
     chapters: keptChapters,
     exams,
@@ -2202,12 +2210,13 @@ export function ensureV12(s, today = todayISO()) {
   };
 }
 
-// Alias pour les imports/tests internes historiques ; tout état produit est v12.
-export const ensureV11 = ensureV12;
-export const ensureV10 = ensureV12;
-export const ensureV9 = ensureV12;
-export const ensureV8 = ensureV12;
-export const ensureV7 = ensureV12;
+// Alias pour les imports/tests internes historiques ; tout état produit est v13.
+export const ensureV12 = ensureV13;
+export const ensureV11 = ensureV13;
+export const ensureV10 = ensureV13;
+export const ensureV9 = ensureV13;
+export const ensureV8 = ensureV13;
+export const ensureV7 = ensureV13;
 function normPractice(p) {
   if (!p || typeof p !== 'object') return emptyPractice();
   return {
@@ -2353,12 +2362,22 @@ export function migrateV11(v11) {
   };
 }
 
-// Accepte v1 à v12 -> renvoie toujours un état v12 sain.
-// Tout passe par ensureV12 (bornes + hygiène), y compris après migration.
+// v12 -> v13 : listes vides pour les anciennes portions. Aucune formule,
+// démonstration ou maîtrise n'est déduite d'un simple titre historique.
+export function migrateV12(v12) {
+  return {
+    ...v12, version: 13,
+    chapters: (v12?.chapters || []).map((chapter) => isReviewUnit(chapter)
+      ? { ...chapter, revisionPoints: normRevisionPoints(chapter.revisionPoints) } : chapter),
+  };
+}
+
+// Accepte v1 à v13 -> renvoie toujours un état v13 sain.
 export function normalize(s, today = todayISO()) {
   if (!s || typeof s !== 'object') return seedState();
-  const finish = (v11) => ensureV12(migrateV11(v11), today);
-  if (s.version === 12) return ensureV12(s, today);
+  const finish = (v11) => ensureV13(migrateV12(migrateV11(v11)), today);
+  if (s.version === 13) return ensureV13(s, today);
+  if (s.version === 12) return ensureV13(migrateV12(s), today);
   if (s.version === 11) return finish(s);
   if (s.version === 10) return finish(migrateV10(s));
   if (s.version === 9) return finish(migrateV10(migrateV9(s)));
@@ -2442,6 +2461,7 @@ export function newReviewUnit(parent, label, introducedAt, settings) {
     position: null,
     positionUpdatedAt: date,
     docs: [],
+    revisionPoints: [],
     reviewSuccessStreak: 0,
     integratedAt: null,
     lastMasteryLevel: null,
@@ -2488,7 +2508,7 @@ export function seedState() {
     { id: uid(), name: 'Anki', color: '#fca5a5', type: 'parallel', weeklyFloor: 6 },
   ];
   return {
-    version: 12,
+    version: SCHEMA_VERSION,
     subjects: core.map((subject) => ({ ...subject, routineTargets: { ...DEFAULT_ROUTINE_TARGETS } })).concat(parallel),
     chapters: [], exams: [],
     courseTests: [], courseTestLog: [],
