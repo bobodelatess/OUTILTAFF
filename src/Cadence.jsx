@@ -60,7 +60,7 @@ import {
 import { useCurrentDay } from './useCurrentDay.js';
 import ChapterSearch from './ChapterSearch.jsx';
 import FocusMode from './FocusMode.jsx';
-import RevisionChecklist, { PortionRevisionLists } from './RevisionChecklist.jsx';
+import { SavedRevisionNotes } from './RevisionChecklist.jsx';
 import { updateRevisionPoints } from './revisionPoints.js';
 
 /* ================================================================== *
@@ -1943,8 +1943,8 @@ export default function Cadence() {
   const nextExam = upcomingExams[0] || null;
 
   const dueForecast = useMemo(
-    () => forecastReviewUnits(reviewUnits, settings, today, 35, exams),
-    [reviewUnits, settings, today, exams]);
+    () => forecastReviewUnits(reviewUnits, settings, today, 35, exams, courseTests),
+    [reviewUnits, settings, today, exams, courseTests]);
 
   // Rappel d'export discret : jamais exporté (ou > 21 j) avec un historique réel.
   const exportStale = reviewLog.length >= 20 &&
@@ -1975,7 +1975,7 @@ export default function Cadence() {
   const parentById = useMemo(
     () => Object.fromEntries(studyChapters.map((c) => [c.id, c])), [studyChapters]);
   const dueReviewUnits = useMemo(() => reviewUnits
-    .map((unit) => ({ unit, info: reviewUnitInfo(unit, settings, today, exams) }))
+    .map((unit) => ({ unit, info: reviewUnitInfo(unit, settings, today, exams, courseTests) }))
     .filter(({ info }) => info.due)
     .sort((a, b) => {
       const first = Number(!b.info.tested) - Number(!a.info.tested);
@@ -1988,7 +1988,7 @@ export default function Cadence() {
         || a.info.dueAt.localeCompare(b.info.dueAt)
         || a.unit.introducedAt.localeCompare(b.unit.introducedAt);
     }),
-  [reviewUnits, settings, today, exams]);
+  [reviewUnits, settings, today, exams, courseTests]);
   const selfReviewsToday = useMemo(
     () => reviewLog.filter((r) => r.date === today && r.source === 'self-review').length,
     [reviewLog, today]);
@@ -2114,7 +2114,6 @@ export default function Cadence() {
               onRecordCourseTest={recordCourseTest}
               onExtendCourseTest={extendCourseTest}
               onSetPosition={setChapterPosition}
-              reviewUnits={reviewUnits} onSaveRevisionPoints={saveRevisionPoints}
               onUseDoc={useChapterDoc}
               onGoSubjects={goToSubjects}
             />
@@ -2243,8 +2242,7 @@ function ReadOnlyDocs({ chapter, onUseDoc }) {
   );
 }
 
-function ContinuityCard({ subject, chapter, allocation, today, onSetPosition, onUseDoc, onGoSubjects,
-  reviewUnits, onSaveRevisionPoints }) {
+function ContinuityCard({ subject, chapter, allocation, today, onSetPosition, onUseDoc, onGoSubjects }) {
   if (!chapter) {
     return (
       <div className="cad-card" style={{
@@ -2296,8 +2294,6 @@ function ContinuityCard({ subject, chapter, allocation, today, onSetPosition, on
           style={{ color: C.faint, fontSize: 11.5 }}>modifier</Btn>
       </div>
       <ReadOnlyDocs chapter={chapter} onUseDoc={onUseDoc} />
-      <PortionRevisionLists units={(reviewUnits || []).filter((unit) => unit.parentChapterId === chapter.id)}
-        onSave={onSaveRevisionPoints} />
     </div>
   );
 }
@@ -2353,7 +2349,7 @@ function CourseTestCard({ test, subject, latestResult, today, onRecord }) {
   );
 }
 
-function ReviewUnitCard({ item, subject, parent, today, onGrade, onUseDoc, onSaveRevisionPoints }) {
+function ReviewUnitCard({ item, subject, parent, today, onGrade, onUseDoc }) {
   const { unit, info } = item;
   const first = !info.tested;
   const timing = first
@@ -2374,7 +2370,6 @@ function ReviewUnitCard({ item, subject, parent, today, onGrade, onUseDoc, onSav
       </div>
       <div style={{ fontFamily: MONO, fontSize: 12, color: C.text }}>{unit.name}</div>
       {parent && <ReadOnlyDocs chapter={parent} onUseDoc={onUseDoc} />}
-      <RevisionChecklist key={unit.id} unit={unit} onSave={onSaveRevisionPoints} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span style={{ fontFamily: SANS, fontSize: 11.5, color: C.faint }}>
           Après l’avoir restitué sans support selon son point le plus faible :
@@ -2384,8 +2379,8 @@ function ReviewUnitCard({ item, subject, parent, today, onGrade, onUseDoc, onSav
         })} disabledLevels={first ? [4] : []} />
       </div>
       <div style={{ fontFamily: SANS, fontSize: 10.5, color: C.faint }}>
-        Deux restitutions satisfaisantes successives intègrent ensuite cette portion au chapitre ;
-        les tests cumulatifs prennent le relais.
+        Après deux restitutions satisfaisantes, un test cumulatif peut prendre le relais.
+        Les rappels individuels continuent tant qu’aucun test daté ne couvre cette portion.
       </div>
     </div>
   );
@@ -2397,7 +2392,6 @@ function TodayView({
   debriefs, annalesBanners, nextExam, exportStale,
   onGrade, onRecordCourseTest, onDismissDebrief, onSetPosition, onUseDoc,
   onExtendCourseTest, onGoSubjects,
-  reviewUnits, onSaveRevisionPoints,
 }) {
   const allocationBySubject = Object.fromEntries((timeAllocations || []).map((row) => [row.subject.id, row]));
   const adjusted = (timeAllocations || []).filter((row) => row.changed);
@@ -2433,7 +2427,6 @@ function TodayView({
             <ContinuityCard key={subject.id} subject={subject} chapter={currentBySubject[subject.id]}
               allocation={allocationBySubject[subject.id]}
               today={today} onSetPosition={onSetPosition} onUseDoc={onUseDoc}
-              reviewUnits={reviewUnits} onSaveRevisionPoints={onSaveRevisionPoints}
               onGoSubjects={onGoSubjects} />
           ))}
         </div>
@@ -2458,7 +2451,7 @@ function TodayView({
               return (
                 <ReviewUnitCard key={item.unit.id} item={item} parent={parent}
                   subject={subjectById[item.unit.subjectId]} today={today}
-                  onGrade={onGrade} onUseDoc={onUseDoc} onSaveRevisionPoints={onSaveRevisionPoints} />
+                  onGrade={onGrade} onUseDoc={onUseDoc} />
               );
             })}
           </div>
@@ -3851,7 +3844,7 @@ function SubjectsView({
                         </div>
                         <DocsRow chapter={c} today={today} compact
                           onAddDoc={onAddDoc} onUseDoc={onUseDoc} onRemoveDoc={onRemoveDoc} />
-                        <PortionRevisionLists units={subUnits.filter((unit) => unit.parentChapterId === c.id)}
+                        <SavedRevisionNotes units={subUnits.filter((unit) => unit.parentChapterId === c.id)}
                           onSave={onSaveRevisionPoints} />
                         {c.kind === 'resource' && (
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>

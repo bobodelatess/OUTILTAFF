@@ -113,3 +113,21 @@ export function PortionRevisionLists({ units, onSave }) {
     </div>
   );
 }
+
+// Conservation des notes déjà saisies, sans imposer les rubriques du PDF
+// à l'accueil ni demander de nouvelles listes lors du récapitulatif du soir.
+export function SavedRevisionNotes({ units, onSave }) {
+  const [open, setOpen] = useState(false);
+  const recorded = units.filter((unit) => visibleRevisionPoints(unit.revisionPoints).length > 0);
+  if (!recorded.length) return null;
+  return (
+    <div className="cad-revision">
+      <div className="cad-revision-actions">
+        <button type="button" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? 'Masquer les notes enregistrées' : 'Notes enregistrées'}
+        </button>
+      </div>
+      {open && <PortionRevisionLists units={recorded} onSave={onSave} />}
+    </div>
+  );
+}

@@ -125,25 +125,31 @@ afterEach(() => { cleanup(); delete window.storage; vi.unstubAllGlobals(); });
 describe('synchronisation multi-appareils — bout en bout', () => {
   it('retrouve les listes sur le téléphone puis synchronise ses corrections sans fausse maîtrise', async () => {
     const pc = makeDevice('dev-pc');
-    pc.setItem(STORAGE_KEY, JSON.stringify(withDueReview([chapterOn('c1', 'Diagonalisation')])));
+    const original = withDueReview([chapterOn('c1', 'Diagonalisation')]);
+    original.chapters.find((c) => c.reviewUnit).revisionPoints = [
+      { id: 'p1', category: 'course', text: '$A=PDP^{-1}$', order: 0, updatedAt: 100, deleted: false },
+    ];
+    const openNotes = () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Matières', exact: true }));
+      fireEvent.click(screen.getByRole('button', { name: 'Déplier Maths' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Notes enregistrées' }));
+    };
+    pc.setItem(STORAGE_KEY, JSON.stringify(original));
     await boot(pc);
-    await untilVault((st) => st.chapters.length === 2);
-    fireEvent.click(within(reviewCard()).getByRole('button', { name: 'Renseigner les listes' }));
-    fireEvent.change(within(reviewCard()).getByRole('textbox', { name: 'Cours' }), { target: { value: '$A=PDP^{-1}$' } });
-    fireEvent.click(within(reviewCard()).getByRole('button', { name: 'Enregistrer les listes' }));
-    fireEvent.click(screen.getByRole('button', { name: /Synchronisation/i }));
     await untilVault((st) => st.chapters.find((c) => c.reviewUnit).revisionPoints.some((p) => p.text === '$A=PDP^{-1}$'));
     const olderPcState = pc.getItem(STORAGE_KEY);
     cleanup();
 
     const phone = makeDevice('dev-phone');
     await boot(phone);
-    await waitFor(() => expect(within(reviewCard()).getByRole('heading', { name: 'Cours' })).toBeTruthy());
-    expect(reviewCard().querySelector('.katex')).toBeTruthy();
-    fireEvent.click(within(reviewCard()).getByRole('button', { name: 'Modifier les listes' }));
-    fireEvent.change(within(reviewCard()).getByRole('textbox', { name: 'Cours' }), { target: { value: '' } });
-    fireEvent.change(within(reviewCard()).getByRole('textbox', { name: 'Méthodes d’exercices' }), { target: { value: 'Calculer les espaces propres. Blocage : vérifier la dimension.' } });
-    fireEvent.click(within(reviewCard()).getByRole('button', { name: 'Enregistrer les listes' }));
+    await waitFor(() => expect(reviewCard()).toBeTruthy());
+    openNotes();
+    expect(screen.getByRole('heading', { name: 'Cours' })).toBeTruthy();
+    expect(document.querySelector('.katex')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Modifier les listes' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Cours' }), { target: { value: '' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Méthodes d’exercices' }), { target: { value: 'Calculer les espaces propres. Blocage : vérifier la dimension.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Enregistrer les listes' }));
     fireEvent.click(screen.getByRole('button', { name: /Synchronisation/i }));
     await untilVault((st) => st.chapters.find((c) => c.reviewUnit).revisionPoints.some((p) => p.category === 'methods'));
     cleanup();
@@ -151,8 +157,10 @@ describe('synchronisation multi-appareils — bout en bout', () => {
     const pcAgain = makeDevice('dev-pc');
     pcAgain.setItem(STORAGE_KEY, olderPcState);
     await boot(pcAgain);
-    await waitFor(() => expect(within(reviewCard()).getByRole('heading', { name: 'Méthodes d’exercices' })).toBeTruthy());
-    expect(within(reviewCard()).queryByRole('heading', { name: 'Cours' })).toBeNull();
+    await waitFor(() => expect(localState(pcAgain).chapters.find((c) => c.reviewUnit).revisionPoints.some((p) => p.category === 'methods')).toBe(true));
+    openNotes();
+    expect(screen.getByRole('heading', { name: 'Méthodes d’exercices' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Cours' })).toBeNull();
     expect(localState(pcAgain).chapters.find((c) => c.reviewUnit).revisionPoints.some((p) => p.deleted)).toBe(true);
     expect(localState(pcAgain).reviewLog).toEqual([]);
     expect(vaultState().reviewLog).toEqual([]);
