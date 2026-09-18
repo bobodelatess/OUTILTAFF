@@ -60,7 +60,7 @@ export function clearSyncConfig(store) {
 }
 
 export function isConfigured(cfg) {
-  return !!(cfg && cfg.token && cfg.gistId);
+  return !!(cfg && cfg.gistId && (cfg.token || cfg.readOnly === true));
 }
 
 /* ------------------------------------------------------------------ *
@@ -92,7 +92,7 @@ async function call(url, { token, method = 'GET', body }, fetchImpl) {
     res = await doFetch(url, {
       method,
       headers: {
-        Authorization: `Bearer ${token}`,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         Accept: 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28',
         ...(body ? { 'Content-Type': 'application/json' } : {}),
@@ -127,8 +127,23 @@ export async function createVault(token, state, fetchImpl) {
 
 // Lit le coffre. Renvoie { state, version } ; state vaut null si le coffre
 // existe mais ne contient pas encore de données CADENCE lisibles.
-export async function pullVault({ token, gistId }, fetchImpl) {
+export async function pullVault({ token, gistId, expectedOwner, readOnly }, fetchImpl) {
+  if (readOnly && expectedOwner) {
+    // Lecture publique du fichier brut : pas de jeton et pas de consommation
+    // du petit quota REST anonyme lorsque plusieurs appareils restent ouverts.
+    const url = `https://gist.githubusercontent.com/${encodeURIComponent(expectedOwner)}/${encodeURIComponent(gistId)}/raw/${VAULT_FILE}`;
+    const doFetch = fetchImpl || fetch;
+    let res;
+    try { res = await doFetch(url, { cache: 'no-store' }); }
+    catch (e) { throw new SyncError('Pas de connexion : le suivi sera actualisé au retour du réseau.', { kind: 'reseau' }); }
+    if (!res.ok) throw describeStatus(res.status);
+    try { return { state: await res.json(), version: null }; }
+    catch (e) { throw new SyncError('Le suivi distant est illisible ; les données locales sont conservées.', { kind: 'donnees' }); }
+  }
   const data = await call(`${API}/gists/${gistId}`, { token }, fetchImpl);
+  if (expectedOwner && data?.owner?.login !== expectedOwner) {
+    throw new SyncError('Ce coffre n’appartient pas au compte attendu.', { kind: 'donnees' });
+  }
   const file = data?.files?.[VAULT_FILE];
   const version = data?.history?.[0]?.version ?? null;
   if (!file) return { state: null, version };
@@ -147,7 +162,8 @@ export async function pullVault({ token, gistId }, fetchImpl) {
 }
 
 // Écrit l'état dans le coffre.
-export async function pushVault({ token, gistId }, state, fetchImpl) {
+export async function pushVault({ token, gistId, readOnly }, state, fetchImpl) {
+  if (!token || readOnly) throw new SyncError('Cet appareil est en consultation seule.', { kind: 'auth' });
   const data = await call(`${API}/gists/${gistId}`, {
     token, method: 'PATCH',
     body: { files: { [VAULT_FILE]: { content: JSON.stringify(state, null, 1) } } },

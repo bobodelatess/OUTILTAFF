@@ -62,6 +62,19 @@ async function cacheFirstAsset(request) {
   }
 }
 
+// Les ajouts changent indépendamment du code : ne jamais les figer dans le
+// cache des assets. Hors ligne, le dernier flux valide reste disponible.
+async function networkFirstUpdates(request) {
+  const cache = await caches.open(CACHE_NAME);
+  try {
+    const response = await fetch(request, { cache: 'no-store' });
+    if (isCacheable(response)) await cache.put(request, response.clone());
+    return response;
+  } catch (error) {
+    return (await cache.match(request)) || Response.error();
+  }
+}
+
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   if (request.method !== 'GET') return;
@@ -70,6 +83,10 @@ self.addEventListener('fetch', (event) => {
   try { url = new URL(request.url); } catch (error) { return; }
   if (url.origin !== self.location.origin || !url.pathname.startsWith(SCOPE_PATH)) return;
 
+  if (url.pathname === new URL('./study-updates.json', SCOPE_URL).pathname) {
+    event.respondWith(networkFirstUpdates(request));
+    return;
+  }
   event.respondWith(request.mode === 'navigate'
     ? networkFirstNavigation(request)
     : cacheFirstAsset(request));

@@ -1471,6 +1471,10 @@ export function validateImport(obj) {
     const habitLog = Array.isArray(obj.habitLog) ? obj.habitLog : [];
     const reviews = Array.isArray(obj.reviewLog) ? obj.reviewLog : [];
     if (!Array.isArray(obj.subjects)) push('« subjects » manquant ou n’est pas une liste.');
+    if (obj.appliedStudyUpdates != null && (!Array.isArray(obj.appliedStudyUpdates)
+      || obj.appliedStudyUpdates.some((id) => typeof id !== 'string' || !id || id.length > 500))) {
+      push('Les identifiants des récapitulatifs appliqués sont invalides.');
+    }
     if (hasOwn(obj, 'chapters') && !Array.isArray(obj.chapters)) push('« chapters » doit être une liste.');
     if (hasOwn(obj, 'exams') && !Array.isArray(obj.exams)) push('« exams » doit être une liste.');
     if (hasOwn(obj, 'courseTests') && !Array.isArray(obj.courseTests)) push('« courseTests » doit être une liste.');
@@ -2188,6 +2192,8 @@ export function ensureV13(s, today = todayISO()) {
   const habitLog = [...habitLogById.values()];
   return {
     version: SCHEMA_VERSION,
+    appliedStudyUpdates: [...new Set((Array.isArray(s.appliedStudyUpdates) ? s.appliedStudyUpdates : [])
+      .filter((id) => typeof id === 'string' && id && id.length <= 500))].sort(),
     subjects,
     chapters: keptChapters,
     exams,

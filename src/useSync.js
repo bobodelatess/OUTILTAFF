@@ -15,22 +15,27 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { normalize, validateImport } from './engine.js';
-import { mergeStates, contentSignature, newDeviceId, isPristine } from './sync.js';
+import { mergeStates, contentSignature, newDeviceId, isPristine, preferredState } from './sync.js';
+import { applyStudyUpdates, pullStudyUpdates } from './sharedUpdates.js';
 import {
   loadSyncConfig, saveSyncConfig, clearSyncConfig, isConfigured, getDeviceId,
-  pullVault, pushVault, createVault, SyncError,
+  pullVault, pushVault, createVault, checkToken, SyncError,
 } from './remote.js';
 
 // Délai d'inactivité avant d'envoyer les modifications (évite un appel réseau
 // à chaque frappe tout en gardant les appareils proches du temps réel).
 export const PUSH_DEBOUNCE_MS = 4000;
+export const SYNC_POLL_MS = 120000;
 
-export function useSync({ store, getState, applyMerged, fetchImpl, enabled = true }) {
-  const [config, setConfig] = useState(() => loadSyncConfig(store));
+export function useSync({ store, getState, applyMerged, fetchImpl, enabled = true, sharedVault = null }) {
+  const readerConfig = useCallback(() => sharedVault
+    ? { gistId: sharedVault.gistId, readOnly: true, expectedOwner: sharedVault.owner } : null, [sharedVault]);
+  const [config, setConfig] = useState(() => loadSyncConfig(store) || readerConfig());
   const [status, setStatus] = useState('idle'); // idle | sync | ok | error | offline
   const [error, setError] = useState(null);
   const [lastSyncAt, setLastSyncAt] = useState(null);
   const [pending, setPending] = useState(false);
+  const [updatesError, setUpdatesError] = useState(null);
 
   const busyRef = useRef(false);
   const rerunRef = useRef(false);
@@ -55,9 +60,21 @@ export function useSync({ store, getState, applyMerged, fetchImpl, enabled = tru
     setError(null);
     try {
       const { state: rawRemote } = await pullVault(cfg, fetchImpl);
+      if (!rawRemote && cfg.readOnly) {
+        throw new SyncError('Le coffre ne contient pas de suivi lisible ; les données locales sont conservées.', { kind: 'donnees' });
+      }
+      let feed = null;
+      setUpdatesError(null);
+      if (sharedVault && cfg.gistId === sharedVault.gistId) {
+        try { feed = await pullStudyUpdates(sharedVault, fetchImpl); }
+        catch (e) { setUpdatesError(e.message); }
+      }
+      // Un détachement pendant une requête ne doit pas être annulé par sa réponse.
+      if (configRef.current !== cfg) return { ok: false, reason: 'configuration modifiée' };
       const local = getState();
 
       let merged = local;
+      let preferred = local;
       if (rawRemote) {
         // Un coffre invalide n'écrase rien : on s'arrête et on le dit.
         const check = validateImport(rawRemote);
@@ -68,16 +85,26 @@ export function useSync({ store, getState, applyMerged, fetchImpl, enabled = tru
           );
         }
         const remote = normalize(rawRemote);
+        preferred = isPristine(local) ? remote : preferredState(local, remote);
         // Appareil neuf qui rejoint un coffre : il adopte, il ne fusionne pas.
         // Sinon ses matières d'exemple par défaut pollueraient les vraies données.
         merged = isPristine(local) ? remote : mergeStates(local, remote);
+      }
+
+      if (feed) {
+        try {
+          const next = applyStudyUpdates(merged, feed, cfg.gistId, preferred.appliedStudyUpdates || []);
+          // Ajouter un récapitulatif n'est pas une modification des réglages
+          // personnels : ne pas leur attribuer artificiellement une date récente.
+          merged = next;
+        } catch (e) { setUpdatesError(e.message); }
       }
 
       const localSig = contentSignature(local);
       const mergedSig = contentSignature(merged);
       if (mergedSig !== localSig) applyMerged(merged);
 
-      if (!rawRemote || mergedSig !== contentSignature(normalize(rawRemote))) {
+      if (!cfg.readOnly && cfg.token && (!rawRemote || mergedSig !== contentSignature(normalize(rawRemote)))) {
         await pushVault(cfg, merged, fetchImpl);
       }
 
@@ -95,7 +122,7 @@ export function useSync({ store, getState, applyMerged, fetchImpl, enabled = tru
       busyRef.current = false;
       if (rerunRef.current) { rerunRef.current = false; setTimeout(() => { syncNow(); }, 0); }
     }
-  }, [enabled, fetchImpl, getState, applyMerged, persist]);
+  }, [enabled, fetchImpl, getState, applyMerged, persist, sharedVault]);
 
   // Première activation : crée le coffre privé et y dépose l'état courant.
   const connect = useCallback(async (token) => {
@@ -117,27 +144,39 @@ export function useSync({ store, getState, applyMerged, fetchImpl, enabled = tru
 
   // Deuxième appareil : rejoint un coffre existant, puis fusionne.
   const join = useCallback(async (token, gistId) => {
+    const previous = configRef.current;
     const cfg = { token, gistId: String(gistId || '').trim(), deviceId };
+    if (sharedVault && cfg.gistId === sharedVault.gistId) {
+      try {
+        const account = await checkToken(token, fetchImpl);
+        if (account.login !== sharedVault.owner) throw new Error('Ce jeton ne correspond pas au propriétaire du suivi.');
+      } catch (e) {
+        setError(e.message);
+        return { ok: false, error: e };
+      }
+    }
     persist(cfg);
     const res = await syncNow();
-    if (!res.ok && res.error) persist(null); // identifiants refusés : on ne garde rien
+    if (!res.ok && res.error) persist(previous || readerConfig());
     return res;
-  }, [persist, syncNow]);
+  }, [persist, syncNow, deviceId, readerConfig, sharedVault, fetchImpl]);
 
   const disconnect = useCallback(() => {
-    persist(null);
+    persist(readerConfig());
     setStatus('idle');
     setError(null);
     setLastSyncAt(null);
     setPending(false);
-  }, [persist]);
+  }, [persist, readerConfig]);
 
   const markPending = useCallback(() => {
-    if (isConfigured(configRef.current)) setPending(true);
+    if (isConfigured(configRef.current) && !configRef.current.readOnly) setPending(true);
   }, []);
 
   return {
-    config, deviceId, status, error, lastSyncAt, pending,
+    config, deviceId, status, error, updatesError, lastSyncAt, pending,
+    readOnly: config?.readOnly === true,
+    sharedVault,
     configured: isConfigured(config),
     connect, join, disconnect, syncNow, markPending, setPending,
   };
@@ -165,7 +204,9 @@ export function useSyncTriggers({ configured, signature, syncNow, markPending })
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('online', onOnline);
     window.addEventListener('focus', onVisible);
+    const interval = setInterval(onVisible, SYNC_POLL_MS);
     return () => {
+      clearInterval(interval);
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('online', onOnline);
       window.removeEventListener('focus', onVisible);

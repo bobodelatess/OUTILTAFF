@@ -263,6 +263,38 @@ repères de charge, pas une nouvelle séance de cours.
 
 ## Synchronisation entre appareils
 
+Sur ce site personnel, le coffre existant est désormais relié automatiquement
+en **consultation** : aucun identifiant ni jeton n'est demandé pour lire le
+suivi. Son identifiant figure dans `src/sharedUpdates.js`, avec l'accord de son
+propriétaire. Un gist « secret » n'est pas chiffré ni privé : son contenu est
+lisible par toute personne qui connaît son lien. Aucun jeton n'est publié.
+
+Les appareils déjà configurés gardent leur accès en écriture. Sur un nouvel
+appareil, **Réglages → Activer les modifications** demande le jeton GitHub une
+seule fois ; le coffre est déjà choisi. La consultation seule ne peut ni
+envoyer des changements au coffre ni enregistrer une fausse révision. Le
+jeton est conservé séparément des exports et doit appartenir au propriétaire
+du suivi. Il ne doit jamais être envoyé dans une conversation ou ajouté au code.
+
+Le suivi est actualisé au chargement, au retour dans l'onglet, au retour du
+réseau et toutes les deux minutes tant que l'onglet est visible. Les actions
+personnelles sont envoyées après quatre secondes sans nouvelle modification.
+Un site fermé ne s'exécute pas en arrière-plan ; une panne reste signalée et
+les données locales sont conservées.
+
+Les récapitulatifs publiés dans `public/study-updates.json` sont appliqués
+automatiquement, une seule fois chacun. Ils créent des portions datées et leurs
+liens, jamais des notes ni des révisions accomplies. Les anciennes portions,
+les suppressions et les résultats réels sont conservés. Un appareil autorisé
+les enregistre dans le coffre lors de sa prochaine synchronisation ; un appareil
+en consultation les affiche sans écrire dans le coffre.
+
+Pour les prochaines mises à jour par un assistant connecté à GitHub, suivre
+[la procédure des récapitulatifs](docs/UPDATING_CADENCE.md). Aucun export manuel
+n'est nécessaire pour les ajouts quotidiens.
+
+### Coffres personnels non partagés
+
 Téléphone et ordinateur peuvent partager les mêmes données dans un **gist
 privé** du compte GitHub de l'utilisateur.
 

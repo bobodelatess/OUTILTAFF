@@ -50,6 +50,7 @@ import {
 import { stampState, contentSignature, newDeviceId } from './sync.js';
 import { getDeviceId } from './remote.js';
 import { useSync, useSyncTriggers } from './useSync.js';
+import { SHARED_VAULT } from './sharedUpdates.js';
 import {
   QUARANTINE_KEY,
   deserializeCadenceState,
@@ -885,7 +886,7 @@ const TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=gist&descriptio
 function SyncSettings({ sync }) {
   const [mode, setMode] = useState(null); // null | 'create' | 'join'
   const [token, setToken] = useState('');
-  const [gistId, setGistId] = useState('');
+  const [gistId, setGistId] = useState(sync.config?.gistId || sync.sharedVault?.gistId || '');
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -910,7 +911,9 @@ function SyncSettings({ sync }) {
     <div>
       <SectionTitle icon={Smartphone}>Synchronisation entre appareils</SectionTitle>
 
-      {sync.configured ? (
+      {sync.updatesError && <p role="status" style={{ color: C.warn }}>{sync.updatesError}</p>}
+
+      {sync.configured && !sync.readOnly ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <Chip color={sync.status === 'error' ? C.bad : sync.status === 'offline' ? C.dim : C.good}
@@ -938,8 +941,14 @@ function SyncSettings({ sync }) {
               Ajouter un autre appareil
             </div>
             <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.dim, lineHeight: 1.5 }}>
-              Sur ton téléphone : ouvre CADENCE → Réglages → « J’ai déjà un coffre »,
-              puis colle ton jeton et cet identifiant de coffre.
+              {sync.sharedVault?.gistId === sync.config.gistId ? <>
+                Le site s’ouvre sans clé pour consulter ton suivi. Pour enregistrer tes
+                révisions sur un nouvel appareil, active les modifications une seule fois
+                dans les réglages. Tes appareils déjà connectés restent prêts à l’emploi.
+              </> : <>
+                Sur ton téléphone : ouvre CADENCE → Réglages → « J’ai déjà un coffre »,
+                puis colle ton jeton et cet identifiant de coffre.
+              </>}
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               <Mono style={{ fontSize: 11.5, color: C.accent, wordBreak: 'break-all' }}>{sync.config.gistId}</Mono>
@@ -963,20 +972,31 @@ function SyncSettings({ sync }) {
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ fontFamily: SANS, fontSize: 12.5, color: C.dim, lineHeight: 1.6, maxWidth: 640 }}>
-            Garde les mêmes données sur ton téléphone et ton ordinateur. CADENCE n’a
-            toujours <b>aucun serveur</b> : tes données sont déposées dans un
-            <b> gist privé de ton propre compte GitHub</b> — tu peux le consulter,
-            le révoquer ou le supprimer quand tu veux. Le jeton reste sur cet
-            appareil et n’est <b>jamais</b> inclus dans un export JSON.
+            {sync.readOnly ? <>
+              Ton suivi se charge automatiquement. Pour noter une révision ou modifier
+              tes données, autorise cet appareil une seule fois avec ton jeton GitHub.
+              Il reste sur cet appareil, jamais dans le site public ni dans les exports.
+            </> : <>
+              Garde les mêmes données sur ton téléphone et ton ordinateur dans un gist
+              de ton compte GitHub. Le jeton reste sur cet appareil et n’est jamais
+              inclus dans un export JSON.
+            </>}
           </div>
+
+          {sync.readOnly && <div role="status" style={{ color: sync.error ? C.warn : C.dim }}>
+            {sync.error || (at ? `Suivi actualisé à ${at}` : 'Chargement du suivi…')}
+          </div>}
 
           {!mode && (
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              <Btn variant="primary" onClick={() => setMode('create')}>
+              {!sync.sharedVault && <Btn variant="primary" onClick={() => setMode('create')}>
                 <Cloud size={14} /> Activer la synchronisation
-              </Btn>
-              <Btn onClick={() => setMode('join')}>
-                <Smartphone size={14} /> J’ai déjà un coffre
+              </Btn>}
+              <Btn variant={sync.sharedVault ? 'primary' : undefined} onClick={() => {
+                setGistId(sync.config?.gistId || sync.sharedVault?.gistId || '');
+                setMode('join');
+              }}>
+                <Smartphone size={14} /> {sync.sharedVault ? 'Activer les modifications' : 'J’ai déjà un coffre'}
               </Btn>
             </div>
           )}
@@ -1001,7 +1021,7 @@ function SyncSettings({ sync }) {
                   fontFamily: MONO, fontSize: 12, color: C.text, background: C.inset,
                   border: `1px solid ${C.line2}`, borderRadius: 7, padding: '8px 10px', width: '100%', boxSizing: 'border-box',
                 }} />
-              {mode === 'join' && (
+              {mode === 'join' && !sync.sharedVault && (
                 <input type="text" value={gistId} onChange={(e) => setGistId(e.target.value)}
                   aria-label="identifiant du coffre" placeholder="identifiant du coffre (copié depuis l’autre appareil)"
                   autoComplete="off" spellCheck={false}
@@ -1016,7 +1036,7 @@ function SyncSettings({ sync }) {
                     ? sync.connect(token.trim())
                     : sync.join(token.trim(), gistId.trim())))}>
                   {busy ? <RefreshCw size={14} className="cad-spin" /> : <Cloud size={14} />}
-                  {mode === 'create' ? 'Créer mon coffre privé' : 'Rejoindre le coffre'}
+                  {mode === 'create' ? 'Créer mon coffre privé' : sync.sharedVault ? 'Autoriser cet appareil' : 'Rejoindre le coffre'}
                 </Btn>
                 <Btn variant="bare" onClick={() => { setMode(null); setToken(''); setGistId(''); }}
                   style={{ color: C.faint, fontSize: 12 }}>annuler</Btn>
@@ -1268,7 +1288,7 @@ function enrichChapter(raw, exams, settings, today) {
   return { ...raw, ...m, raw, axisInfo: axisInfoOf(m, raw) };
 }
 
-export default function Cadence() {
+export default function Cadence({ sharedVault = import.meta.env.MODE === 'test' ? null : SHARED_VAULT } = {}) {
   const store = useMemo(() => makeStore(), []);
   const initialLoad = useMemo(() => loadCadenceState(store), [store]);
   const [state, setState] = useState(initialLoad.state);
@@ -1299,7 +1319,7 @@ export default function Cadence() {
     stateRef.current = merged;
     setState(merged);
   }, []);
-  const sync = useSync({ store, getState: getSyncState, applyMerged: applyMergedState });
+  const sync = useSync({ store, getState: getSyncState, applyMerged: applyMergedState, sharedVault });
   useSyncTriggers({
     configured: sync.configured,
     signature: contentSignature(state),
@@ -1413,13 +1433,23 @@ export default function Cadence() {
   };
 
   /* ----- Mutations ----- */
+  const requireEditing = (fn) => (...args) => {
+    if (sync.readOnly) {
+      setToast({ text: 'Consultation seule. Active les modifications dans Réglages pour enregistrer une action.' });
+      return false;
+    }
+    return fn(...args);
+  };
   // Chaque modification faite ici est horodatée : c'est ce qui permet à la
   // fusion multi-appareils de départager deux versions d'un même élément.
-  const patch = (fn) => setState((prev) => {
+  const patch = (fn) => {
+    if (sync.readOnly) return;
+    setState((prev) => {
     const next = stampState(fn(prev), deviceIdRef.current);
     stateRef.current = next;
     return next;
-  });
+    });
+  };
 
   const saveRevisionPoints = (unitId, baseline, draft) => {
     const unit = stateRef.current.chapters.find((chapter) => chapter.id === unitId && isReviewUnit(chapter));
@@ -2099,6 +2129,17 @@ export default function Cadence() {
       )}
 
       <main style={{ maxWidth: 1000, margin: '0 auto', padding: '18px 16px 72px' }}>
+        {sync.readOnly && <div role="status" style={{
+          marginBottom: 16, padding: '10px 14px', border: `1px solid ${C.line}`,
+          borderRadius: 9, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', fontSize: 14,
+        }}>
+          <Lock size={15} />
+          <span style={{ flex: 1 }}>Consultation — ton suivi s’actualise automatiquement.</span>
+          <Btn onClick={() => setTab('settings')}>Passer en édition</Btn>
+          {(sync.error || sync.updatesError) && <span style={{ color: C.warn, flexBasis: '100%' }}>
+            {sync.error || sync.updatesError}
+          </span>}
+        </div>}
         <div key={tab} className="cad-view">
           {tab === 'today' && (
             <TodayView
@@ -2110,10 +2151,10 @@ export default function Cadence() {
               testSuggestions={testSuggestions}
               nextExam={nextExam} annalesBanners={annalesBanners} debriefs={debriefs}
               exportStale={exportStale}
-              onGrade={gradeEvidence} onDismissDebrief={dismissDebrief}
-              onRecordCourseTest={recordCourseTest}
-              onExtendCourseTest={extendCourseTest}
-              onSetPosition={setChapterPosition}
+              onGrade={requireEditing(gradeEvidence)} onDismissDebrief={requireEditing(dismissDebrief)}
+              onRecordCourseTest={requireEditing(recordCourseTest)}
+              onExtendCourseTest={requireEditing(extendCourseTest)}
+              onSetPosition={requireEditing(setChapterPosition)}
               onUseDoc={useChapterDoc}
               onGoSubjects={goToSubjects}
             />
@@ -2127,11 +2168,11 @@ export default function Cadence() {
             <RoutinesView today={today} subjects={coreSubjects}
               courseTests={courseTests} courseTestLog={courseTestLog}
               routineItems={routineItems} routineLog={routineLog} habitLog={habitLog}
-              onUpdateTarget={updateRoutineTarget}
-              onAdjustCounter={adjustRoutineCounter}
-              onAdjustHabit={adjustHabitCounter} onToggleDailyHabit={toggleDailyHabit}
-              onAddItem={addRoutineItem} onUpdateItem={updateRoutineItem}
-              onToggleItem={toggleRoutineItemToday} onDeleteItem={deleteRoutineItem}
+              onUpdateTarget={requireEditing(updateRoutineTarget)}
+              onAdjustCounter={requireEditing(adjustRoutineCounter)}
+              onAdjustHabit={requireEditing(adjustHabitCounter)} onToggleDailyHabit={requireEditing(toggleDailyHabit)}
+              onAddItem={requireEditing(addRoutineItem)} onUpdateItem={requireEditing(updateRoutineItem)}
+              onToggleItem={requireEditing(toggleRoutineItemToday)} onDeleteItem={requireEditing(deleteRoutineItem)}
               onGoSubjects={goToSubjects} />
           )}
           {tab === 'subjects' && (
@@ -2139,27 +2180,27 @@ export default function Cadence() {
               subjects={subjects} chapters={studyChapters} reviewUnits={reviewUnits}
               exams={exams} courseTests={courseTests} courseTestLog={courseTestLog}
               settings={settings} today={today}
-              onAddSubject={addSubject} onUpdateSubject={updateSubject} onDeleteSubject={deleteSubject}
-              onAddChapter={addChapter} onAddChaptersBulk={addChaptersBulk}
-              onAddResource={addResource} onSetPosition={setChapterPosition} onSetAxes={setChapterAxes}
-              onAddDoc={addChapterDoc} onUseDoc={useChapterDoc} onRemoveDoc={removeChapterDoc}
-              onUpdateChapter={updateChapter} onDeleteChapter={deleteChapter}
-              onSetChapterStatus={setChapterStatus}
-              onSaveRevisionPoints={saveRevisionPoints}
-              onSetLevel={setChapterLevel} onSetAxisMinutes={setChapterAxisMinutes}
-              onAddExam={addExam} onUpdateExam={updateExam} onDeleteExam={deleteExam}
-              onToggleExamChapter={toggleExamChapter} onToggleExamPortion={toggleExamPortion}
-              onAddCourseTest={addCourseTest} onUpdateCourseTest={updateCourseTest}
-              onDeleteCourseTest={deleteCourseTest}
+              onAddSubject={requireEditing(addSubject)} onUpdateSubject={requireEditing(updateSubject)} onDeleteSubject={requireEditing(deleteSubject)}
+              onAddChapter={requireEditing(addChapter)} onAddChaptersBulk={requireEditing(addChaptersBulk)}
+              onAddResource={requireEditing(addResource)} onSetPosition={requireEditing(setChapterPosition)} onSetAxes={requireEditing(setChapterAxes)}
+              onAddDoc={requireEditing(addChapterDoc)} onUseDoc={useChapterDoc} onRemoveDoc={requireEditing(removeChapterDoc)}
+              onUpdateChapter={requireEditing(updateChapter)} onDeleteChapter={requireEditing(deleteChapter)}
+              onSetChapterStatus={requireEditing(setChapterStatus)}
+              onSaveRevisionPoints={requireEditing(saveRevisionPoints)}
+              onSetLevel={requireEditing(setChapterLevel)} onSetAxisMinutes={requireEditing(setChapterAxisMinutes)}
+              onAddExam={requireEditing(addExam)} onUpdateExam={requireEditing(updateExam)} onDeleteExam={requireEditing(deleteExam)}
+              onToggleExamChapter={requireEditing(toggleExamChapter)} onToggleExamPortion={requireEditing(toggleExamPortion)}
+              onAddCourseTest={requireEditing(addCourseTest)} onUpdateCourseTest={requireEditing(updateCourseTest)}
+              onDeleteCourseTest={requireEditing(deleteCourseTest)}
               focusRequest={subjectFocus}
               onFocusHandled={setSubjectFocus}
             />
           )}
           {tab === 'settings' && (
             <SettingsView settings={settings} state={state} chapters={reviewUnits}
-              onUpdate={updateSetting} lastExportAt={lastExportAt} onExported={markExported}
-              onImport={importState} onReset={resetAll} today={today}
-              listBackups={listBackups} onRestore={restoreBackup} sync={sync} />
+              onUpdate={requireEditing(updateSetting)} lastExportAt={lastExportAt} onExported={markExported}
+              onImport={requireEditing(importState)} onReset={requireEditing(resetAll)} today={today}
+              listBackups={listBackups} onRestore={requireEditing(restoreBackup)} sync={sync} />
           )}
         </div>
       </main>

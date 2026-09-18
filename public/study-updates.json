@@ -1,0 +1,215 @@
+{
+  "version": 1,
+  "gistId": "e562b165d8395c534266b0df56baf785",
+  "updates": [
+    {
+      "id": "reparer-date-meca-2026-09-02-v1",
+      "subjectId": "d50f2d04-1c2e-410b-bbf2-3c9eeab652a3",
+      "chapterId": "b38efc54-b5bd-42cd-909f-573edfedb18e",
+      "chapterName": "Cinématique du solide — degrés de liberté et champ des vitesses",
+      "date": "2026-09-02",
+      "label": "Ajout du 02/09/2026 — degrés de liberté, liaisons et vecteur rotation",
+      "docs": []
+    },
+    {
+      "id": "recap-suivi-algebre-matrices-2026-09-15-v1",
+      "subjectId": "e8eccae7-a082-45a8-ac1d-437f80ad172f",
+      "chapterId": "suivi-algebre-matrices",
+      "chapterName": "Applications linéaires et matrices",
+      "date": "2026-09-15",
+      "label": "Ajout du 15/09/2026 — Matrices : inverse, changement de base, noyau et image",
+      "docs": [
+        {
+          "id": "doc-e8eccae7-a082-45a8-ac1d-437f80ad172f-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1lTIe2JFhnC7mPR-Dl_Vp6fI1JsfEMk0N/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-e8eccae7-a082-45a8-ac1d-437f80ad172f-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1TLdrYpNBtx8iHqXIBid09refY-JoGyae/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-e8eccae7-a082-45a8-ac1d-437f80ad172f-anki",
+          "label": "Suivi cumulatif — Anki",
+          "url": "https://drive.google.com/file/d/1E1kDc468Stt1eEpid4Sc65J5d6oucvn-/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-outils-calcul-2026-09-15-v1",
+      "subjectId": "708f74ec-6d4b-41b1-9b3e-a7416fe40d9a",
+      "chapterId": "suivi-outils-calcul",
+      "chapterName": "Calcul intégral et différentiel",
+      "date": "2026-09-15",
+      "label": "Ajout du 15/09/2026 — Moyennes, valeur absolue, récurrence des intégrales, dérivées partielles",
+      "docs": [
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1PdaNH5rYDq6ozvhKyalwTk_00nAfDo4v/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1-Mt80CYq6GiUSgxTLI4zl10uJ3RuPl12/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-anki",
+          "label": "Suivi cumulatif — Anki",
+          "url": "https://drive.google.com/file/d/1XU8DjV0svWAnb_spm_VobAgtzMqd5Bxj/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-b38efc54-b5bd-42cd-909f-573edfedb18e-2026-09-15-v1",
+      "subjectId": "d50f2d04-1c2e-410b-bbf2-3c9eeab652a3",
+      "chapterId": "b38efc54-b5bd-42cd-909f-573edfedb18e",
+      "chapterName": "Cinématique du solide — degrés de liberté et champ des vitesses",
+      "date": "2026-09-15",
+      "label": "Ajout du 15/09/2026 — Vitesse circulaire, essieu en virage, rotations, centre de masse du cône",
+      "docs": [
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1Tz_Q44bDVO9NYdsvpCJ67gTmTaZhI87I/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1Ha-hT-JyCvj-A8uIsvziEvC3NDt7Jcqe/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-anki",
+          "label": "Suivi cumulatif — Anki",
+          "url": "https://drive.google.com/file/d/1N8mfAhFlAyT-E2PZWmPLmRvV56AQLFe7/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-meca-masses-2026-09-17-v1",
+      "subjectId": "d50f2d04-1c2e-410b-bbf2-3c9eeab652a3",
+      "chapterId": "suivi-meca-masses",
+      "chapterName": "Géométrie des masses et moments d’inertie",
+      "date": "2026-09-17",
+      "label": "Ajout du 17/09/2026 — Huygens–Steiner, disque évidé, cylindre, cône et centre du triangle",
+      "docs": [
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1Tz_Q44bDVO9NYdsvpCJ67gTmTaZhI87I/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1Ha-hT-JyCvj-A8uIsvziEvC3NDt7Jcqe/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-anki",
+          "label": "Suivi cumulatif — Anki",
+          "url": "https://drive.google.com/file/d/1N8mfAhFlAyT-E2PZWmPLmRvV56AQLFe7/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-optique-interferences-2026-09-17-v1",
+      "subjectId": "3f5be8d9-0435-40af-ad46-b11ec7fb5661",
+      "chapterId": "suivi-optique-interferences",
+      "chapterName": "Phase et interférences",
+      "date": "2026-09-17",
+      "label": "Ajout du 17/09/2026 — Interférences de deux ondes planes : franges, interfrange, translation",
+      "docs": [
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1BHwd-HwtGSICp4VjiHS_u0OrYLotPn56/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1sH_zfCcAkoe6K0m0UtAsA5iwbcCWuVDp/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-anki",
+          "label": "Suivi cumulatif — Anki",
+          "url": "https://drive.google.com/file/d/1cxgLESzSJX53SlZEpR246rrbeXzB6i9X/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-outils-calcul-2026-09-16-v1",
+      "subjectId": "708f74ec-6d4b-41b1-9b3e-a7416fe40d9a",
+      "chapterId": "suivi-outils-calcul",
+      "chapterName": "Calcul intégral et différentiel",
+      "date": "2026-09-16",
+      "label": "Ajout du 16/09/2026 — Intégrales multiples : calcul successif, domaine et factorisation",
+      "docs": [
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1PdaNH5rYDq6ozvhKyalwTk_00nAfDo4v/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1-Mt80CYq6GiUSgxTLI4zl10uJ3RuPl12/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-anki",
+          "label": "Suivi cumulatif — Anki",
+          "url": "https://drive.google.com/file/d/1XU8DjV0svWAnb_spm_VobAgtzMqd5Bxj/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-meca-masses-2026-09-16-v1",
+      "subjectId": "d50f2d04-1c2e-410b-bbf2-3c9eeab652a3",
+      "chapterId": "suivi-meca-masses",
+      "chapterName": "Géométrie des masses et moments d’inertie",
+      "date": "2026-09-16",
+      "label": "Ajout du 16/09/2026 — Inertie : axe, distance, dm, symétries et disque",
+      "docs": [
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1Tz_Q44bDVO9NYdsvpCJ67gTmTaZhI87I/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1Ha-hT-JyCvj-A8uIsvziEvC3NDt7Jcqe/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-anki",
+          "label": "Suivi cumulatif — Anki",
+          "url": "https://drive.google.com/file/d/1N8mfAhFlAyT-E2PZWmPLmRvV56AQLFe7/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-optique-interferences-2026-09-16-v1",
+      "subjectId": "3f5be8d9-0435-40af-ad46-b11ec7fb5661",
+      "chapterId": "suivi-optique-interferences",
+      "chapterName": "Phase et interférences",
+      "date": "2026-09-16",
+      "label": "Ajout du 16/09/2026 — Phase, chemin optique, Malus–Dupin et formule de Fresnel",
+      "docs": [
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1BHwd-HwtGSICp4VjiHS_u0OrYLotPn56/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1sH_zfCcAkoe6K0m0UtAsA5iwbcCWuVDp/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-anki",
+          "label": "Suivi cumulatif — Anki",
+          "url": "https://drive.google.com/file/d/1cxgLESzSJX53SlZEpR246rrbeXzB6i9X/view?usp=drivesdk"
+        }
+      ]
+    }
+  ]
+}

@@ -91,6 +91,12 @@ function orderByRecency(a, b) {
   return da >= db ? [a, b] : [b, a];
 }
 
+// Utilisé aussi par le flux de récapitulatifs : une version ancienne du site
+// peut avoir modifié un réglage sans avoir encore reçu les nouveaux ajouts.
+export function preferredState(a, b) {
+  return orderByRecency(a, b)[0];
+}
+
 /* ------------------------------------------------------------------ *
  *  Pierres tombales
  * ------------------------------------------------------------------ */
@@ -316,6 +322,7 @@ export function mergeStates(a, b) {
   return {
     ...hi,
     version: Math.max(a.version || 0, b.version || 0),
+    appliedStudyUpdates: [...new Set([...(a.appliedStudyUpdates || []), ...(b.appliedStudyUpdates || [])])].sort(),
     subjects,
     exams: mergeById(hi.exams, lo.exams, deleted.exams)
       .map((e) => ({
