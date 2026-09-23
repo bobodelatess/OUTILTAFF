@@ -103,8 +103,8 @@ describe('difficulté', () => {
     expect(initialDifficulty(4)).toBeCloseTo(3.932, 3);
   });
   it('Échec augmente D, Facile la baisse, bornes 1..10', () => {
-    expect(nextDifficulty(5, 1)).toBeCloseTo(6.706, 2);
-    expect(nextDifficulty(5, 4)).toBeCloseTo(4.097, 2);
+    expect(nextDifficulty(5, 1)).toBeCloseTo(6.7443708, 6);
+    expect(nextDifficulty(5, 4)).toBeCloseTo(4.1353383, 6);
     expect(nextDifficulty(10, 1)).toBeLessThanOrEqual(10);
     expect(nextDifficulty(1, 4)).toBeGreaterThanOrEqual(1);
   });
@@ -133,12 +133,12 @@ describe('applyRecall', () => {
     expect(fail.difficulty).toBeGreaterThan(5);
     expect(fail.lastReviewed).toBe(TODAY);
   });
-  it('jamais testé : retard supposé selon le niveau initial', () => {
+  it('jamais testé : première mesure sans fabriquer de retard selon le niveau déclaré', () => {
     const rec = { stability: 10, difficulty: 5, lastReviewed: null };
-    // « Jamais vu » suppose plus de retard -> R plus bas -> gain d'espacement plus fort
     const sNew = applyRecall(rec, 'new', 3, TODAY).stability;
     const sSolid = applyRecall(rec, 'solid', 3, TODAY).stability;
-    expect(sNew).toBeGreaterThan(sSolid);
+    expect(sNew).toBe(3.7145);
+    expect(sSolid).toBe(sNew);
   });
 });
 

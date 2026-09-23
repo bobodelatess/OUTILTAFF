@@ -113,14 +113,14 @@ export const GRADES = {
 
 // Auto-évaluation d'une portion réellement reprise. Il y a cinq niveaux
 // visibles, mais ils restent distincts des quatre issues FSRS historiques.
-// `grade` sert au moteur ; `targetDays` rend l'effet des cinq choix réellement
-// différent et compréhensible dans l'interface.
+// `grade` sert au moteur ; les trois niveaux fragiles imposent une reprise
+// courte. Les deux réussites suivent ensuite le modèle, sans plancher arbitraire.
 export const MASTERY_LEVELS = [
   { level: 0, label: 'Oublié', grade: 1, targetDays: 1 },
   { level: 1, label: 'Très fragile', grade: 2, targetDays: 2 },
   { level: 2, label: 'Fragile', grade: 2, targetDays: 3 },
-  { level: 3, label: 'Maîtrisé', grade: 3, targetDays: 10 },
-  { level: 4, label: 'Très solide', grade: 4, targetDays: 25 },
+  { level: 3, label: 'Maîtrisé', grade: 3 },
+  { level: 4, label: 'Très solide', grade: 4 },
 ];
 
 // Les trois AXES de preuve (+ metadata). L'ordre = ordre pédagogique
@@ -499,7 +499,8 @@ export function initialDifficulty(grade) {
   return clamp(FSRS_W[4] - FSRS_W[5] * (grade - 3), 1, 10);
 }
 export function nextDifficulty(D, grade) {
-  const target = initialDifficulty(4);
+  // FSRS-4.5 revient vers D0(3) ; D0(4) appartient à FSRS-5.
+  const target = initialDifficulty(3);
   return clamp(FSRS_W[7] * target + (1 - FSRS_W[7]) * (D - FSRS_W[6] * (grade - 3)), 1, 10);
 }
 export function stabilityAfterSuccess(S, D, R, grade) {
@@ -529,12 +530,15 @@ export function closestLevel(D) {
 }
 
 // Applique une note de RAPPEL à un état recall -> nouvel état recall.
-// initialLevel sert quand le chapitre n'a jamais été testé (élapsed supposé).
+// La première observation initialise S et D d'après la note publiée par FSRS.
+// Une auto-déclaration initiale ne constitue pas un historique de rappel.
 export function applyRecall(recall, initialLevel, grade, date) {
+  if (!recall.lastReviewed) {
+    return { stability: FSRS_W[grade - 1], difficulty: initialDifficulty(grade), lastReviewed: date };
+  }
   const S = recall.stability;
   const D = recall.difficulty ?? 5;
-  const since = recall.lastReviewed ? daysBetween(recall.lastReviewed, date) : null;
-  const elapsed = since != null ? since : S * (INITIAL_URGENCY[initialLevel] ?? 2.2);
+  const elapsed = Math.max(0, daysBetween(recall.lastReviewed, date));
   const R = retrievability(elapsed, S);
   const stability = grade === 1
     ? stabilityAfterFailure(S, D, R)
@@ -549,30 +553,28 @@ function stabilityForInterval(days, retention) {
 
 // Cinq niveaux d'auto-évaluation, uniquement après une restitution réelle.
 // Les niveaux 0–2 resserrent explicitement la prochaine reprise ; les niveaux
-// 3–4 posent un minimum puis laissent FSRS allonger l'intervalle avec l'historique.
+// 3–4 suivent FSRS. Ne pas transformer une première réussite en 10 ou 25 jours.
 export function applySelfAssessment(chapter, masteryLevel, date, settings = DEFAULT_SETTINGS) {
   const choice = MASTERY_LEVELS.find((item) => item.level === masteryLevel);
   if (!choice) throw new Error('Niveau de maîtrise inconnu.');
   const before = { ...chapter.recall };
   const base = applyRecall(chapter.recall, chapter.initialLevel, choice.grade, date);
-  const baseDays = Math.max(1, optimalInterval(base.stability, settings.requestRetention));
-  let nextDays;
-  if (choice.level === 0) nextDays = 1;
-  else if (choice.level <= 2) nextDays = clamp(baseDays, choice.level, choice.targetDays);
-  else nextDays = Math.max(baseDays, choice.targetDays);
   const after = {
     ...base,
-    stability: stabilityForInterval(nextDays, settings.requestRetention),
+    ...(choice.level <= 2 ? {
+      stability: stabilityForInterval(choice.targetDays, settings.requestRetention),
+    } : {}),
     source: 'self-assessed',
   };
   const isUnit = isReviewUnit(chapter);
   const priorStreak = Number.isInteger(chapter.reviewSuccessStreak)
     ? chapter.reviewSuccessStreak : 0;
+  const newReviewDay = chapter.recall.lastReviewed !== date;
   const reviewSuccessStreak = choice.level >= 3
-    ? Math.min(REVIEW_INTEGRATION_SUCCESS_STREAK, priorStreak + 1)
+    ? Math.min(REVIEW_INTEGRATION_SUCCESS_STREAK, priorStreak + (newReviewDay ? 1 : 0))
     : 0;
   const integratedAt = isUnit && reviewSuccessStreak >= REVIEW_INTEGRATION_SUCCESS_STREAK
-    ? date : null;
+    ? (chapter.integratedAt || date) : null;
   return {
     chapter: {
       ...chapter,
@@ -684,7 +686,7 @@ export function examCoversItem(exam, item) {
 export function chapterExamFactor(chapter, exams, s, today) {
   let factor = 1, exam = null, examDays = null;
   for (const ex of exams) {
-    if (!examCoversItem(ex, chapter)) continue;
+    if (ex.subjectId !== chapter.subjectId || !examCoversItem(ex, chapter)) continue;
     const j = daysBetween(today, ex.date);
     if (j < 0) continue;
     const mult = examMultiplier(j, s, ex.importance || 'normal');
@@ -821,8 +823,21 @@ export function reviewUnitInfo(unit, s, today, exams = [], courseTests = []) {
   }
   const baseInterval = Math.max(1, Math.round(optimalInterval(rec.stability, s.requestRetention)));
   const pressure = chapterExamFactor(unit, exams, s, today);
-  const interval = Math.max(1, Math.round(baseInterval / Math.sqrt(pressure.factor)));
-  const dueAt = addDays(rec.lastReviewed, interval);
+  let interval = Math.max(1, Math.round(baseInterval / Math.sqrt(pressure.factor)));
+  let dueAt = addDays(rec.lastReviewed, interval);
+  // Même une portion très stable doit pouvoir être reprise AVANT l'épreuve.
+  // Une note saisie après cette préparation ne crée jamais un rappel le jour même.
+  for (const exam of exams) {
+    if (exam.subjectId !== unit.subjectId || !examCoversItem(exam, unit)
+      || examMultiplier(daysBetween(today, exam.date), s, exam.importance || 'normal') <= 1) continue;
+    const earliest = addDays(rec.lastReviewed, 1);
+    const preparation = addDays(exam.date, -2);
+    const deadline = preparation < earliest ? earliest : preparation;
+    if (deadline < dueAt) {
+      dueAt = deadline;
+      interval = Math.max(1, daysBetween(rec.lastReviewed, dueAt));
+    }
+  }
   const since = Math.max(0, daysBetween(rec.lastReviewed, today));
   return {
     tested: true,
@@ -843,10 +858,20 @@ export function forecastReviewUnits(units, s, today, horizon = 28, exams = [], c
   const map = {};
   for (const unit of units || []) {
     if (!isReviewUnit(unit)) continue;
-    const info = reviewUnitInfo(unit, s, today, exams, courseTests);
+    let info = reviewUnitInfo(unit, s, today, exams, courseTests);
     // Les portions reprises par un test cumulatif n'ont pas de date propre.
     if (!isValidISODate(info.dueAt)) continue;
-    const date = info.dueAt < today ? today : info.dueAt;
+    let date = info.dueAt < today ? today : info.dueAt;
+    // La pression d'examen évolue chaque jour. Chercher la première échéance
+    // réellement due évite d'afficher une date qui sera avancée dès demain.
+    if (!info.due && exams.length) {
+      for (let offset = 1; offset <= horizon; offset++) {
+        const candidate = addDays(today, offset);
+        const projected = reviewUnitInfo(unit, s, candidate, exams, courseTests);
+        if (projected.due) { date = candidate; info = projected; break; }
+        if (offset === horizon) date = addDays(today, horizon + 1);
+      }
+    }
     const offset = daysBetween(today, date);
     if (offset < 0 || offset > horizon) continue;
     const cell = map[date] || (map[date] = { count: 0, minutes: 0 });
@@ -1009,7 +1034,8 @@ export function scopesOverlap(a, b, chapters = []) {
 // d'une épreuve qui le couvre réellement le resserre. CADENCE ne produit
 // jamais les questions. Après l'épreuve, ce facteur vaut 1.
 export function nextCourseTestDate(test, ratio, exams, settings, today, chapters = []) {
-  const strongStreak = ratio >= 0.9 ? Math.max(0, test?.strongStreak || 0) + 1 : 0;
+  const strongStreak = ratio >= 0.9
+    ? Math.max(0, test?.strongStreak || 0) + (test?.lastCompletedAt === today ? 0 : 1) : 0;
   const baseDays = courseTestBaseInterval(ratio, strongStreak);
   let factor = 1;
   let relevantExam = null;
@@ -1019,7 +1045,8 @@ export function nextCourseTestDate(test, ratio, exams, settings, today, chapters
     const days = daysBetween(today, exam.date);
     if (days < 0) continue;
     const candidate = examMultiplier(days, settings, exam.importance || 'normal');
-    if (candidate > factor) { factor = candidate; relevantExam = exam; examDays = days; }
+    if (candidate > 1 && (examDays == null || days < examDays)) examDays = days;
+    if (candidate > factor) { factor = candidate; relevantExam = exam; }
   }
   let interval = Math.max(1, Math.round(baseDays / Math.sqrt(factor)));
   if (examDays != null && examDays > 0) interval = Math.min(interval, Math.max(1, examDays - 2));

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
 import { cleanup, fireEvent, render, screen, within, waitFor } from '@testing-library/react';
 import Cadence from './Cadence.jsx';
+import { mergeStates, stampState } from './sync.js';
 import {
   AXIS_MINUTES,
   DEFAULT_SETTINGS,
@@ -85,6 +86,25 @@ describe('accueil simplifié — continuité et consolidations', () => {
       evidenceType: 'recall', axis: 'recall', source: 'self-review',
     });
     expect(screen.getByRole('status').textContent).toContain('Consolidation : « Maîtrisé »');
+  });
+
+  it('annuler une consolidation restaure la portion et résiste à un appareil resté sur la note', async () => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(stateWith({ introducedAt: addDays(todayISO(), -1) })));
+    render(<Cadence />);
+    const initial = readState().chapters.find(c => c.reviewUnit);
+    const review = screen.getByRole('group', { name: /théorème spectral — consolidation/ });
+    fireEvent.click(within(review).getByRole('button', { name: 'Maîtrisé' }));
+    await waitFor(() => expect(readState().reviewLog).toHaveLength(1));
+    const staleDevice = readState();
+    fireEvent.click(within(screen.getByRole('status')).getByRole('button', { name: /Annuler/ }));
+    await waitFor(() => expect(readState().reviewLog).toHaveLength(0));
+    const undone = readState();
+    expect(undone.archivedReviews.map(r => r.id)).toContain(staleDevice.reviewLog[0].id);
+    expect(undone.chapters.find(c => c.reviewUnit).recall).toEqual(initial.recall);
+    expect(screen.getByRole('group', { name: /théorème spectral — consolidation/ })).toBeTruthy();
+    const merged = mergeStates(stampState(undone, 'pc', 2), stampState(staleDevice, 'phone', 1));
+    expect(merged.reviewLog).toHaveLength(0);
+    expect(merged.chapters.find(c => c.reviewUnit).recall.lastReviewed).toBeNull();
   });
 
   it('un point libre reste un simple signet ; un ajout daté crée une seule portion interne', async () => {

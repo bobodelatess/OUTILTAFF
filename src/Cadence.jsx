@@ -1685,6 +1685,7 @@ export default function Cadence({ sharedVault = import.meta.env.MODE === 'test' 
         ...p,
         chapters: p.chapters.map((c) => (c.id === id ? chapter : c)),
         reviewLog: [...log, entry],
+        archivedReviews: [...(p.archivedReviews || []), ...p.reviewLog.filter(sameSlot)],
       };
     });
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -1706,6 +1707,7 @@ export default function Cadence({ sharedVault = import.meta.env.MODE === 'test' 
         chapters: p.chapters.map((c) => (c.id === entry.chapterId
           ? { ...c, [axis]: { ...entry.before }, ...(entry.lifecycleBefore || {}) } : c)),
         reviewLog: p.reviewLog.filter((r) => r.id !== entryId),
+        archivedReviews: [...(p.archivedReviews || []), entry],
       };
     });
     setToast(null);
@@ -1814,7 +1816,9 @@ export default function Cadence({ sharedVault = import.meta.env.MODE === 'test' 
     const currentTest = courseTests.find((item) => item.id === testId);
     if (!currentTest) return;
     const ratio = score / maxScore;
-    const next = nextCourseTestDate(currentTest, ratio, exams, settings, today, chapters);
+    const lastResult = latestCourseTestResult(testId, courseTestLog);
+    const next = nextCourseTestDate({ ...currentTest, lastCompletedAt: lastResult?.date },
+      ratio, exams, settings, today, chapters);
     patch((p) => {
       const test = (p.courseTests || []).find((item) => item.id === testId);
       if (!test) return p;

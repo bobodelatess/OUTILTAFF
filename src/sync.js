@@ -12,8 +12,9 @@
  *   2. AUCUNE PERTE DE TEST — le journal est une union par identifiant.
  *      Un test noté sur un appareil ne peut pas être effacé par l'autre.
  *   3. ÉTAT DES AXES RECALCULÉ — après fusion, les trois axes de chaque
- *      chapitre sont rejoués depuis le niveau initial à partir du journal
- *      fusionné. C'est ce qui rend le résultat indépendant de l'ordre :
+ *      chapitre suivent le journal fusionné. Les transitions déjà enregistrées
+ *      sont conservées lorsqu'elles s'enchaînent ; les conflits sont rejoués.
+ *      C'est ce qui rend le résultat indépendant de l'ordre :
  *      deux notes prises en parallèle donnent le même état des deux côtés.
  *   4. SUPPRESSIONS RESPECTÉES — une suppression laisse une pierre tombale
  *      datée (`deleted`), sinon l'union ressusciterait l'élément supprimé.
@@ -148,6 +149,13 @@ const isRecallEvent = (e) => {
   return !t || t === 'recall' || t === 'legacy';
 };
 
+const validRecallSnapshot = (rec) => rec && Number.isFinite(rec.stability)
+  && rec.stability > 0 && Number.isFinite(rec.difficulty)
+  && rec.difficulty >= 1 && rec.difficulty <= 10;
+const sameRecallSnapshot = (a, b) => validRecallSnapshot(a) && validRecallSnapshot(b)
+  && a.stability === b.stability && a.difficulty === b.difficulty
+  && (a.lastReviewed || null) === (b.lastReviewed || null);
+
 // Recalcule les axes d'un chapitre à partir des événements qui le concernent.
 // Un axe sans aucun événement garde son état existant : on ne réinvente pas
 // une donnée héritée (import v3, état `legacy`) qu'aucun test ne documente.
@@ -159,11 +167,20 @@ export function rebuildAxes(chapter, events, settings = DEFAULT_SETTINGS) {
   let recall = chapter.recall;
   if (recallEvents.length) {
     const seed = levelSeed(level, settings);
-    let rec = { stability: seed.stability, difficulty: seed.difficulty, lastReviewed: null };
+    // Un ancien résultat conserve son état mesuré, même après un changement
+    // de réglage ou de moteur. Seuls les événements concurrents sont recalculés.
+    let rec = validRecallSnapshot(recallEvents[0].before)
+      ? { ...recallEvents[0].before }
+      : { stability: seed.stability, difficulty: seed.difficulty, lastReviewed: null };
     for (const e of recallEvents) {
-      rec = Number.isInteger(e.masteryLevel)
-        ? applySelfAssessment({ ...chapter, recall: rec }, e.masteryLevel, e.date, settings).after
-        : applyRecall(rec, chapter.initialLevel, e.grade, e.date);
+      if (sameRecallSnapshot(rec, e.before) && validRecallSnapshot(e.after)
+        && e.after.lastReviewed === e.date) {
+        rec = { ...e.after };
+      } else {
+        rec = Number.isInteger(e.masteryLevel)
+          ? applySelfAssessment({ ...chapter, recall: rec }, e.masteryLevel, e.date, settings).after
+          : applyRecall(rec, chapter.initialLevel, e.grade, e.date);
+      }
     }
     recall = { ...rec, source: 'replayed' };
   }
@@ -181,16 +198,19 @@ export function rebuildAxes(chapter, events, settings = DEFAULT_SETTINGS) {
     const lifecycleEvents = recallEvents.filter((event) => event.lifecycleBefore
       && Number.isInteger(event.masteryLevel));
     if (lifecycleEvents.length) {
-      let reviewSuccessStreak = 0;
-      let integratedAt = null;
-      let lastMasteryLevel = null;
+      const initial = lifecycleEvents[0].lifecycleBefore;
+      let reviewSuccessStreak = initial.reviewSuccessStreak || 0;
+      let integratedAt = initial.integratedAt || null;
+      let lastMasteryLevel = initial.lastMasteryLevel ?? null;
+      let previousDate = lifecycleEvents[0].before?.lastReviewed || null;
       for (const event of lifecycleEvents) {
         lastMasteryLevel = event.masteryLevel;
         reviewSuccessStreak = event.masteryLevel >= 3
-          ? Math.min(REVIEW_INTEGRATION_SUCCESS_STREAK, reviewSuccessStreak + 1)
+          ? Math.min(REVIEW_INTEGRATION_SUCCESS_STREAK, reviewSuccessStreak + (event.date !== previousDate ? 1 : 0))
           : 0;
         integratedAt = reviewSuccessStreak >= REVIEW_INTEGRATION_SUCCESS_STREAK
-          ? event.date : null;
+          ? (integratedAt || event.date) : null;
+        previousDate = event.date;
       }
       lifecycle = { reviewSuccessStreak, integratedAt, lastMasteryLevel };
     }

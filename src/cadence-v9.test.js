@@ -50,7 +50,7 @@ describe('v10 — cycle de consolidation', () => {
       const reviewed = applySelfAssessment(unit, level, TODAY, S).chapter;
       return reviewUnitInfo(reviewed, S, TODAY).interval;
     });
-    expect(intervals).toEqual([1, 2, 3, 10, 25]);
+    expect(intervals).toEqual([1, 2, 3, 4, 14]);
   });
 
   it('réserve 25 minutes à J+1 puis 8 minutes aux rappels espacés', () => {

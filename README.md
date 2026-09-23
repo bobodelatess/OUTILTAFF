@@ -120,6 +120,17 @@ utilise les équations FSRS-4.5 avec leurs poids publiés par défaut et un seui
 de rappel réglable. Il s'agit d'une estimation de mémoire, jamais d'une
 probabilité de réussir un examen.
 
+Le premier résultat initialise la stabilité avec le poids de la note, sans
+inventer un délai de rappel antérieur. La difficulté revient vers D0(3),
+conformément à [FSRS-4.5](https://github.com/open-spaced-repetition/awesome-fsrs/wiki/The-Algorithm#fsrs-45).
+Les trois niveaux fragiles imposent un retour à J+1, J+2 ou J+3 ; les deux
+niveaux autonomes suivent ensuite la stabilité calculée et le seuil choisi.
+Ces retours courts sont une règle pédagogique de Cadence ajoutée au modèle.
+Une seconde validation le même jour ne compte pas comme une nouvelle réussite
+espacée. Les transitions historiques déjà enregistrées sont conservées lors
+de la synchronisation ; les notes annulées ou remplacées restent archivées
+pour empêcher qu'un autre appareil les réintroduise.
+
 La trace est conservée à chaque reprise (`source: self-review`) et se
 synchronise comme le reste du journal. L'accueil n'affiche pas une jauge de
 maîtrise permanente : la catégorie n'est demandée que lorsqu'une consolidation
@@ -162,11 +173,17 @@ La prochaine date suit les seuils suivants :
 | 16–17/20 | J+7 |
 | 18–20/20 | J+14 |
 
-Deux résultats excellents successifs sur le même périmètre l'écartent à J+30,
+Deux résultats excellents successifs sur des jours distincts et sur le même périmètre l'écartent à J+30,
 puis à J+60 après une nouvelle réussite. Une modification du périmètre remet
 cette série à zéro. Une épreuve couvrant réellement le même périmètre peut
 resserrer l'intervalle. Le résultat ne modifie jamais l'auto-évaluation des
 portions.
+
+Chaque épreuve dans l’horizon de préparation couvrant le contenu impose aussi un rappel au plus tard
+deux jours avant l'épreuve, sans placer une nouvelle reprise avant le lendemain
+du dernier résultat. La prévision du calendrier tient compte de la pression
+qui augmente à l'approche de la date. Sans date d'épreuve enregistrée, aucune
+échéance d'examen n'est inventée.
 
 À partir de trois nouvelles sections non couvertes d'un même chapitre (ou d'au
 moins deux sections dont la plus ancienne date de trois jours), CADENCE propose
