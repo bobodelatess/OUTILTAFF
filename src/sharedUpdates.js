@@ -16,6 +16,20 @@ export function validateStudyUpdates(feed, gistId) {
     throw new Error('Le fichier des récapitulatifs ne correspond pas à ce coffre.');
   }
   const ids = new Set();
+  const subjectIds = new Set();
+  if (feed.subjects != null && (!Array.isArray(feed.subjects) || feed.subjects.length > 100)) {
+    throw new Error('La liste des nouvelles matières est invalide.');
+  }
+  for (const subject of feed.subjects || []) {
+    if (!subject || !['id', 'name'].every((key) => typeof subject[key] === 'string'
+      && subject[key].trim() && subject[key].length <= 500)
+      || subjectIds.has(subject.id) || !['core', 'parallel'].includes(subject.type)
+      || typeof subject.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(subject.color)
+      || Object.keys(subject).some((key) => !['id', 'name', 'type', 'color'].includes(key))) {
+      throw new Error('Une nouvelle matière du récapitulatif est invalide.');
+    }
+    subjectIds.add(subject.id);
+  }
   for (const u of feed.updates) {
     if (!u || !['id', 'subjectId', 'chapterId', 'chapterName', 'label'].every(
       (key) => typeof u[key] === 'string' && u[key].trim() && u[key].length <= 500,
@@ -37,12 +51,20 @@ export function applyStudyUpdates(state, feed, gistId, knownAppliedIds = state.a
   validateStudyUpdates(feed, gistId);
   const known = new Set(knownAppliedIds);
   const applied = new Set(state.appliedStudyUpdates || []);
+  const subjects = state.subjects.slice();
   let chapters = state.chapters.slice();
   let changed = false;
   for (const u of feed.updates.slice().sort((a, b) => a.date.localeCompare(b.date))) {
     if (known.has(u.id)) continue;
-    const subject = state.subjects.find((s) => s.id === u.subjectId);
-    if (!subject) continue; // ne crée pas une matière dans un autre suivi
+    let subject = subjects.find((s) => s.id === u.subjectId);
+    // Une création est explicite, liée au coffre validé et à un ajout daté.
+    // Les réglages d'une matière existante restent ceux de l'utilisateur.
+    if (!subject) {
+      const declared = (feed.subjects || []).find((s) => s.id === u.subjectId);
+      if (!declared || state.deleted?.subjects?.[u.subjectId]) continue;
+      subject = { ...declared, ...(declared.type === 'parallel' ? { weeklyFloor: 0 } : {}) };
+      subjects.push(subject);
+    }
     const unitId = reviewUnitId(u.chapterId, u.date);
     applied.add(u.id);
     changed = true;
@@ -82,7 +104,7 @@ export function applyStudyUpdates(state, feed, gistId, knownAppliedIds = state.a
     }
   }
   if (!changed) return state;
-  const next = { ...state, chapters, appliedStudyUpdates: [...applied].sort() };
+  const next = { ...state, subjects, chapters, appliedStudyUpdates: [...applied].sort() };
   const check = validateImport(next);
   if (!check.ok) throw new Error(`Récapitulatif refusé : ${check.errors[0]}`);
   return next;

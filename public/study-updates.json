@@ -635,6 +635,469 @@
           "url": "https://drive.google.com/file/d/1HYDTY8pvHR5sZvHgzErg-nEwwhH2oIK4/view?usp=drivesdk"
         }
       ]
+    },
+    {
+      "id": "recap-suivi-algebre-matrices-2026-09-23-v2",
+      "subjectId": "e8eccae7-a082-45a8-ac1d-437f80ad172f",
+      "chapterId": "suivi-algebre-matrices",
+      "chapterName": "Applications linéaires et matrices",
+      "date": "2026-09-23",
+      "label": "Ajout du 23/09/2026 — Corrections de Gauss, dimensions, injectivité et surjectivité",
+      "docs": [
+        {
+          "id": "doc-e8eccae7-a082-45a8-ac1d-437f80ad172f-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1TLdrYpNBtx8iHqXIBid09refY-JoGyae/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-e8eccae7-a082-45a8-ac1d-437f80ad172f-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1lTIe2JFhnC7mPR-Dl_Vp6fI1JsfEMk0N/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-e8eccae7-a082-45a8-ac1d-437f80ad172f-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1E1kDc468Stt1eEpid4Sc65J5d6oucvn-/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-algebre-dualite-2026-09-24-v1",
+      "subjectId": "e8eccae7-a082-45a8-ac1d-437f80ad172f",
+      "chapterId": "suivi-algebre-dualite",
+      "chapterName": "Formes linéaires et bases duales",
+      "date": "2026-09-24",
+      "label": "Ajout du 24/09/2026 — Base duale : coordonnées, lignes de l’inverse et preuve",
+      "docs": [
+        {
+          "id": "doc-e8eccae7-a082-45a8-ac1d-437f80ad172f-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1TLdrYpNBtx8iHqXIBid09refY-JoGyae/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-e8eccae7-a082-45a8-ac1d-437f80ad172f-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1lTIe2JFhnC7mPR-Dl_Vp6fI1JsfEMk0N/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-e8eccae7-a082-45a8-ac1d-437f80ad172f-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1E1kDc468Stt1eEpid4Sc65J5d6oucvn-/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-algebre-endomorphismes-2026-09-25-v1",
+      "subjectId": "e8eccae7-a082-45a8-ac1d-437f80ad172f",
+      "chapterId": "suivi-algebre-endomorphismes",
+      "chapterName": "Noyaux, images et décomposition des endomorphismes",
+      "date": "2026-09-25",
+      "label": "Ajout du 25/09/2026 — Images de compositions, noyaux et exercice 12 : fgf = f, gfg = g",
+      "docs": [
+        {
+          "id": "doc-e8eccae7-a082-45a8-ac1d-437f80ad172f-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1TLdrYpNBtx8iHqXIBid09refY-JoGyae/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-e8eccae7-a082-45a8-ac1d-437f80ad172f-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1lTIe2JFhnC7mPR-Dl_Vp6fI1JsfEMk0N/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-e8eccae7-a082-45a8-ac1d-437f80ad172f-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1E1kDc468Stt1eEpid4Sc65J5d6oucvn-/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-outils-taylor-2026-09-24-v1",
+      "subjectId": "708f74ec-6d4b-41b1-9b3e-a7416fe40d9a",
+      "chapterId": "suivi-outils-taylor",
+      "chapterName": "Développements limités et formules de Taylor",
+      "date": "2026-09-24",
+      "label": "Ajout du 24/09/2026 — Petit o, grand O, plans tangents et lecture des approximations",
+      "docs": [
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1-Mt80CYq6GiUSgxTLI4zl10uJ3RuPl12/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1PdaNH5rYDq6ozvhKyalwTk_00nAfDo4v/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1XU8DjV0svWAnb_spm_VobAgtzMqd5Bxj/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-sources",
+          "label": "Sources LaTeX avec illustrations",
+          "url": "https://drive.google.com/file/d/1dmqoBfVhd8a1auzgVz9o5gEPApfRh1Mf/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-outils-calcul-2026-09-25-v1",
+      "subjectId": "708f74ec-6d4b-41b1-9b3e-a7416fe40d9a",
+      "chapterId": "suivi-outils-calcul",
+      "chapterName": "Calcul intégral et différentiel",
+      "date": "2026-09-25",
+      "label": "Ajout du 25/09/2026 — Mini-partiel : différentiabilité, jacobienne inverse et théorème fondamental",
+      "docs": [
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1-Mt80CYq6GiUSgxTLI4zl10uJ3RuPl12/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1PdaNH5rYDq6ozvhKyalwTk_00nAfDo4v/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1XU8DjV0svWAnb_spm_VobAgtzMqd5Bxj/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-sources",
+          "label": "Sources LaTeX avec illustrations",
+          "url": "https://drive.google.com/file/d/1dmqoBfVhd8a1auzgVz9o5gEPApfRh1Mf/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-outils-taylor-2026-09-25-v1",
+      "subjectId": "708f74ec-6d4b-41b1-9b3e-a7416fe40d9a",
+      "chapterId": "suivi-outils-taylor",
+      "chapterName": "Développements limités et formules de Taylor",
+      "date": "2026-09-25",
+      "label": "Ajout du 25/09/2026 — Taylor à deux variables, hessienne, extrema stricts et points selles",
+      "docs": [
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1-Mt80CYq6GiUSgxTLI4zl10uJ3RuPl12/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1PdaNH5rYDq6ozvhKyalwTk_00nAfDo4v/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1XU8DjV0svWAnb_spm_VobAgtzMqd5Bxj/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-708f74ec-6d4b-41b1-9b3e-a7416fe40d9a-sources",
+          "label": "Sources LaTeX avec illustrations",
+          "url": "https://drive.google.com/file/d/1dmqoBfVhd8a1auzgVz9o5gEPApfRh1Mf/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-meca-masses-2026-09-23-v1",
+      "subjectId": "d50f2d04-1c2e-410b-bbf2-3c9eeab652a3",
+      "chapterId": "suivi-meca-masses",
+      "chapterName": "Géométrie des masses et moments d’inertie",
+      "date": "2026-09-23",
+      "label": "Ajout du 23/09/2026 — Barycentres, NH3, choix de l’origine et terme croisé d’inertie",
+      "docs": [
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1Ha-hT-JyCvj-A8uIsvziEvC3NDt7Jcqe/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1Tz_Q44bDVO9NYdsvpCJ67gTmTaZhI87I/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1N8mfAhFlAyT-E2PZWmPLmRvV56AQLFe7/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-sources",
+          "label": "Sources LaTeX avec illustrations",
+          "url": "https://drive.google.com/file/d/1aJpYzsn3_cJLgwgjSCY1QE8hYZIhPrqD/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-meca-masses-2026-09-26-v1",
+      "subjectId": "d50f2d04-1c2e-410b-bbf2-3c9eeab652a3",
+      "chapterId": "suivi-meca-masses",
+      "chapterName": "Géométrie des masses et moments d’inertie",
+      "date": "2026-09-26",
+      "label": "Ajout du 26/09/2026 — Symétries, Guldin et choix des éléments de masse",
+      "docs": [
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1Ha-hT-JyCvj-A8uIsvziEvC3NDt7Jcqe/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1Tz_Q44bDVO9NYdsvpCJ67gTmTaZhI87I/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1N8mfAhFlAyT-E2PZWmPLmRvV56AQLFe7/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-sources",
+          "label": "Sources LaTeX avec illustrations",
+          "url": "https://drive.google.com/file/d/1aJpYzsn3_cJLgwgjSCY1QE8hYZIhPrqD/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-meca-masses-2026-09-27-v1",
+      "subjectId": "d50f2d04-1c2e-410b-bbf2-3c9eeab652a3",
+      "chapterId": "suivi-meca-masses",
+      "chapterName": "Géométrie des masses et moments d’inertie",
+      "date": "2026-09-27",
+      "label": "Ajout du 27/09/2026 — Coquilles, disques, cônes pleins ou creux et matrice d’inertie",
+      "docs": [
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1Ha-hT-JyCvj-A8uIsvziEvC3NDt7Jcqe/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1Tz_Q44bDVO9NYdsvpCJ67gTmTaZhI87I/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1N8mfAhFlAyT-E2PZWmPLmRvV56AQLFe7/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-sources",
+          "label": "Sources LaTeX avec illustrations",
+          "url": "https://drive.google.com/file/d/1aJpYzsn3_cJLgwgjSCY1QE8hYZIhPrqD/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-meca-moment-cinetique-2026-09-27-v1",
+      "subjectId": "d50f2d04-1c2e-410b-bbf2-3c9eeab652a3",
+      "chapterId": "suivi-meca-moment-cinetique",
+      "chapterName": "Moment cinétique et théorèmes de König",
+      "date": "2026-09-27",
+      "label": "Ajout du 27/09/2026 — König, transport du moment cinétique et condition L = IΩ",
+      "docs": [
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1Ha-hT-JyCvj-A8uIsvziEvC3NDt7Jcqe/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1Tz_Q44bDVO9NYdsvpCJ67gTmTaZhI87I/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1N8mfAhFlAyT-E2PZWmPLmRvV56AQLFe7/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-d50f2d04-1c2e-410b-bbf2-3c9eeab652a3-sources",
+          "label": "Sources LaTeX avec illustrations",
+          "url": "https://drive.google.com/file/d/1aJpYzsn3_cJLgwgjSCY1QE8hYZIhPrqD/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-optique-ondes-2026-09-24-v1",
+      "subjectId": "3f5be8d9-0435-40af-ad46-b11ec7fb5661",
+      "chapterId": "suivi-optique-ondes",
+      "chapterName": "Ondes, propagation et fronts d’onde",
+      "date": "2026-09-24",
+      "label": "Ajout du 24/09/2026 — Onde plane : phase, unités, célérité et vecteur d’onde",
+      "docs": [
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1sH_zfCcAkoe6K0m0UtAsA5iwbcCWuVDp/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1BHwd-HwtGSICp4VjiHS_u0OrYLotPn56/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1cxgLESzSJX53SlZEpR246rrbeXzB6i9X/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-sources",
+          "label": "Sources LaTeX avec illustrations",
+          "url": "https://drive.google.com/file/d/1uLKPTrenW0JBnQ5PmAwf-1CuHDjX1y2x/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-optique-interferences-2026-09-24-v1",
+      "subjectId": "3f5be8d9-0435-40af-ad46-b11ec7fb5661",
+      "chapterId": "suivi-optique-interferences",
+      "chapterName": "Phase et interférences",
+      "date": "2026-09-24",
+      "label": "Ajout du 24/09/2026 — Young : approximation d’amplitude, phase et orientation de l’écran",
+      "docs": [
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1sH_zfCcAkoe6K0m0UtAsA5iwbcCWuVDp/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1BHwd-HwtGSICp4VjiHS_u0OrYLotPn56/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1cxgLESzSJX53SlZEpR246rrbeXzB6i9X/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-sources",
+          "label": "Sources LaTeX avec illustrations",
+          "url": "https://drive.google.com/file/d/1uLKPTrenW0JBnQ5PmAwf-1CuHDjX1y2x/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-optique-ondes-2026-09-25-v1",
+      "subjectId": "3f5be8d9-0435-40af-ad46-b11ec7fb5661",
+      "chapterId": "suivi-optique-ondes",
+      "chapterName": "Ondes, propagation et fronts d’onde",
+      "date": "2026-09-25",
+      "label": "Ajout du 25/09/2026 — Source sphérique décentrée et signe du déphasage",
+      "docs": [
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1sH_zfCcAkoe6K0m0UtAsA5iwbcCWuVDp/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1BHwd-HwtGSICp4VjiHS_u0OrYLotPn56/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1cxgLESzSJX53SlZEpR246rrbeXzB6i9X/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-sources",
+          "label": "Sources LaTeX avec illustrations",
+          "url": "https://drive.google.com/file/d/1uLKPTrenW0JBnQ5PmAwf-1CuHDjX1y2x/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-optique-ondes-2026-09-26-v1",
+      "subjectId": "3f5be8d9-0435-40af-ad46-b11ec7fb5661",
+      "chapterId": "suivi-optique-ondes",
+      "chapterName": "Ondes, propagation et fronts d’onde",
+      "date": "2026-09-26",
+      "label": "Ajout du 26/09/2026 — Fronts d’onde : normale, longueur d’onde et période selon Ox",
+      "docs": [
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1sH_zfCcAkoe6K0m0UtAsA5iwbcCWuVDp/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1BHwd-HwtGSICp4VjiHS_u0OrYLotPn56/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1cxgLESzSJX53SlZEpR246rrbeXzB6i9X/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-3f5be8d9-0435-40af-ad46-b11ec7fb5661-sources",
+          "label": "Sources LaTeX avec illustrations",
+          "url": "https://drive.google.com/file/d/1uLKPTrenW0JBnQ5PmAwf-1CuHDjX1y2x/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-anglais-expression-2026-09-23-v1",
+      "subjectId": "7efb6b5c-e467-48c5-9533-0486e47c3c49",
+      "chapterId": "suivi-anglais-expression",
+      "chapterName": "Expression écrite et orale en anglais",
+      "date": "2026-09-23",
+      "label": "Ajout du 23/09/2026 — Higher education : sophomore, major et contrôle des corrections du quiz",
+      "docs": [
+        {
+          "id": "doc-7efb6b5c-e467-48c5-9533-0486e47c3c49-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1Q5XkbhjegqECdrw0ti6sSrXwf7_Kyl1Y/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-7efb6b5c-e467-48c5-9533-0486e47c3c49-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/18PD7tcrTgQAALjuvGTAsj2WIbPzFAWrS/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-7efb6b5c-e467-48c5-9533-0486e47c3c49-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1HYDTY8pvHR5sZvHgzErg-nEwwhH2oIK4/view?usp=drivesdk"
+        }
+      ]
+    },
+    {
+      "id": "recap-suivi-clifford-distance-locale-2026-09-23-v1",
+      "subjectId": "suivi-projet-tore-clifford",
+      "chapterId": "suivi-clifford-distance-locale",
+      "chapterName": "Distances locales sur le tore de Clifford",
+      "date": "2026-09-23",
+      "label": "Ajout du 23/09/2026 — Développement local de la distance, coefficient 1/3 et portée du résultat",
+      "docs": [
+        {
+          "id": "doc-suivi-projet-tore-clifford-pdf",
+          "label": "Suivi cumulatif — PDF",
+          "url": "https://drive.google.com/file/d/1VuMJmCcDIBynJm0925M8T1l5AWst-oui/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-suivi-projet-tore-clifford-tex",
+          "label": "Suivi cumulatif — LaTeX",
+          "url": "https://drive.google.com/file/d/1GmBZhWUIXRGroV2C4k5FOJaCvuYdcGeD/view?usp=drivesdk"
+        },
+        {
+          "id": "doc-suivi-projet-tore-clifford-anki",
+          "label": "Points personnels — Anki",
+          "url": "https://drive.google.com/file/d/1XXqN_4297-N4wBSHOpaiPUqVqWE8AQUa/view?usp=drivesdk"
+        }
+      ]
+    }
+  ],
+  "subjects": [
+    {
+      "id": "suivi-projet-tore-clifford",
+      "name": "Projet tore de Clifford",
+      "type": "parallel",
+      "color": "#b692e5"
     }
   ]
 }

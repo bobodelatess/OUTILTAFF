@@ -90,4 +90,45 @@ describe('ajouts publiés sur GitHub', () => {
     feed.updates[0].docs[0].url = 'javascript:alert(1)';
     expect(() => applyStudyUpdates(state, feed, 'vault')).toThrow();
   });
+
+  it('crée un projet explicitement déclaré sans toucher aux autres matières ni aux résultats', () => {
+    const { state, feed } = scenario();
+    const project = { id: 'project', name: 'Tore de Clifford', type: 'parallel', color: '#a78bfa' };
+    feed.subjects = [project];
+    feed.updates[0].subjectId = project.id;
+    const next = applyStudyUpdates(state, feed, 'vault');
+    expect(next.subjects.slice(0, state.subjects.length)).toEqual(state.subjects);
+    expect(next.subjects.at(-1)).toEqual({ ...project, weeklyFloor: 0 });
+    expect(next.reviewLog).toBe(state.reviewLog);
+    expect(next.settings).toBe(state.settings);
+    expect(next.chapters.find((c) => c.reviewUnit && c.subjectId === project.id)).toBeTruthy();
+    expect(validateImport(next).ok).toBe(true);
+    expect(applyStudyUpdates(next, feed, 'vault')).toBe(next);
+    expect(() => applyStudyUpdates(state, feed, 'another-vault')).toThrow();
+  });
+
+  it('ne recrée pas un projet supprimé et ne remplace pas son nom ou ses réglages', () => {
+    const { state, feed } = scenario();
+    feed.subjects = [{ id: 'project', name: 'Projet publié', type: 'parallel', color: '#a78bfa' }];
+    feed.updates[0].subjectId = 'project';
+    state.deleted.subjects.project = '2026-09-18';
+    expect(applyStudyUpdates(state, feed, 'vault')).toBe(state);
+    state.deleted.subjects = {};
+    const mine = { id: 'project', name: 'Mon nom', type: 'parallel', weeklyFloor: 7, color: '#123456' };
+    state.subjects.push(mine);
+    const next = applyStudyUpdates(state, feed, 'vault');
+    expect(next.subjects.find((s) => s.id === 'project')).toEqual(mine);
+    expect(next.subjects.filter((s) => s.id === 'project')).toHaveLength(1);
+  });
+
+  it('ignore une matière absente non déclarée et refuse les déclarations incohérentes', () => {
+    const { state, feed } = scenario();
+    feed.updates[0].subjectId = 'unknown';
+    expect(applyStudyUpdates(state, feed, 'vault')).toBe(state);
+    feed.subjects = [{ id: 'unknown', name: 'Projet', type: 'parallel', color: '#a78bfa', settings: {} }];
+    expect(() => applyStudyUpdates(state, feed, 'vault')).toThrow();
+    delete feed.subjects[0].settings;
+    feed.subjects.push({ ...feed.subjects[0] });
+    expect(() => applyStudyUpdates(state, feed, 'vault')).toThrow();
+  });
 });
